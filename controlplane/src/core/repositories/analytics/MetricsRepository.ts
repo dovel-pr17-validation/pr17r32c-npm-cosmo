@@ -1,0 +1,1455 @@
+import {
+  AnalyticsFilter,
+  AnalyticsViewFilterOperator,
+  CustomOptions,
+} from '@wundergraph/cosmo-connect/dist/platform/v1/platform_pb';
+import { DateRange } from '../../../types/index.js';
+import { ClickHouseClient } from '../../clickhouse/index.js';
+import { flipDateRangeValuesIfNeeded } from '../../util.js';
+import { traced } from '../../tracing.js';
+import {
+  BaseFilters,
+  buildAnalyticsViewFilters,
+  buildCoercedFilterSqlStatement,
+  CoercedFilterValues,
+  coerceFilterValues,
+  escapeStringsFromParams,
+  getDateRange,
+  getGranularity,
+  isoDateRangeToTimestamps,
+  parseValue,
+  toISO9075,
+} from './util.js';
+
+interface GetMetricsViewProps {
+  range?: number;
+  dateRange?: DateRange;
+  filters: AnalyticsFilter[];
+  organizationId: string;
+  graphId: string;
+}
+
+interface GetMetricsProps {
+  granule: string;
+  rangeInHours: number;
+  dateRange: {
+    start: number;
+    end: number;
+  };
+  prevDateRange: {
+    start: number;
+    end: number;
+  };
+  whereSql?: string;
+  organizationId: string;
+  graphId: string;
+  queryParams?: CoercedFilterValues;
+}
+
+interface LatencySeries {
+  timestamp: string;
+  value: string;
+  p50?: number;
+  p90?: number;
+  p99?: number;
+}
+
+@traced
+export class MetricsRepository {
+  constructor(private client: ClickHouseClient) {}
+
+  /**
+   * Get request rate metrics
+   */
+  public async getRequestRateMetrics({
+    rangeInHours,
+    granule,
+    dateRange,
+    prevDateRange,
+    organizationId,
+    graphId,
+    whereSql,
+    queryParams,
+  }: GetMetricsProps) {
+    // to minutes
+    const multiplier = rangeInHours * 60;
+    flipDateRangeValuesIfNeeded(dateRange);
+
+    // get request rate in last [range]h
+    const queryRate = (start: number, end: number) => {
+      const params = {
+        ...queryParams,
+        startDate: start,
+        endDate: end,
+        organizationId,
+        federatedGraphId: graphId,
+        multiplier,
+      };
+      return this.client.queryPromise<{ value: number | null }>(
+        `
+        SELECT round(sum(total) / {multiplier:Float64}, 4) AS value FROM (
+        SELECT
+          toDateTime({startDate:UInt32}) AS startDate,
+          toDateTime({endDate:UInt32}) AS endDate,
+          sum(TotalRequests) AS total
+        FROM ${this.client.database}.operation_request_metrics_5_30
+        WHERE Timestamp >= startDate AND Timestamp <= endDate
+          AND OrganizationID = {organizationId:String}
+          AND FederatedGraphID = {federatedGraphId:String}
+          ${whereSql ? `AND ${whereSql}` : ''}
+        GROUP BY Timestamp 
+      )
+    `,
+        params,
+      );
+    };
+
+    const requestRate = queryRate(dateRange.start, dateRange.end);
+    const prevRequestRate = queryRate(prevDateRange.start, prevDateRange.end);
+
+    // get top 5 operations in last [range] hours
+    const top5Params = {
+      ...queryParams,
+      startDate: dateRange.start,
+      endDate: dateRange.end,
+      organizationId,
+      federatedGraphId: graphId,
+      multiplier,
+    };
+    const top5 = this.client.queryPromise<{
+      hash: string;
+      name: string;
+      value: string;
+      isPersisted: boolean;
+    }>(
+      `
+      WITH
+        toDateTime({startDate:UInt32}) AS startDate,
+        toDateTime({endDate:UInt32}) AS endDate
+      SELECT hash, name, isPersisted, round(sum(total) / {multiplier:Float64}, 4) AS value FROM (
+        SELECT
+          Timestamp as timestamp,
+          OperationHash as hash,
+          OperationName as name,
+          IF(empty(OperationPersistedID), false, true) as isPersisted,
+          sum(TotalRequests) as total
+        FROM ${this.client.database}.operation_request_metrics_5_30
+        WHERE Timestamp >= startDate AND Timestamp <= endDate
+          AND OrganizationID = {organizationId:String}
+          AND FederatedGraphID = {federatedGraphId:String}
+          ${whereSql ? `AND ${whereSql}` : ''}
+        GROUP BY Timestamp, OperationName, OperationHash, OperationPersistedID
+      ) GROUP BY name, hash, isPersisted ORDER BY value DESC LIMIT 5
+    `,
+      top5Params,
+    );
+
+    // get time series of last [range] hours
+    const querySeries = (start: number, end: number) => {
+      const params = {
+        ...queryParams,
+        startDate: start,
+        endDate: end,
+        organizationId,
+        federatedGraphId: graphId,
+        granule,
+      };
+      return this.client.queryPromise<LatencySeries>(
+        `
+      WITH
+        toStartOfInterval(toDateTime({startDate:UInt32}), INTERVAL {granule:UInt32} MINUTE) AS startDate,
+        toDateTime({endDate:UInt32}) AS endDate
+      SELECT
+          toStartOfInterval(Timestamp, INTERVAL {granule:UInt32} MINUTE) AS timestamp,
+          round(sum(TotalRequests) / {granule:UInt32}, 4) AS value
+      FROM ${this.client.database}.operation_request_metrics_5_30
+      WHERE timestamp >= startDate AND timestamp <= endDate
+        AND OrganizationID = {organizationId:String}
+        AND FederatedGraphID = {federatedGraphId:String}
+        ${whereSql ? `AND ${whereSql}` : ''}
+      GROUP BY timestamp
+      ORDER BY timestamp ASC WITH FILL FROM 
+        toStartOfInterval(toDateTime({startDate:UInt32}), INTERVAL {granule:UInt32} MINUTE)
+      TO
+        toDateTime({endDate:UInt32})
+      STEP INTERVAL {granule:UInt32} minute
+    `,
+        params,
+      );
+    };
+
+    const series = querySeries(dateRange.start, dateRange.end);
+    const prevSeries = querySeries(prevDateRange.start, prevDateRange.end);
+
+    const [medianResponse, prevMedianResponse, top5Response, seriesResponse, prevSeriesResponse] = await Promise.all([
+      requestRate,
+      prevRequestRate,
+      top5,
+      series,
+      prevSeries,
+    ]);
+
+    return {
+      data: {
+        value: parseValue(medianResponse[0]?.value),
+        previousValue: parseValue(prevMedianResponse[0]?.value),
+        top: top5Response.map((v) => ({
+          hash: v.hash,
+          name: v.name,
+          value: parseValue(v.value),
+          isPersisted: v.isPersisted,
+        })),
+        series: this.mapSeries(rangeInHours, seriesResponse, prevSeriesResponse),
+      },
+    };
+  }
+
+  /**
+   * Get latency metrics
+   */
+  public async getLatencyMetrics({
+    rangeInHours,
+    granule,
+    dateRange,
+    prevDateRange,
+    organizationId,
+    graphId,
+    whereSql,
+    queryParams,
+  }: GetMetricsProps) {
+    flipDateRangeValuesIfNeeded(dateRange);
+
+    const queryLatency = (quantile: string, start: number, end: number) => {
+      const params = {
+        ...queryParams,
+        startDate: start,
+        endDate: end,
+        organizationId,
+        federatedGraphId: graphId,
+        quantile: Number.parseFloat(quantile),
+      };
+      return this.client.queryPromise<{ value: number }>(
+        `
+        WITH
+          toDateTime({startDate:UInt32}) AS startDate,
+          toDateTime({endDate:UInt32}) AS endDate
+        SELECT
+          func_rank({quantile:Float64}, BucketCounts) as rank,
+          func_rank_bucket_lower_index(rank, BucketCounts) as b,
+          func_histogram_v2(
+              rank,
+              b,
+              BucketCounts,
+              anyLast(ExplicitBounds)
+          ) as value,
+
+          -- Histogram aggregations
+          sumForEachMerge(BucketCounts) as BucketCounts
+        FROM ${this.client.database}.operation_latency_metrics_5_30
+        WHERE Timestamp >= startDate AND Timestamp <= endDate
+          AND OrganizationID = {organizationId:String}
+          AND FederatedGraphID = {federatedGraphId:String}
+          ${whereSql ? `AND ${whereSql}` : ''}
+    `,
+        params,
+      );
+    };
+
+    const p95 = queryLatency('0.95', dateRange.start, dateRange.end);
+    const prevP95 = queryLatency('0.95', prevDateRange.start, prevDateRange.end);
+
+    // get top 5 operations in last [range] hours
+    const queryTop5 = (quantile: string, start: number, end: number) => {
+      const params = {
+        ...queryParams,
+        startDate: start,
+        endDate: end,
+        organizationId,
+        federatedGraphId: graphId,
+        quantile: Number.parseFloat(quantile),
+      };
+      return this.client.queryPromise<{
+        hash: string;
+        name: string;
+        value: string;
+        isPersisted: boolean;
+      }>(
+        `
+        WITH
+          toDateTime({startDate:UInt32}) AS startDate,
+          toDateTime({endDate:UInt32}) AS endDate
+        SELECT
+          OperationHash as hash,
+          OperationName as name,
+          IF(empty(OperationPersistedID), false, true) as isPersisted,
+          func_rank({quantile:Float64}, BucketCounts) as rank,
+          func_rank_bucket_lower_index(rank, BucketCounts) as b,
+          round(func_histogram_v2(
+              rank,
+              b,
+              BucketCounts,
+              anyLast(ExplicitBounds)
+          ), 2) as value,
+
+          -- Histogram aggregations
+          sumForEachMerge(BucketCounts) as BucketCounts
+        FROM ${this.client.database}.operation_latency_metrics_5_30
+        WHERE Timestamp >= startDate AND Timestamp <= endDate
+          AND OrganizationID = {organizationId:String}
+          AND FederatedGraphID = {federatedGraphId:String}
+          ${whereSql ? `AND ${whereSql}` : ''}
+        GROUP BY OperationName, OperationHash, OperationPersistedID ORDER BY value DESC LIMIT 5
+    `,
+        params,
+      );
+    };
+
+    const top5 = queryTop5('0.95', dateRange.start, dateRange.end);
+
+    // get time series of last [range] hours
+    const querySeries = (quantile: string, start: number, end: number) => {
+      const params = {
+        ...queryParams,
+        startDate: start,
+        endDate: end,
+        organizationId,
+        federatedGraphId: graphId,
+        granule,
+        quantile: Number.parseFloat(quantile),
+      };
+      return this.client.queryPromise<LatencySeries>(
+        `
+        WITH
+          toStartOfInterval(toDateTime({startDate:UInt32}), INTERVAL {granule:UInt32} MINUTE) AS startDate,
+          toDateTime({endDate:UInt32}) AS endDate
+        SELECT
+            toStartOfInterval(Timestamp, INTERVAL {granule:UInt32} MINUTE) AS timestamp,
+            -- Default
+            func_rank({quantile:Float64}, BucketCounts) as rank,
+            func_rank_bucket_lower_index(rank, BucketCounts) as b,
+            func_histogram_v2(
+                rank,
+                b,
+                BucketCounts,
+                anyLast(ExplicitBounds)
+            ) as value,
+            -- P50
+            func_rank(0.50, BucketCounts) as rank50,
+            func_rank_bucket_lower_index(rank50, BucketCounts) as b50,
+            func_histogram_v2(
+                rank50,
+                b50,
+                BucketCounts,
+                anyLast(ExplicitBounds)
+            ) as p50,
+            -- P90
+            func_rank(0.90, BucketCounts) as rank90,
+            func_rank_bucket_lower_index(rank90, BucketCounts) as b90,
+            func_histogram_v2(
+                rank90,
+                b90,
+                BucketCounts,
+                anyLast(ExplicitBounds)
+            ) as p90,
+            -- P99
+            func_rank(0.99, BucketCounts) as rank99,
+            func_rank_bucket_lower_index(rank99, BucketCounts) as b99,
+            func_histogram_v2(
+                rank99,
+                b99,
+                BucketCounts,
+                anyLast(ExplicitBounds)
+            ) as p99,
+
+            -- Histogram aggregations
+            sumForEachMerge(BucketCounts) as BucketCounts
+        FROM ${this.client.database}.operation_latency_metrics_5_30
+        WHERE timestamp >= startDate AND timestamp <= endDate
+          AND OrganizationID = {organizationId:String}
+          AND FederatedGraphID = {federatedGraphId:String}
+          ${whereSql ? `AND ${whereSql}` : ''}
+        GROUP BY timestamp, ExplicitBounds
+        ORDER BY timestamp ASC WITH FILL FROM
+          toStartOfInterval(toDateTime({startDate:UInt32}), INTERVAL {granule:UInt32} MINUTE)
+        TO
+          toDateTime({endDate:UInt32})
+        STEP INTERVAL {granule:UInt32} minute
+      `,
+        params,
+      );
+    };
+
+    const series = querySeries('0.95', dateRange.start, dateRange.end);
+    const prevSeries = querySeries('0.95', prevDateRange.start, prevDateRange.end);
+
+    const [p95Response, prevP95Response, top5Response, seriesResponse, prevSeriesResponse] = await Promise.all([
+      p95,
+      prevP95,
+      top5,
+      series,
+      prevSeries,
+    ]);
+
+    return {
+      data: {
+        value: parseValue(p95Response[0]?.value),
+        previousValue: parseValue(prevP95Response[0]?.value),
+        top: top5Response.map((v) => ({
+          hash: v.hash,
+          name: v.name,
+          value: parseValue(v.value),
+          isPersisted: v.isPersisted,
+        })),
+        series: this.mapSeries(rangeInHours, seriesResponse, prevSeriesResponse),
+      },
+    };
+  }
+
+  /**
+   * Get error metrics
+   */
+  public async getErrorMetrics({
+    rangeInHours,
+    granule,
+    dateRange,
+    prevDateRange,
+    organizationId,
+    graphId,
+    whereSql,
+    queryParams,
+  }: GetMetricsProps) {
+    flipDateRangeValuesIfNeeded(dateRange);
+
+    // get request rate in last [range]h
+    const queryPercentage = (start: number, end: number) => {
+      const params = {
+        ...queryParams,
+        startDate: start,
+        endDate: end,
+        organizationId,
+        federatedGraphId: graphId,
+      };
+      return this.client.queryPromise<{ errorPercentage: number }>(
+        `
+      WITH
+        toDateTime({startDate:UInt32}) AS startDate,
+        toDateTime({endDate:UInt32}) AS endDate
+      SELECT
+        sum(totalErrors) AS errors,
+        sum(totalRequests) AS requests,
+        if(errors > 0, round(errors / requests * 100, 2), 0) AS errorPercentage
+        FROM (
+          SELECT
+            sum(TotalRequests) as totalRequests,
+            sum(TotalErrors) as totalErrors
+          FROM ${this.client.database}.operation_request_metrics_5_30
+          WHERE Timestamp >= startDate AND Timestamp <= endDate
+          AND OrganizationID = {organizationId:String}
+            AND FederatedGraphID = {federatedGraphId:String}
+            ${whereSql ? `AND ${whereSql}` : ''}
+          GROUP BY Timestamp, OperationName 
+        )
+    `,
+        params,
+      );
+    };
+
+    const value = queryPercentage(dateRange.start, dateRange.end);
+    const prevValue = queryPercentage(prevDateRange.start, prevDateRange.end);
+
+    // get top 5 operations in last [range] hours
+    const top5Params = {
+      ...queryParams,
+      startDate: dateRange.start,
+      endDate: dateRange.end,
+      organizationId,
+      federatedGraphId: graphId,
+    };
+    const top5 = this.client.queryPromise<{
+      hash: string;
+      name: string;
+      value: string;
+      isPersisted: boolean;
+    }>(
+      `
+      WITH
+        toDateTime({startDate:UInt32}) AS startDate,
+        toDateTime({endDate:UInt32}) AS endDate
+      SELECT
+        hash,
+        name,
+        isPersisted,
+        median(errorPercentage) as value
+      FROM (
+        SELECT
+          Timestamp as timestamp,
+          OperationHash as hash,
+          OperationName as name,
+          sum(TotalRequests) as totalRequests,
+          sum(TotalErrors) as totalErrors,
+          if(totalErrors > 0, round(totalErrors / totalRequests * 100, 2), 0) AS errorPercentage,
+          IF(empty(OperationPersistedID), false, true) as isPersisted
+        FROM ${this.client.database}.operation_request_metrics_5_30
+        WHERE Timestamp >= startDate AND Timestamp <= endDate
+          AND OrganizationID = {organizationId:String}
+          AND FederatedGraphID = {federatedGraphId:String}
+          ${whereSql ? `AND ${whereSql}` : ''}
+        GROUP BY Timestamp, OperationName, OperationHash, OperationPersistedID
+      ) GROUP BY name, hash, isPersisted ORDER BY value DESC LIMIT 5
+    `,
+      top5Params,
+    );
+
+    // get time series of last [range] hours
+    const getSeries = (start: number, end: number) => {
+      const params = {
+        ...queryParams,
+        startDate: start,
+        endDate: end,
+        organizationId,
+        federatedGraphId: graphId,
+        granule,
+      };
+      return this.client.queryPromise<LatencySeries>(
+        `
+      WITH
+        toStartOfInterval(toDateTime({startDate:UInt32}), INTERVAL {granule:UInt32} MINUTE) AS startDate,
+        toDateTime({endDate:UInt32}) AS endDate
+      SELECT
+          toStartOfInterval(Timestamp, INTERVAL {granule:UInt32} MINUTE) AS timestamp,
+          sum(TotalErrors) AS errors,
+          sum(TotalRequests) AS requests,
+          if(errors > 0, round(errors / requests * 100, 2), 0) AS value
+      FROM ${this.client.database}.operation_request_metrics_5_30
+      WHERE timestamp >= startDate AND timestamp <= endDate
+        AND OrganizationID = {organizationId:String}
+        AND FederatedGraphID = {federatedGraphId:String}
+        ${whereSql ? `AND ${whereSql}` : ''}
+      GROUP BY timestamp
+      ORDER BY timestamp ASC WITH FILL FROM 
+        toStartOfInterval(toDateTime({startDate:UInt32}), INTERVAL {granule:UInt32} MINUTE)
+      TO
+        toDateTime({endDate:UInt32})
+      STEP INTERVAL {granule:UInt32} minute
+    `,
+        params,
+      );
+    };
+
+    const series = getSeries(dateRange.start, dateRange.end);
+    const prevSeries = getSeries(prevDateRange.start, prevDateRange.end);
+
+    const [valueResponse, prevValueResponse, top5Response, seriesResponse, prevSeriesResponse] = await Promise.all([
+      value,
+      prevValue,
+      top5,
+      series,
+      prevSeries,
+    ]);
+
+    return {
+      data: {
+        value: parseValue(valueResponse[0].errorPercentage),
+        previousValue: parseValue(prevValueResponse[0].errorPercentage),
+        top: top5Response.map((v) => ({
+          hash: v.hash,
+          name: v.name,
+          value: parseValue(v.value),
+          isPersisted: v.isPersisted,
+        })),
+        series: this.mapSeries(rangeInHours, seriesResponse, prevSeriesResponse),
+      },
+    };
+  }
+
+  /**
+   * Get error rate metrics
+   */
+  public async getErrorRateMetrics({
+    dateRange,
+    granule,
+    organizationId,
+    graphId,
+    whereSql,
+    queryParams,
+  }: GetMetricsProps) {
+    flipDateRangeValuesIfNeeded(dateRange);
+
+    const params = {
+      ...queryParams,
+      startDate: dateRange.start,
+      endDate: dateRange.end,
+      organizationId,
+      federatedGraphId: graphId,
+      granule,
+    };
+
+    // get requests in last [range] hours in series of [step]
+    const series = await this.client.queryPromise<{
+      timestamp: string;
+      requestRate: string;
+      errorRate: string;
+    }>(
+      `
+      WITH
+        toStartOfInterval(toDateTime({startDate:UInt32}), INTERVAL {granule:UInt32} MINUTE) AS startDate,
+        toDateTime({endDate:UInt32}) AS endDate
+      SELECT
+          toStartOfInterval(Timestamp, INTERVAL {granule:UInt32} MINUTE) AS timestamp,
+          round(sum(TotalRequests) / {granule:UInt32}, 4) AS requestRate,
+          round(sum(TotalErrors) / {granule:UInt32}, 4) AS errorRate
+      FROM ${this.client.database}.operation_request_metrics_5_30
+      WHERE timestamp >= startDate AND timestamp <= endDate
+        AND OrganizationID = {organizationId:String}
+        AND FederatedGraphID = {federatedGraphId:String}
+        ${whereSql ? `AND ${whereSql}` : ''}
+      GROUP BY timestamp
+      ORDER BY timestamp ASC WITH FILL FROM
+        toStartOfInterval(toDateTime({startDate:UInt32}), INTERVAL {granule:UInt32} MINUTE)
+      TO
+        toDateTime({endDate:UInt32})
+      STEP INTERVAL {granule:UInt32} MINUTE
+    `,
+      params,
+    );
+
+    return {
+      data: {
+        series: series.map((s) => {
+          return {
+            timestamp: String(new Date(s.timestamp + 'Z').getTime()),
+            requestRate: Number.parseFloat(s.requestRate),
+            errorRate: Number.parseFloat(s.errorRate),
+          };
+        }),
+      },
+    };
+  }
+
+  public async getMetricsView(props: GetMetricsViewProps) {
+    const metricsProps = this.getMetricsProps(props);
+
+    const [requests, latency, errors, filters] = await Promise.all([
+      this.getRequestRateMetrics(metricsProps),
+      this.getLatencyMetrics(metricsProps),
+      this.getErrorMetrics(metricsProps),
+      this.getMetricFilters(metricsProps),
+    ]);
+
+    return {
+      resolution: metricsProps.granule,
+      requests: requests.data,
+      latency: latency.data,
+      errors: errors.data,
+      filters,
+    };
+  }
+
+  public async getErrorsView(props: GetMetricsViewProps) {
+    const metricsProps = this.getMetricsProps(props);
+
+    const [errorRate] = await Promise.all([this.getErrorRateMetrics(metricsProps)]);
+
+    return {
+      resolution: metricsProps.granule,
+      errorRate: errorRate.data,
+    };
+  }
+
+  protected getMetricsProps(props: GetMetricsViewProps): GetMetricsProps {
+    const { range, dateRange, filters: selectedFilters, organizationId, graphId } = props;
+    if (dateRange && dateRange.start > dateRange.end) {
+      const tmp = dateRange.start;
+      dateRange.start = dateRange.end;
+      dateRange.end = tmp;
+    }
+
+    const parsedDateRange = isoDateRangeToTimestamps(dateRange, range);
+    const [start, end] = getDateRange(parsedDateRange);
+
+    // diff in hours
+    const diff = (parsedDateRange.end - parsedDateRange.start) / 60 / 60 / 1000;
+    const granule = getGranularity(diff);
+
+    const [prevStart, prevEnd] = getDateRange(parsedDateRange, diff);
+
+    const coercedFilters = coerceFilterValues({}, selectedFilters, this.baseFilters);
+
+    const { whereSql } = buildCoercedFilterSqlStatement({}, coercedFilters.result, coercedFilters.filterMapper, false);
+
+    escapeStringsFromParams(coercedFilters.result);
+
+    return {
+      granule,
+      rangeInHours: diff,
+      dateRange: {
+        start,
+        end,
+      },
+      prevDateRange: {
+        start: prevStart,
+        end: prevEnd,
+      },
+      organizationId,
+      graphId,
+      whereSql,
+      queryParams: coercedFilters.result,
+    };
+  }
+
+  private baseFilters: BaseFilters = {
+    operationName: {
+      dbField: 'OperationName',
+      dbClause: 'where',
+      columnName: 'operationName',
+      title: 'Operation Name',
+      options: [],
+    },
+    operationHash: {
+      dbField: 'OperationHash',
+      dbClause: 'where',
+      columnName: 'operationHash',
+      title: 'Operation Hash',
+      options: [],
+      customOptions: CustomOptions.Text,
+    },
+    operationPersistedId: {
+      dbField: 'OperationPersistedID',
+      dbClause: 'where',
+      columnName: 'operationPersistedId',
+      title: 'Operation Persisted ID',
+      options: [],
+      customOptions: CustomOptions.Text,
+    },
+    clientName: {
+      dbField: 'ClientName',
+      dbClause: 'where',
+      columnName: 'clientName',
+      title: 'Client Name',
+      options: [],
+    },
+    clientVersion: {
+      dbField: 'ClientVersion',
+      dbClause: 'where',
+      columnName: 'clientVersion',
+      title: 'Client Version',
+      options: [],
+    },
+  };
+
+  public async getMetricFilters({ dateRange, organizationId, graphId }: GetMetricsProps) {
+    const filters = { ...this.baseFilters };
+    flipDateRangeValuesIfNeeded(dateRange);
+
+    const query = `
+      WITH
+        toDateTime({startDate:UInt32}) AS startDate,
+        toDateTime({endDate:UInt32}) AS endDate
+      SELECT
+        OperationName as operationName,
+        ClientName as clientName,
+        ClientVersion as clientVersion
+      FROM ${this.client.database}.operation_request_metrics_5_30
+      WHERE Timestamp >= startDate AND Timestamp <= endDate
+        AND OrganizationID = {organizationId:String}
+        AND FederatedGraphID = {federatedGraphId:String}
+      GROUP BY OperationName, ClientName, ClientVersion
+    `;
+
+    const params = {
+      startDate: dateRange.start,
+      endDate: dateRange.end,
+      organizationId,
+      federatedGraphId: graphId,
+    };
+
+    const res = await this.client.queryPromise(query, params);
+
+    const addFilterOption = (filter: string, option: string) => {
+      if (!filters[filter].options) {
+        filters[filter].options = [];
+      }
+
+      let label = option;
+      if (filter === 'clientVersion' && option === 'missing') {
+        label = 'missing';
+      } else if (filter === 'clientName' && option === 'unknown') {
+        label = 'unknown';
+      }
+
+      filters[filter].options.push({
+        label,
+        operator: AnalyticsViewFilterOperator.EQUALS,
+        value: option,
+      });
+    };
+
+    const filterNames = Object.keys(filters);
+    const filterOptions: Record<string, string[]> = {};
+
+    for (const row of res) {
+      for (const filterName of filterNames) {
+        if (row[filterName] !== undefined && !filterOptions[filterName]?.includes(row[filterName])) {
+          filterOptions[filterName] = filterOptions[filterName] || [];
+          filterOptions[filterName].push(row[filterName]);
+          addFilterOption(filterName, row[filterName]);
+        }
+      }
+    }
+
+    return buildAnalyticsViewFilters(
+      {
+        operationName: '',
+        operationHash: '',
+        operationPersistedId: '',
+        clientName: '',
+        clientVersion: '',
+      },
+      filters,
+    );
+  }
+
+  /**
+   * Merges series and previous series into one array, @todo could be handled in query directly.
+   * @param diff
+   * @param series
+   * @param previousSeries
+   * @returns
+   */
+  protected mapSeries(diff: number, series: LatencySeries[] = [], previousSeries?: LatencySeries[]) {
+    return series.map((s) => {
+      const timestamp = new Date(s.timestamp + 'Z').getTime();
+      const prevTimestamp = toISO9075(new Date(timestamp - diff * 60 * 60 * 1000));
+      const prevValue = previousSeries?.find((s) => s.timestamp === prevTimestamp)?.value ?? '0';
+
+      return {
+        timestamp: String(timestamp),
+        value: String(s.value),
+        previousValue: String(Number.parseFloat(prevValue)),
+        p50: s.p50 === undefined ? undefined : String(s.p50),
+        p90: s.p90 === undefined ? undefined : String(s.p90),
+        p99: s.p99 === undefined ? undefined : String(s.p99),
+      };
+    });
+  }
+
+  public async getOperations(
+    props: GetMetricsViewProps & {
+      limit: number;
+      offset?: number;
+      fetchBasedOn?: string; // 'requests', 'latency', or 'errors'
+      sortDirection?: string; // 'asc' or 'desc'
+      searchQuery?: string;
+      deprecatedFields: { name: string; typeNames: string[] }[];
+      includeOperationsWithDeprecatedFieldsOnly: boolean;
+    },
+  ) {
+    const { dateRange: metricsDateRange, organizationId, graphId, whereSql, queryParams } = this.getMetricsProps(props);
+    const sortField = props.fetchBasedOn || 'latency';
+    const sortDirection: 'ASC' | 'DESC' = props.sortDirection === 'asc' ? 'ASC' : 'DESC';
+    const searchQuery = props.searchQuery;
+    const offset = props.offset || 0;
+    const deprecatedFields = props.deprecatedFields;
+    const includeOperationsWithDeprecatedFieldsOnly = props.includeOperationsWithDeprecatedFieldsOnly;
+
+    const deprecatedStart = metricsDateRange.start;
+    const deprecatedEnd = metricsDateRange.end;
+
+    // If we are only fetching operations with deprecated fields and there are no deprecated fields, return an empty array
+    if (includeOperationsWithDeprecatedFieldsOnly && deprecatedFields.length === 0) {
+      return [];
+    }
+
+    // Build search filter SQL
+    let searchSql = '';
+    let searchQueryPattern: string | undefined;
+    if (searchQuery) {
+      searchQueryPattern = `%${searchQuery.toLowerCase()}%`;
+      searchSql = `AND (lower(OperationName) LIKE {searchQueryPattern:String} OR lower(OperationHash) LIKE {searchQueryPattern:String})`;
+    }
+
+    // Exclude introspection queries
+    const introspectionFilter = `AND OperationName != 'IntrospectionQuery'`;
+
+    // Build deprecated fields CTE if we have deprecated fields
+    let deprecatedFieldsCte = '';
+    let deprecatedFieldsJoin = '';
+
+    if (deprecatedFields.length > 0) {
+      // Build the deprecated fields array
+      const deprecatedFieldsArray = deprecatedFields
+        .map((field) => {
+          const escapedName = field.name.replace(/'/g, "''");
+          const quotedTypeNames = field.typeNames.map((tn) => `'${tn.replace(/'/g, "''")}'`).join(', ');
+          return `('${escapedName}', [${quotedTypeNames}])`;
+        })
+        .join(', ');
+
+      deprecatedFieldsCte = `
+        deprecated_fields AS (
+          SELECT
+            field.1 as Name,
+            field.2 as TypeNames
+          FROM (
+            SELECT
+              arrayJoin([ ${deprecatedFieldsArray} ]) as field
+          )
+        ),
+        operations_with_deprecated_fields AS (
+          SELECT DISTINCT
+            OperationHash as operationHash,
+            OperationName as operationName
+          FROM ${this.client.database}.gql_metrics_schema_usage_lite_1d_90d
+          INNER JOIN deprecated_fields AS df
+            ON FieldName = df.Name
+          WHERE 
+            Timestamp >= toStartOfDay(toDateTime({deprecatedStart:UInt32}))
+            AND Timestamp <= toDateTime({deprecatedEnd:UInt32})
+            AND OrganizationID = {organizationId:String}
+            AND FederatedGraphID = {federatedGraphId:String}
+            AND hasAny(TypeNames, df.TypeNames) = 1
+        ),`;
+
+      if (includeOperationsWithDeprecatedFieldsOnly) {
+        // Use INNER JOIN to only get operations that have both metrics and deprecated fields
+        deprecatedFieldsJoin = `
+        INNER JOIN operations_with_deprecated_fields AS dep
+          ON ops.operationHash = dep.operationHash
+          AND ops.operationName = dep.operationName`;
+      } else {
+        deprecatedFieldsJoin = `
+        LEFT JOIN operations_with_deprecated_fields AS dep
+          ON ops.operationHash = dep.operationHash
+          AND ops.operationName = dep.operationName`;
+      }
+    }
+
+    let query: string;
+    let res: Array<{
+      operationHash: string;
+      operationName: string;
+      operationType: string;
+      latency: number;
+      requestCount?: number;
+      errorPercentage?: number;
+      hasDeprecatedFields: number;
+    }>;
+
+    // Build LIMIT/OFFSET clause - always apply pagination at database level
+    const limitOffsetClause = `LIMIT {limit:UInt32} OFFSET {offset:UInt32}`;
+
+    const queryParamsWithPagination = {
+      ...queryParams,
+      limit: props.limit,
+      offset,
+      organizationId,
+      federatedGraphId: graphId,
+      startDate: metricsDateRange.start,
+      endDate: metricsDateRange.end,
+      ...(searchQueryPattern ? { searchQueryPattern } : {}),
+      ...(deprecatedFields.length > 0
+        ? {
+            deprecatedStart,
+            deprecatedEnd,
+          }
+        : {}),
+    };
+
+    if (sortField === 'latency') {
+      query = `
+      WITH
+        toDateTime({startDate:UInt32}) AS startDate,
+        toDateTime({endDate:UInt32}) AS endDate,
+        ${deprecatedFieldsCte}
+        ops AS (
+          SELECT
+            OperationHash as operationHash,
+            OperationName as operationName,
+            OperationType as operationType,
+            func_rank(0.95, BucketCounts) as rank,
+            func_rank_bucket_lower_index(rank, BucketCounts) as b,
+            round(func_histogram_v2(
+                rank,
+                b,
+                BucketCounts,
+                anyLast(ExplicitBounds)
+            ), 2) as latency,
+            -- Histogram aggregations
+            sumForEachMerge(BucketCounts) as BucketCounts
+          FROM ${this.client.database}.operation_latency_metrics_5_30
+          WHERE Timestamp >= startDate AND Timestamp <= endDate
+            AND OrganizationID = {organizationId:String}
+            AND FederatedGraphID = {federatedGraphId:String}
+            AND OperationHash IS NOT NULL AND OperationHash != ''
+            ${whereSql ? `AND ${whereSql}` : ''}
+            ${searchSql}
+            ${introspectionFilter}
+          GROUP BY OperationName, OperationHash, OperationType
+        )
+      SELECT
+        ops.operationHash,
+        ops.operationName,
+        ops.operationType,
+        ops.latency,
+        0 as requestCount,
+        0 as errorPercentage,
+        ${deprecatedFields.length > 0 ? "IF(dep.operationHash IS NOT NULL AND dep.operationHash != '', 1, 0)" : 0} as hasDeprecatedFields
+      FROM ops
+      ${deprecatedFieldsJoin}
+      ORDER BY ops.latency ${sortDirection}
+      ${limitOffsetClause}`;
+
+      res = await this.client.queryPromise(query, queryParamsWithPagination);
+    } else if (sortField === 'requests') {
+      query = `
+      WITH
+        toDateTime({startDate:UInt32}) AS startDate,
+        toDateTime({endDate:UInt32}) AS endDate,
+        ${deprecatedFieldsCte}
+        ops AS (
+          SELECT
+            OperationHash as operationHash,
+            OperationName as operationName,
+            OperationType as operationType,
+            sum(TotalRequests) as requestCount
+          FROM ${this.client.database}.operation_request_metrics_5_30
+          WHERE Timestamp >= startDate AND Timestamp <= endDate
+            AND OrganizationID = {organizationId:String}
+            AND FederatedGraphID = {federatedGraphId:String}
+            AND OperationHash IS NOT NULL AND OperationHash != ''
+            ${whereSql ? `AND ${whereSql}` : ''}
+            ${searchSql}
+            ${introspectionFilter}
+          GROUP BY OperationName, OperationHash, OperationType
+        )
+      SELECT
+        ops.operationHash,
+        ops.operationName,
+        ops.operationType,
+        0 as latency,
+        ops.requestCount,
+        0 as errorPercentage,
+        ${deprecatedFields.length > 0 ? "IF(dep.operationHash IS NOT NULL AND dep.operationHash != '', 1, 0)" : 0} as hasDeprecatedFields
+      FROM ops
+      ${deprecatedFieldsJoin}
+      ORDER BY ops.requestCount ${sortDirection}
+      ${limitOffsetClause}`;
+
+      res = await this.client.queryPromise(query, queryParamsWithPagination);
+    } else {
+      // sortField === 'errors'
+      query = `
+      WITH
+        toDateTime({startDate:UInt32}) AS startDate,
+        toDateTime({endDate:UInt32}) AS endDate,
+        ${deprecatedFieldsCte}
+        ops AS (
+          SELECT
+            OperationHash as operationHash,
+            OperationName as operationName,
+            OperationType as operationType,
+            sum(TotalRequests) as requestCount,
+            sum(TotalErrors) as errorCount,
+            if(sum(TotalRequests) > 0, round(sum(TotalErrors) / sum(TotalRequests) * 100, 2), 0) as errorPercentage
+          FROM ${this.client.database}.operation_request_metrics_5_30
+          WHERE Timestamp >= startDate AND Timestamp <= endDate
+              AND OrganizationID = {organizationId:String}
+              AND FederatedGraphID = {federatedGraphId:String}
+              AND OperationHash IS NOT NULL AND OperationHash != ''
+            ${whereSql ? `AND ${whereSql}` : ''}
+            ${searchSql}
+            ${introspectionFilter}
+          GROUP BY OperationName, OperationHash, OperationType
+        )
+      SELECT
+        ops.operationHash,
+        ops.operationName,
+        ops.operationType,
+        0 as latency,
+        ops.requestCount,
+        ops.errorPercentage,
+        ${deprecatedFields.length > 0 ? "IF(dep.operationHash IS NOT NULL AND dep.operationHash != '', 1, 0)" : 0} as hasDeprecatedFields
+      FROM ops
+      ${deprecatedFieldsJoin}
+      ORDER BY ops.errorPercentage ${sortDirection}
+      ${limitOffsetClause}`;
+
+      res = await this.client.queryPromise(query, queryParamsWithPagination);
+    }
+
+    if (Array.isArray(res)) {
+      return res.map((op) => ({
+        operationHash: op.operationHash,
+        operationName: op.operationName,
+        operationType: op.operationType,
+        latency: op.latency || 0,
+        requestCount: op.requestCount || 0,
+        errorPercentage: op.errorPercentage || 0,
+        hasDeprecatedFields: op.hasDeprecatedFields === 1,
+      }));
+    }
+
+    return [];
+  }
+
+  public async getOperationsCount(
+    props: GetMetricsViewProps & {
+      searchQuery?: string;
+      deprecatedFields: { name: string; typeNames: string[] }[];
+      includeOperationsWithDeprecatedFieldsOnly: boolean;
+    },
+  ) {
+    const { dateRange, organizationId, graphId, whereSql, queryParams } = this.getMetricsProps(props);
+    const searchQuery = props.searchQuery;
+    const deprecatedFields = props.deprecatedFields;
+    const includeOperationsWithDeprecatedFieldsOnly = props.includeOperationsWithDeprecatedFieldsOnly;
+
+    let searchSql = '';
+    let searchQueryPattern: string | undefined;
+    if (searchQuery) {
+      searchQueryPattern = `%${searchQuery.toLowerCase()}%`;
+      searchSql = `AND (lower(OperationName) LIKE {searchQueryPattern:String} OR lower(OperationHash) LIKE {searchQueryPattern:String})`;
+    }
+
+    const introspectionFilter = `AND OperationName != 'IntrospectionQuery'`;
+
+    // Build deprecated fields CTE if we have deprecated fields
+    let deprecatedFieldsCte = '';
+
+    if (includeOperationsWithDeprecatedFieldsOnly && deprecatedFields.length === 0) {
+      return 0;
+    } else if (deprecatedFields.length > 0 && includeOperationsWithDeprecatedFieldsOnly) {
+      // Build the deprecated fields array
+      const deprecatedFieldsArray = deprecatedFields
+        .map((field) => {
+          const escapedName = field.name.replace(/'/g, "''");
+          const quotedTypeNames = field.typeNames.map((tn) => `'${tn.replace(/'/g, "''")}'`).join(', ');
+          return `('${escapedName}', [${quotedTypeNames}])`;
+        })
+        .join(', ');
+
+      deprecatedFieldsCte = `
+        deprecated_fields AS (
+          SELECT
+            field.1 as Name,
+            field.2 as TypeNames
+          FROM (
+            SELECT
+              arrayJoin([ ${deprecatedFieldsArray} ]) as field
+          )
+        ),
+        operations_with_deprecated_fields AS (
+          SELECT DISTINCT
+            OperationHash as operationHash,
+            OperationName as operationName
+          FROM ${this.client.database}.gql_metrics_schema_usage_lite_1d_90d
+          INNER JOIN deprecated_fields AS df
+            ON FieldName = df.Name
+          WHERE 
+            Timestamp >= toStartOfDay(toDateTime({startDate:UInt32}))
+            AND Timestamp <= toDateTime({endDate:UInt32})
+            AND OrganizationID = {organizationId:String}
+            AND FederatedGraphID = {federatedGraphId:String}
+            AND hasAny(TypeNames, df.TypeNames) = 1
+        ),`;
+
+      const query = `
+      WITH
+        toDateTime({startDate:UInt32}) AS startDate,
+        toDateTime({endDate:UInt32}) AS endDate,
+        ${deprecatedFieldsCte}
+        ops AS (
+          SELECT
+            OperationHash as operationHash,
+            OperationName as operationName,
+            OperationType as operationType,
+            sum(TotalRequests) as requestCount,
+            sum(TotalErrors) as errorCount,
+            if(sum(TotalRequests) > 0, round(sum(TotalErrors) / sum(TotalRequests) * 100, 2), 0) as errorPercentage
+          FROM ${this.client.database}.operation_request_metrics_5_30
+          WHERE Timestamp >= startDate AND Timestamp <= endDate
+              AND OrganizationID = {organizationId:String}
+              AND FederatedGraphID = {federatedGraphId:String}
+              AND OperationHash IS NOT NULL AND OperationHash != ''
+            ${whereSql ? `AND ${whereSql}` : ''}
+            ${searchSql}
+            ${introspectionFilter}
+          GROUP BY OperationName, OperationHash, OperationType
+        )
+      SELECT
+        COUNT(*) as count
+      FROM ops
+      INNER JOIN operations_with_deprecated_fields AS dep
+        ON ops.operationHash = dep.operationHash
+        AND ops.operationName = dep.operationName
+      `;
+
+      const res: {
+        count: number;
+      }[] = await this.client.queryPromise(query, {
+        ...queryParams,
+        organizationId,
+        federatedGraphId: graphId,
+        startDate: dateRange.start,
+        endDate: dateRange.end,
+        ...(searchQueryPattern ? { searchQueryPattern } : {}),
+      });
+
+      return res[0].count;
+    } else {
+      const query = `
+    WITH
+      toDateTime({startDate:UInt32}) AS startDate,
+      toDateTime({endDate:UInt32}) AS endDate,
+      ops AS (
+        SELECT
+          OperationHash,
+          OperationName,
+          OperationType
+        FROM ${this.client.database}.operation_latency_metrics_5_30
+        WHERE Timestamp >= startDate AND Timestamp <= endDate
+          AND OrganizationID = {organizationId:String}
+          AND FederatedGraphID = {federatedGraphId:String}
+          AND OperationHash IS NOT NULL AND OperationHash != ''
+          ${whereSql ? `AND ${whereSql}` : ''}
+          ${searchSql}
+          ${introspectionFilter}
+        GROUP BY OperationHash, OperationName, OperationType
+      )
+    SELECT COUNT(*) as count
+    FROM ops
+    `;
+
+      const res: {
+        count: number;
+      }[] = await this.client.queryPromise(query, {
+        ...queryParams,
+        organizationId,
+        federatedGraphId: graphId,
+        startDate: dateRange.start,
+        endDate: dateRange.end,
+        ...(searchQueryPattern ? { searchQueryPattern } : {}),
+      });
+
+      return res[0].count;
+    }
+  }
+
+  public async getClients(props: GetMetricsViewProps) {
+    const { dateRange, organizationId, graphId } = this.getMetricsProps(props);
+
+    const query = `
+    WITH
+      toDateTime({startDate:UInt32}) AS startDate,
+      toDateTime({endDate:UInt32}) AS endDate
+    SELECT
+      ClientName as name
+    FROM ${this.client.database}.operation_latency_metrics_5_30
+    PREWHERE Timestamp >= startDate AND Timestamp <= endDate
+      AND OrganizationID = {organizationId:String}
+      AND FederatedGraphID = {federatedGraphId:String}
+    GROUP BY ClientName
+    ORDER BY max(Timestamp) DESC
+    LIMIT 100`;
+
+    const params = {
+      startDate: dateRange.start,
+      endDate: dateRange.end,
+      organizationId,
+      federatedGraphId: graphId,
+    };
+
+    const res: {
+      name: string;
+    }[] = await this.client.queryPromise(query, params);
+
+    if (Array.isArray(res)) {
+      return res.filter((r) => r.name !== '');
+    }
+
+    return [];
+  }
+
+  public async getClientsOfOperation({
+    dateRange,
+    organizationId,
+    graphId,
+    operationHash,
+    operationName,
+  }: {
+    dateRange: {
+      start: number;
+      end: number;
+    };
+    organizationId: string;
+    graphId: string;
+    operationHash: string;
+    operationName?: string;
+  }): Promise<
+    Array<{
+      name: string;
+      version: string;
+      requestCount: number;
+      lastUsed: string;
+    }>
+  > {
+    const query = `
+    WITH
+      toDateTime({startTimestamp:UInt32}) AS startDate,
+      toDateTime({endTimestamp:UInt32}) AS endDate
+    SELECT
+      ClientName as name,
+      ClientVersion as version,
+      sum(TotalRequests) as requestCount,
+      max(Timestamp) as lastUsed
+    FROM ${this.client.database}.operation_request_metrics_5_30
+    WHERE Timestamp >= startDate AND Timestamp <= endDate
+      AND OrganizationID = {organizationId:String}
+      AND FederatedGraphID = {federatedGraphId:String}
+      AND OperationHash = {operationHash:String}
+      ${operationName === undefined ? '' : 'AND OperationName = {operationName:String}'}
+    GROUP BY ClientName, ClientVersion
+    ORDER BY lastUsed DESC`;
+
+    const params: Record<string, string | number | boolean> = {
+      startTimestamp: dateRange.start,
+      endTimestamp: dateRange.end,
+      organizationId,
+      federatedGraphId: graphId,
+      operationHash,
+    };
+
+    if (operationName !== undefined) {
+      params.operationName = operationName;
+    }
+
+    const res: Array<{
+      name: string;
+      version: string;
+      requestCount: number;
+      lastUsed: string;
+    }> = await this.client.queryPromise(query, params);
+
+    return res.map((client) => ({
+      name: client.name || '',
+      version: client.version || '',
+      requestCount: client.requestCount || 0,
+      lastUsed: new Date(client.lastUsed + 'Z').toISOString(),
+    }));
+  }
+
+  public async getPersistedOperationMetrics({
+    id,
+    organizationId,
+    graphId,
+    start,
+    end,
+  }: {
+    id: string;
+    organizationId: string;
+    graphId: string;
+    start: number;
+    end: number;
+  }) {
+    const query = `
+    WITH
+      toDateTime({start:UInt32}) AS startDate,
+      toDateTime({end:UInt32}) AS endDate
+    SELECT sum(TotalRequests) as TotalRequests
+    FROM ${this.client.database}.operation_request_metrics_5_30
+    WHERE Timestamp >= startDate AND Timestamp <= endDate
+      AND OrganizationID = {organizationId:String}
+      AND FederatedGraphID = {graphId:String}
+      AND OperationPersistedID = {id:String}`;
+
+    const results = await this.client.queryPromise<{
+      TotalRequests: number;
+    }>(query, {
+      id,
+      organizationId,
+      graphId,
+      start,
+      end,
+    });
+    const totalRequests = Number(results[0]?.TotalRequests || 0);
+
+    return {
+      totalRequests,
+    };
+  }
+
+  public async hasPersistedOperationTrafficForClient({
+    clientName,
+    organizationId,
+    graphId,
+    start,
+    end,
+  }: {
+    clientName: string;
+    organizationId: string;
+    graphId: string;
+    start: number;
+    end: number;
+  }) {
+    const query = `
+    WITH
+      toDateTime({start:UInt32}) AS startDate,
+      toDateTime({end:UInt32}) AS endDate
+    SELECT sum(TotalRequests) as TotalRequests
+    FROM ${this.client.database}.operation_request_metrics_5_30
+    WHERE Timestamp >= startDate AND Timestamp <= endDate
+      AND OrganizationID = {organizationId:String}
+      AND FederatedGraphID = {graphId:String}
+      AND ClientName = {clientName:String}
+      AND notEmpty(OperationPersistedID)`;
+
+    const results = await this.client.queryPromise<{
+      TotalRequests: number;
+    }>(query, {
+      clientName,
+      organizationId,
+      graphId,
+      start,
+      end,
+    });
+
+    return Number(results[0]?.TotalRequests || 0) > 0;
+  }
+
+  public async getClientsWithPersistedOperationTraffic({
+    organizationId,
+    graphId,
+    start,
+    end,
+  }: {
+    organizationId: string;
+    graphId: string;
+    start: number;
+    end: number;
+  }) {
+    const query = `
+    WITH
+      toDateTime({start:UInt32}) AS startDate,
+      toDateTime({end:UInt32}) AS endDate
+    SELECT ClientName as ClientName
+    FROM ${this.client.database}.operation_request_metrics_5_30
+    WHERE Timestamp >= startDate AND Timestamp <= endDate
+      AND OrganizationID = {organizationId:String}
+      AND FederatedGraphID = {graphId:String}
+      AND notEmpty(ClientName)
+      AND notEmpty(OperationPersistedID)
+    GROUP BY ClientName
+    HAVING sum(TotalRequests) > 0`;
+
+    const results = await this.client.queryPromise<{
+      ClientName: string;
+    }>(query, {
+      organizationId,
+      graphId,
+      start,
+      end,
+    });
+
+    return new Set(results.map((result) => result.ClientName));
+  }
+}

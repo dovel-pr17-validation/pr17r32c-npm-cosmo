@@ -1,0 +1,57 @@
+coverage_file := coverage.out
+
+ifeq ($(CI),true)
+ FORMAT := github-actions
+else
+ FORMAT := pkgname
+endif
+
+dev:
+	go run cmd/router/main.go
+
+compose-demo-config:
+	pushd __schemas && ./compose.sh && popd
+
+update-snapshot:
+	cd ./pkg/config && GOLDIE_UPDATE=1 go test -race ./...
+
+test:
+	gotestsum -f $(FORMAT) -- -race ./...
+
+test-coverage:
+	gotestsum -f $(FORMAT) -- -race -coverprofile=$(coverage_file) -coverpkg=github.com/wundergraph/cosmo/router/... ./...
+
+test-fresh: clean-testcache test
+
+.PHONY: lint lint-fix
+lint:
+	../scripts/golangci-lint.sh run
+
+lint-fix:
+	../scripts/golangci-lint.sh run --fix
+
+clean-testcache:
+	go clean -testcache
+
+bump-engine:
+	go get github.com/wundergraph/graphql-go-tools/v2@upgrade
+	go mod tidy
+	cd ../router-tests && make bump-deps
+
+VERSION?=dev
+# RFC3339 format
+DATE?=$(shell date -u +'%Y-%m-%dT%H:%M:%SZ')
+COMMIT?=$(shell git rev-parse HEAD)
+build:
+	CGO_ENABLED=0 go build -trimpath -ldflags "-extldflags -static -X github.com/wundergraph/cosmo/router/core.Version=$(VERSION) -X github.com/wundergraph/cosmo/router/core.Date=$(DATE) -X github.com/wundergraph/cosmo/router/core.Commit=$(COMMIT)" -a -o router cmd/router/main.go
+
+build-race:
+	CGO_ENABLED=1 go build -trimpath -race -ldflags "-X github.com/wundergraph/cosmo/router/core.Version=$(VERSION) -X github.com/wundergraph/cosmo/router/core.Date=$(DATE) -X github.com/wundergraph/cosmo/router/core.Commit=$(COMMIT)" -a -o router cmd/router/main.go
+
+build-custom:
+	CGO_ENABLED=0 go build -trimpath -ldflags "-extldflags -static -X github.com/wundergraph/cosmo/router/core.Version=$(VERSION) -X github.com/wundergraph/cosmo/router/core.Date=$(DATE) -X github.com/wundergraph/cosmo/router/core.Commit=$(COMMIT)" -a -o router cmd/custom/main.go
+
+generate-mocks:
+	mockery
+
+.PHONY: dev test test-coverage build lint bump-engine update-snapshot

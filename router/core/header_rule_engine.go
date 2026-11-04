@@ -1,0 +1,1264 @@
+package core
+
+import (
+	"bytes"
+	"context"
+	"errors"
+	"fmt"
+	"io"
+	"io/fs"
+	"maps"
+	"net/http"
+	"os"
+	"reflect"
+	"regexp"
+	"slices"
+	"sort"
+	"strconv"
+	"strings"
+	"sync"
+	"time"
+
+	"github.com/cespare/xxhash/v2"
+	"github.com/expr-lang/expr/vm"
+	cachedirective "github.com/pquerna/cachecontrol/cacheobject"
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/trace"
+	"go.uber.org/zap"
+
+	nodev1 "github.com/wundergraph/cosmo/router/gen/proto/wg/cosmo/node/v1"
+	"github.com/wundergraph/cosmo/router/internal/expr"
+	"github.com/wundergraph/cosmo/router/internal/headers"
+	"github.com/wundergraph/cosmo/router/pkg/config"
+	"github.com/wundergraph/cosmo/router/pkg/otel"
+	rtrace "github.com/wundergraph/cosmo/router/pkg/trace"
+	"github.com/wundergraph/cosmo/router/pkg/watcher"
+	"github.com/wundergraph/graphql-go-tools/v2/pkg/ast"
+	"github.com/wundergraph/graphql-go-tools/v2/pkg/engine/datasource/graphql_datasource"
+	"github.com/wundergraph/graphql-go-tools/v2/pkg/engine/resolve"
+)
+
+var (
+	_                     EnginePostOriginHandler = (*HeaderPropagation)(nil)
+	cacheControlKey                               = "Cache-Control"
+	expiresKey                                    = "Expires"
+	noCache                                       = "no-cache"
+	caseInsensitiveRegexp                         = "(?i)"
+)
+
+// ignoredHeaderPrefixes are prefixes for headers that should not be forwarded to downstream services.
+var ignoredHeaderPrefixes = []string{
+	"Grpc-", // reserved in gRPC metadata
+}
+
+// isIgnoredHeader reports whether a header should never be propagated to subgraphs.
+// It checks both the exact ignoredHeaders list and any prefix in ignoredHeaderPrefixes.
+func isIgnoredHeader(name string) bool {
+	canonicalName := http.CanonicalHeaderKey(name)
+
+	if _, ok := headers.SkippedHeaders[canonicalName]; ok {
+		return true
+	}
+	for _, prefix := range ignoredHeaderPrefixes {
+		if strings.HasPrefix(canonicalName, prefix) {
+			return true
+		}
+	}
+	return false
+}
+
+type responseHeaderPropagationKey struct{}
+
+type responseHeaderPropagation struct {
+	header               http.Header
+	m                    *sync.Mutex
+	previousCacheControl *cachedirective.Object
+}
+
+func WithResponseHeaderPropagation(ctx *resolve.Context) *resolve.Context {
+	return ctx.WithContext(context.WithValue(ctx.Context(), responseHeaderPropagationKey{}, &responseHeaderPropagation{
+		header: make(http.Header),
+		m:      &sync.Mutex{},
+	}))
+}
+
+func getResponseHeaderPropagation(ctx context.Context) *responseHeaderPropagation {
+	v := ctx.Value(responseHeaderPropagationKey{})
+	if v == nil {
+		return nil
+	}
+	return v.(*responseHeaderPropagation)
+}
+
+func HeaderPropagationWriter(w http.ResponseWriter, resolveCtx *resolve.Context, setContentLength bool) io.Writer {
+	propagation := getResponseHeaderPropagation(resolveCtx.Context())
+	return &headerPropagationWriter{
+		writer:            w,
+		headerPropagation: propagation,
+		propagateHeaders:  propagation != nil,
+		setContentLength:  setContentLength,
+		resolveCtx:        resolveCtx,
+	}
+}
+
+type headerPropagationWriter struct {
+	setContentLength          bool
+	propagateHeaders          bool
+	writer                    http.ResponseWriter
+	headerPropagation         *responseHeaderPropagation
+	resolveCtx                *resolve.Context
+	didSetSubgraphErrors      bool
+	routerHeaderPropagation   *HeaderPropagation
+	reqCtx                    *requestContext
+	didApplyRouterRespHeaders bool
+	costHeaderSetter          func(typeStats map[string]resolve.TypeNameStats)
+	didSetCostHeaders         bool
+	cacheTagHeader            *cacheTagHeader
+	didSetCacheTagHeader      bool
+	// responseCacheStatusFor sets ResponseCacheStatusHeader from this request's fetches.
+	responseCacheStatusFor    *requestContext
+	didSetResponseCacheStatus bool
+}
+
+func (h *headerPropagationWriter) Write(p []byte) (n int, err error) {
+	if h.setContentLength {
+		// setContentLength assumes this Write is called exactly once with the entire body
+		h.writer.Header().Set("Content-Length", strconv.Itoa(len(p)))
+		h.setContentLength = false
+	}
+	if h.propagateHeaders {
+		wh := h.writer.Header()
+		for k, v := range h.headerPropagation.header {
+			for _, el := range v {
+				wh.Add(k, el)
+			}
+		}
+		h.propagateHeaders = false
+	}
+	if errs := h.resolveCtx.SubgraphErrors(); errs != nil && !h.didSetSubgraphErrors {
+		h.writer.Header().Set("Cache-Control", "no-store, no-cache, must-revalidate")
+		h.didSetSubgraphErrors = true
+		trackFinalResponseError(h.resolveCtx.Context(), errs)
+	}
+	if h.routerHeaderPropagation != nil && !h.didApplyRouterRespHeaders {
+		h.didApplyRouterRespHeaders = true
+		if err := h.routerHeaderPropagation.ApplyRouterResponseHeaderRules(h.writer, h.reqCtx); err != nil {
+			if h.reqCtx != nil {
+				h.reqCtx.logger.Error("Failed to apply router response header rules", zap.Error(err))
+			}
+		}
+	}
+	if h.costHeaderSetter != nil && !h.didSetCostHeaders {
+		h.didSetCostHeaders = true
+		h.costHeaderSetter(h.resolveCtx.TypeNameStats)
+	}
+	// Not on a response carrying subgraph errors: it was just marked no-store.
+	if h.cacheTagHeader != nil && !h.didSetSubgraphErrors && !h.didSetCacheTagHeader {
+		h.didSetCacheTagHeader = true
+		var log *zap.Logger
+		if h.reqCtx != nil {
+			log = h.reqCtx.logger
+		}
+		h.cacheTagHeader.set(h.resolveCtx.Context(), h.writer.Header(), h.resolveCtx.ResponseCacheSurrogateKeys(), log)
+	}
+	if h.responseCacheStatusFor != nil && !h.didSetResponseCacheStatus {
+		h.didSetResponseCacheStatus = true
+		setResponseCacheStatusHeader(h.writer.Header(), h.responseCacheStatusFor)
+	}
+	return h.writer.Write(p)
+}
+
+// HeaderPropagation is a pre-origin handler that can be used to propagate and
+// manipulate headers from the client request to the upstream
+type HeaderPropagation struct {
+	regex                       map[string]*regexp.Regexp
+	rules                       *config.HeaderRules
+	compiledRules               map[string]*vm.Program
+	compiledRouterResponseRules map[string]*vm.Program
+	fileSourceContents          map[string]*FileSourceContent
+	hasRequestRules             bool
+	hasResponseRules            bool
+	// Precomputed request rule presence for fast-path checks
+	hasAllRequestRules      bool
+	subgraphHasRequestRules map[string]bool
+	postResponseRules       *PostResponseRules
+}
+
+// FileSourceContent is a wrapper around a bytes.Buffer that is used to store the content of a file source.
+// It is used to synchronize access to the content of the file source.
+type FileSourceContent struct {
+	// m is used to synchronize access to the content of the file source.
+	m *sync.RWMutex
+	// buffer is used to store the content of the file source.
+	buffer bytes.Buffer
+	// watcher is used to watch the file source and refresh the content of the file source.
+	// It is set once in setupFileSourceRules before any watcher goroutine or request handler runs.
+	watcher watcher.WatcherFunc
+}
+
+// writeToBuffer writes the content of the file source to the buffer.
+func (f *FileSourceContent) writeToBuffer(path string) error {
+	f.m.Lock()
+	defer f.m.Unlock()
+
+	content, err := os.ReadFile(path)
+	if err != nil {
+		return fmt.Errorf("error reading file %s: %w", path, err)
+	}
+
+	f.buffer.Reset()
+	// buffer Write err will always be nil as documented in the library function
+	_, _ = f.buffer.Write(content)
+
+	return nil
+}
+
+// getBufferString returns the content of the file source as a string.
+func (f *FileSourceContent) getBufferString() string {
+	f.m.RLock()
+	defer f.m.RUnlock()
+
+	return f.buffer.String()
+}
+
+// PostResponseRules holds response rules that execute after all user-defined
+// response rules have been applied. Execution order: All (every fetch), then
+// Subgraphs[name] (only for that subgraph).
+type PostResponseRules struct {
+	All       []*config.ResponseHeaderRule
+	Subgraphs map[string][]*config.ResponseHeaderRule
+}
+
+func (p *PostResponseRules) hasRules() bool {
+	if p == nil {
+		return false
+	}
+	return len(p.All) > 0 || len(p.Subgraphs) > 0
+}
+
+func initHeaderRules(rules *config.HeaderRules) {
+	if rules.All == nil {
+		rules.All = &config.GlobalHeaderRule{}
+	}
+	if rules.Subgraphs == nil {
+		rules.Subgraphs = make(map[string]*config.GlobalHeaderRule)
+	}
+}
+
+func NewHeaderPropagation(ctx context.Context, logger *zap.Logger, rules *config.HeaderRules, postRules *PostResponseRules) (*HeaderPropagation, error) {
+	if rules == nil && !postRules.hasRules() {
+		return nil, nil
+	}
+
+	if rules == nil {
+		rules = &config.HeaderRules{}
+	}
+
+	initHeaderRules(rules)
+	hf := HeaderPropagation{
+		rules:                       rules,
+		regex:                       map[string]*regexp.Regexp{},
+		compiledRules:               map[string]*vm.Program{},
+		compiledRouterResponseRules: map[string]*vm.Program{},
+		fileSourceContents:          map[string]*FileSourceContent{},
+		postResponseRules:           postRules,
+	}
+
+	rhrs, rhrrs, rrs := hf.getAllRules()
+	hf.hasRequestRules = len(rhrs) > 0
+	hf.hasResponseRules = len(rhrrs) > 0 || postRules.hasRules()
+
+	// Pre-compute request rule presence
+	hf.hasAllRequestRules = len(hf.rules.All.Request) > 0
+	if !hf.hasAllRequestRules {
+		// Only build a per-subgraph map if we don't have global rules
+		hf.subgraphHasRequestRules = make(map[string]bool, len(hf.rules.Subgraphs))
+		for name, sg := range hf.rules.Subgraphs {
+			if sg != nil && len(sg.Request) > 0 {
+				hf.subgraphHasRequestRules[name] = true
+			}
+		}
+	}
+
+	if err := hf.collectRuleMatchers(rhrs, rhrrs); err != nil {
+		return nil, err
+	}
+
+	if err := hf.compileExpressionRules(rhrs, rrs); err != nil {
+		return nil, err
+	}
+
+	if err := hf.setupFileSourceRules(ctx, logger, rhrs); err != nil {
+		return nil, err
+	}
+
+	return &hf, nil
+}
+
+// CreateCacheControlPolicyHeaderRules builds cache control rules that run after
+// all user-defined response rules.
+func CreateCacheControlPolicyHeaderRules(cacheControl config.CacheControlPolicy) *PostResponseRules {
+	var rules PostResponseRules
+
+	if cacheControl.Enabled {
+		rules.All = append(rules.All, &config.ResponseHeaderRule{
+			Operation: config.HeaderRuleOperationPropagate,
+			Algorithm: config.ResponseHeaderRuleAlgorithmMostRestrictiveCacheControl,
+			Default:   cacheControl.Value,
+		})
+	}
+
+	for _, graph := range cacheControl.Subgraphs {
+		if rules.Subgraphs == nil {
+			rules.Subgraphs = make(map[string][]*config.ResponseHeaderRule)
+		}
+		rules.Subgraphs[graph.Name] = append(rules.Subgraphs[graph.Name], &config.ResponseHeaderRule{
+			Operation: config.HeaderRuleOperationPropagate,
+			Algorithm: config.ResponseHeaderRuleAlgorithmMostRestrictiveCacheControl,
+			Default:   graph.Value,
+		})
+	}
+
+	if !rules.hasRules() {
+		return nil
+	}
+	return &rules
+}
+
+func (h *HeaderPropagation) getAllRules() ([]*config.RequestHeaderRule, []*config.ResponseHeaderRule, []*config.RouterResponseHeaderRule) {
+	rhrs := h.rules.All.Request
+	for _, subgraph := range h.rules.Subgraphs {
+		rhrs = append(rhrs, subgraph.Request...)
+	}
+
+	rhrrs := h.rules.All.Response
+	for _, subgraph := range h.rules.Subgraphs {
+		rhrrs = append(rhrrs, subgraph.Response...)
+	}
+
+	if h.postResponseRules != nil {
+		rhrrs = append(rhrrs, h.postResponseRules.All...)
+		for _, sgRules := range h.postResponseRules.Subgraphs {
+			rhrrs = append(rhrrs, sgRules...)
+		}
+	}
+
+	return rhrs, rhrrs, h.rules.Router.Response
+}
+
+func (h *HeaderPropagation) processRule(rule config.HeaderRule, index int) error {
+	switch rule.GetOperation() {
+	case config.HeaderRuleOperationSet:
+	case config.HeaderRuleOperationPropagate:
+		if rule.GetMatching() != "" {
+			regex, err := regexp.Compile(caseInsensitiveRegexp + rule.GetMatching())
+			if err != nil {
+				return fmt.Errorf("invalid regex '%s' for header rule %d: %w", rule.GetMatching(), index, err)
+			}
+			h.regex[rule.GetMatching()] = regex
+		}
+	default:
+		return fmt.Errorf("unhandled operation '%s' for header rule %+v", rule.GetOperation(), rule)
+	}
+	return nil
+}
+
+func (h *HeaderPropagation) collectRuleMatchers(rhrs []*config.RequestHeaderRule, rhrrs []*config.ResponseHeaderRule) error {
+	for i, rule := range rhrs {
+		if err := h.processRule(rule, i); err != nil {
+			return err
+		}
+	}
+
+	for i, rule := range rhrrs {
+		if err := h.processRule(rule, i); err != nil {
+			return err
+		}
+	}
+
+	return nil
+}
+
+func (h *HeaderPropagation) compileExpressionRules(requestRules []*config.RequestHeaderRule, routerResponseRules []*config.RouterResponseHeaderRule) error {
+	manager := expr.CreateNewExprManager()
+	for _, rule := range requestRules {
+		if rule.Expression == "" {
+			continue
+		}
+		if _, ok := h.compiledRules[rule.Expression]; ok {
+			continue
+		}
+		program, err := manager.CompileExpression(rule.Expression, reflect.String)
+		if err != nil {
+			return fmt.Errorf("error compiling expression %s for header rule %s: %w", rule.Expression, rule.Name, err)
+		}
+		h.compiledRules[rule.Expression] = program
+	}
+	for _, rule := range routerResponseRules {
+		if rule.Expression == "" {
+			continue
+		}
+		if _, ok := h.compiledRouterResponseRules[rule.Expression]; ok {
+			continue
+		}
+		program, err := manager.CompileExpression(rule.Expression, reflect.String)
+		if err != nil {
+			return fmt.Errorf("error compiling expression %s for header rule %s: %w", rule.Expression, rule.Name, err)
+		}
+		h.compiledRouterResponseRules[rule.Expression] = program
+	}
+	return nil
+}
+
+func (h *HeaderPropagation) setupFileSourceRules(ctx context.Context, logger *zap.Logger, requestRules []*config.RequestHeaderRule) error {
+	for _, rule := range requestRules {
+		if !isValidFileSourceRule(rule) {
+			continue
+		}
+
+		if rule.FromFile.RefreshInterval <= 0 {
+			rule.FromFile.RefreshInterval = 30 * time.Second
+		}
+
+		_, err := os.Stat(rule.FromFile.Path)
+		if err != nil {
+			if errors.Is(err, fs.ErrNotExist) {
+				return fmt.Errorf("file %s does not exist", rule.FromFile.Path)
+			}
+			return fmt.Errorf("error getting file stats for %s: %w", rule.FromFile.Path, err)
+		}
+
+		// If the file source content is already in memory, skip the watcher creation
+		if _, found := h.fileSourceContents[rule.FromFile.Path]; found {
+			continue
+		}
+
+		content := &FileSourceContent{
+			m:      &sync.RWMutex{},
+			buffer: bytes.Buffer{},
+		}
+		h.fileSourceContents[rule.FromFile.Path] = content
+
+		if err := content.writeToBuffer(rule.FromFile.Path); err != nil {
+			return fmt.Errorf("error reading file source content for %s: %w", rule.FromFile.Path, err)
+		}
+
+		w, err := watcher.New(watcher.Options{
+			Interval: rule.FromFile.RefreshInterval,
+			Paths:    []string{rule.FromFile.Path},
+			Logger:   logger.With(zap.String("file_source", rule.FromFile.Path)),
+			Callback: func() {
+				if err := content.writeToBuffer(rule.FromFile.Path); err != nil {
+					logger.Error(
+						"error refreshing file source content.",
+						zap.String("file_source", rule.FromFile.Path),
+						zap.String("refresh_interval", rule.FromFile.RefreshInterval.String()),
+						zap.Error(err),
+					)
+				}
+			},
+		})
+		if err != nil {
+			return fmt.Errorf("error creating watcher for file %s: %w", rule.FromFile.Path, err)
+		}
+
+		content.watcher = w
+	}
+
+	// All map entries are built. Start watcher goroutines now so the map is
+	// frozen before any concurrent reader exists.
+	for _, content := range h.fileSourceContents {
+		go content.watcher(ctx)
+	}
+
+	return nil
+}
+
+func isValidFileSourceRule(rule *config.RequestHeaderRule) bool {
+	if rule.Operation != config.HeaderRuleOperationSet {
+		return false
+	}
+
+	if rule.Expression != "" {
+		return false
+	}
+
+	if rule.FromFile == nil {
+		return false
+	}
+
+	return true
+}
+
+func (h *HeaderPropagation) HasRequestRules() bool {
+	if h == nil {
+		return false
+	}
+	return h.hasRequestRules
+}
+
+func (h *HeaderPropagation) HasResponseRules() bool {
+	if h == nil {
+		return false
+	}
+	return h.hasResponseRules
+}
+
+// BuildRequestHeaderForSubgraph builds headers for an outbound subgraph request
+// as if the propagation rules were applied during transport. It returns the
+// resulting headers and a stable hash over all header names and values that is
+// independent of map iteration order.
+func (h *HeaderPropagation) BuildRequestHeaderForSubgraph(subgraphName string, ctx *requestContext) (http.Header, uint64) {
+	if h == nil || h.rules == nil || ctx == nil || ctx.Request() == nil {
+		return http.Header{}, 0
+	}
+
+	// Fast-path: if we know no request rules apply to this subgraph, skip cache and building
+	if !h.hasRequestRulesForSubgraph(subgraphName) {
+		return nil, 0
+	}
+
+	// Build headers in a fresh map without relying on a subgraph request seed.
+	outHeader := make(http.Header)
+
+	// Apply global rules
+	for _, rule := range h.rules.All.Request {
+		h.applyRequestRuleToHeader(ctx, outHeader, rule)
+	}
+
+	// Apply subgraph-specific rules
+	if subgraphName != "" {
+		if subRules, ok := h.rules.Subgraphs[subgraphName]; ok {
+			for _, rule := range subRules.Request {
+				h.applyRequestRuleToHeader(ctx, outHeader, rule)
+			}
+		}
+	}
+
+	headerHash := hashHeaderStable(outHeader)
+	return outHeader, headerHash
+}
+
+// hasRequestRulesForSubgraph returns true if there are request header rules
+// that would apply to the given subgraph. The result is computed at creation time.
+func (h *HeaderPropagation) hasRequestRulesForSubgraph(subgraphName string) bool {
+	if h == nil || h.rules == nil {
+		return false
+	}
+	if h.hasAllRequestRules {
+		// At least one global rule applies to all subgraphs
+		return true
+	}
+	if subgraphName == "" {
+		// No subgraph specified and no global rules
+		return false
+	}
+	return h.subgraphHasRequestRules != nil && h.subgraphHasRequestRules[subgraphName]
+}
+
+// hashHeaderStable computes a deterministic 64-bit hash over the provided header map.
+// It is independent of map iteration order and minimizes allocations.
+func hashHeaderStable(hdr http.Header) uint64 {
+	if len(hdr) == 0 {
+		return 0
+	}
+
+	keys := make([]string, len(hdr))
+	i := 0
+	for k := range hdr {
+		keys[i] = k
+		i++
+	}
+	sort.Strings(keys)
+
+	d := xxhash.New()
+	for _, k := range keys {
+		_, _ = d.WriteString(k)
+		_, _ = d.WriteString("\x00")
+		// Iterate values without creating copies to avoid allocations
+		vals := hdr[k]
+		for i := range vals {
+			_, _ = d.WriteString(vals[i])
+			_, _ = d.WriteString("\x00")
+		}
+		_, _ = d.WriteString("\x01")
+	}
+
+	return d.Sum64()
+}
+
+// usesMostRestrictiveCacheControl reports whether a response rule with the most
+// restrictive cache control algorithm applies to a fetch of subgraphName.
+func (h *HeaderPropagation) usesMostRestrictiveCacheControl(subgraphName string) bool {
+	lists := [][]*config.ResponseHeaderRule{h.rules.All.Response}
+	if subgraphRules, ok := h.rules.Subgraphs[subgraphName]; ok {
+		lists = append(lists, subgraphRules.Response)
+	}
+	if h.postResponseRules != nil {
+		lists = append(lists, h.postResponseRules.All, h.postResponseRules.Subgraphs[subgraphName])
+	}
+	for _, rules := range lists {
+		for _, rule := range rules {
+			if rule.Algorithm == config.ResponseHeaderRuleAlgorithmMostRestrictiveCacheControl {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// ApplyResponseHeaderRules applies response header rules for a subgraph fetch.
+// Called from OnFinished for every fetch (both singleflight leaders and followers).
+func (h *HeaderPropagation) ApplyResponseHeaderRules(ctx context.Context, headers http.Header, subgraphName string, statusCode int, request *http.Request) {
+	propagation := getResponseHeaderPropagation(ctx)
+	if propagation == nil {
+		return
+	}
+
+	resp := &http.Response{
+		StatusCode: statusCode,
+		Header:     headers,
+	}
+	if request != nil {
+		resp.Request = request
+	} else {
+		resp.Request = (&http.Request{}).WithContext(ctx)
+	}
+
+	for _, rule := range h.rules.All.Response {
+		h.applyResponseRule(propagation, resp, rule)
+	}
+
+	if subgraphName != "" {
+		if subgraphRules, ok := h.rules.Subgraphs[subgraphName]; ok {
+			for _, rule := range subgraphRules.Response {
+				h.applyResponseRule(propagation, resp, rule)
+			}
+		}
+	}
+
+	// AfterSubgraphResponse rules run last so that set rules (both global and
+	// subgraph-specific) have already injected values into res.Header before
+	// these rules (e.g. cache control algorithm) read them.
+	if h.postResponseRules != nil {
+		for _, rule := range h.postResponseRules.All {
+			h.applyResponseRule(propagation, resp, rule)
+		}
+		if subgraphName != "" {
+			for _, rule := range h.postResponseRules.Subgraphs[subgraphName] {
+				h.applyResponseRule(propagation, resp, rule)
+			}
+		}
+	}
+}
+
+func (h *HeaderPropagation) OnOriginResponse(resp *http.Response, ctx RequestContext) *http.Response {
+	// Response header rules are now applied in the engine loader hooks (OnFinished)
+	// via ApplyResponseHeaderRules, not here. This ensures both singleflight leaders
+	// and followers are handled uniformly. This method is kept for module compatibility.
+	return resp
+}
+
+// applyResponseRule applies one response header rule to a subgraph response res.
+func (h *HeaderPropagation) applyResponseRule(propagation *responseHeaderPropagation, res *http.Response, rule *config.ResponseHeaderRule) {
+	if rule.Operation == config.HeaderRuleOperationSet {
+		// Inject the value into the subgraph response headers so it looks like it
+		// came from the subgraph. Downstream rules (propagate, cache control
+		// algorithm, etc.) will process it naturally.
+		res.Header.Set(rule.Name, rule.Value)
+		return
+	}
+
+	if rule.Operation != config.HeaderRuleOperationPropagate {
+		return
+	}
+
+	if rule.Named != "" {
+		if isIgnoredHeader(rule.Named) {
+			return
+		}
+
+		values := res.Header.Values(rule.Named)
+		if len(values) > 0 {
+			h.applyResponseRuleKeyValue(res, propagation, rule, rule.Named, values)
+		} else if rule.Default != "" {
+			h.applyResponseRuleKeyValue(res, propagation, rule, rule.Named, []string{rule.Default})
+		}
+
+		return
+	} else if rule.Matching != "" {
+		if regex, ok := h.regex[rule.Matching]; ok {
+			for name := range res.Header {
+				result := regex.MatchString(name)
+				if rule.NegateMatch {
+					result = !result
+				}
+				if result {
+					if isIgnoredHeader(name) {
+						continue
+					}
+					values := res.Header.Values(name)
+					h.applyResponseRuleKeyValue(res, propagation, rule, name, values)
+				}
+			}
+		}
+	} else if rule.Algorithm == config.ResponseHeaderRuleAlgorithmMostRestrictiveCacheControl {
+		// Explicitly apply the CacheControl algorithm on the headers
+		h.applyResponseRuleKeyValue(res, propagation, rule, "", []string{""})
+	}
+}
+
+func (h *HeaderPropagation) applyResponseRuleKeyValue(res *http.Response, propagation *responseHeaderPropagation, rule *config.ResponseHeaderRule, key string, values []string) {
+	// Since we'll be setting the header map directly, we need to canonicalize the key
+	key = http.CanonicalHeaderKey(key)
+	switch rule.Algorithm {
+	case config.ResponseHeaderRuleAlgorithmFirstWrite:
+		propagation.m.Lock()
+		if val := propagation.header.Get(key); val == "" {
+			propagation.header[key] = values
+		}
+		propagation.m.Unlock()
+	case config.ResponseHeaderRuleAlgorithmLastWrite:
+		propagation.m.Lock()
+		propagation.header[key] = values
+		propagation.m.Unlock()
+	case config.ResponseHeaderRuleAlgorithmAppend:
+		propagation.m.Lock()
+		// Set-Cookie cannot be comma-combined per RFC 6265 — commas appear
+		// inside cookie values (e.g. Expires dates), so each cookie must
+		// remain a separate header line.
+		if key == "Set-Cookie" {
+			propagation.header[key] = append(propagation.header[key], values...)
+		} else {
+			all := append(propagation.header[key], values...)
+			propagation.header.Set(key, strings.Join(all, ","))
+		}
+		propagation.m.Unlock()
+	case config.ResponseHeaderRuleAlgorithmMostRestrictiveCacheControl:
+		h.applyResponseRuleMostRestrictiveCacheControl(res, propagation, rule)
+	}
+}
+
+func (h *HeaderPropagation) applyRequestRuleToHeader(ctx *requestContext, header http.Header, rule *config.RequestHeaderRule) {
+	if rule.Operation == config.HeaderRuleOperationSet {
+		if rule.ValueFrom != nil && rule.ValueFrom.ContextField != "" {
+			val := getCustomDynamicAttributeValue(rule.ValueFrom, ctx, nil)
+			value := fmt.Sprintf("%v", val)
+			if value != "" {
+				header.Set(rule.Name, value)
+			}
+			return
+		}
+
+		if rule.Expression != "" {
+			value, err := h.getRequestRuleExpressionValue(rule, ctx)
+			if err != nil {
+				ctx.SetError(err)
+			} else if value != "" {
+				header.Set(rule.Name, value)
+			}
+			return
+		}
+
+		if rule.FromFile != nil {
+			content, found := h.fileSourceContents[rule.FromFile.Path]
+			if !found {
+				ctx.SetError(fmt.Errorf("file source content not found for file %s", rule.FromFile.Path))
+				return
+			}
+
+			header.Set(rule.Name, content.getBufferString())
+			return
+		}
+
+		header.Set(rule.Name, rule.Value)
+		return
+	}
+
+	if rule.Operation != config.HeaderRuleOperationPropagate {
+		return
+	}
+
+	/**
+	 *	Rename the header before propagating and delete the original
+	 */
+
+	if rule.Rename != "" && rule.Named != "" {
+		// Ignore the rule when the target header is in the ignored list
+		if isIgnoredHeader(rule.Rename) {
+			return
+		}
+
+		value := ctx.Request().Header.Get(rule.Named)
+		if value != "" {
+			header.Set(rule.Rename, ctx.Request().Header.Get(rule.Named))
+			header.Del(rule.Named)
+			return
+		} else if rule.Default != "" {
+			header.Set(rule.Rename, rule.Default)
+			header.Del(rule.Named)
+			return
+		}
+
+		return
+	}
+
+	/**
+	 *	Propagate the header as is
+	 */
+
+	if rule.Named != "" {
+		if isIgnoredHeader(rule.Named) {
+			return
+		}
+
+		values := ctx.Request().Header.Values(rule.Named)
+		if len(values) > 0 {
+			header[http.CanonicalHeaderKey(rule.Named)] = values
+		} else if rule.Default != "" {
+			header.Set(rule.Named, rule.Default)
+		}
+
+		return
+	}
+
+	/**
+	 * Matching based on regex
+	 */
+
+	if regex, ok := h.regex[rule.Matching]; ok {
+		// Headers are case-insensitive, but Go canonicalize them
+		// Issue: https://github.com/golang/go/issues/37834
+		for name := range ctx.Request().Header {
+			result := regex.MatchString(name)
+			if rule.NegateMatch {
+				result = !result
+			}
+
+			if result {
+				/**
+				 *	Rename the header before propagating and delete the original
+				 */
+				if rule.Rename != "" && rule.Named == "" {
+
+					if isIgnoredHeader(rule.Rename) {
+						continue
+					}
+
+					value := ctx.Request().Header.Get(name)
+					if value != "" {
+						header.Set(rule.Rename, ctx.Request().Header.Get(name))
+						header.Del(name)
+					} else if rule.Default != "" {
+						header.Set(rule.Rename, rule.Default)
+						header.Del(name)
+					}
+
+					continue
+				}
+
+				/**
+				 *	Propagate the header as is
+				 */
+				if isIgnoredHeader(name) {
+					continue
+				}
+				header.Set(name, ctx.Request().Header.Get(name))
+			}
+		}
+	}
+}
+
+func (h *HeaderPropagation) applyResponseRuleMostRestrictiveCacheControl(res *http.Response, propagation *responseHeaderPropagation, rule *config.ResponseHeaderRule) {
+	ctx := res.Request.Context()
+	tracer := rtrace.TracerFromContext(ctx)
+	commonAttributes := []attribute.KeyValue{
+		otel.WgOperationProtocol.String(OperationProtocolHTTP.String()),
+	}
+
+	_, span := tracer.Start(ctx, "HeaderPropagation - RestrictiveCacheControl",
+		trace.WithSpanKind(trace.SpanKindInternal),
+		trace.WithAttributes(commonAttributes...),
+	)
+	defer span.End()
+
+	// Set no-cache for all mutations, to ensure that requests to mutate data always work as expected (without returning cached data)
+	if resolve.GetOperationTypeFromContext(ctx) == ast.OperationTypeMutation {
+		propagation.m.Lock()
+		propagation.header.Set(cacheControlKey, noCache)
+		propagation.m.Unlock()
+		return
+	}
+
+	reqCacheHeader := cacheControlValue(res.Request.Header)
+	resCacheHeader := cacheControlValue(res.Header)
+	expiresHeader, _ := http.ParseTime(res.Header.Get(expiresKey))
+	dateHeader, _ := http.ParseTime(res.Header.Get("Date"))
+	lastModifiedHeader, _ := http.ParseTime(res.Header.Get("Last-Modified"))
+
+	if resCacheHeader == "" && len(res.Header.Values(expiresKey)) == 0 && rule.Default == "" && res.StatusCode < http.StatusBadRequest {
+		// Nothing from the subgraph and no default to stand in: the fetch
+		// restricts nothing, so it can't withdraw what others granted either.
+		return
+	}
+
+	// The parsers return nil on malformed input.
+	reqDir, err := cachedirective.ParseRequestCacheControl(reqCacheHeader)
+	if err != nil {
+		reqDir = &cachedirective.RequestCacheDirectives{MaxAge: -1, MaxStale: -1, MinFresh: -1}
+	}
+	resDir, err := parseFreshness(res.Header)
+	if err != nil || res.StatusCode >= http.StatusBadRequest {
+		// Unreadable freshness, or a failed fetch, is not cacheable.
+		resDir = noStoreDirectives()
+	}
+	obj := &cachedirective.Object{
+		RespDirectives:         resDir,
+		RespHeaders:            res.Header,
+		RespStatusCode:         res.StatusCode,
+		RespExpiresHeader:      expiresHeader,
+		RespDateHeader:         dateHeader,
+		RespLastModifiedHeader: lastModifiedHeader,
+		ReqDirectives:          reqDir,
+		ReqHeaders:             res.Request.Header,
+		NowUTC:                 time.Now().UTC(),
+	}
+	rv := cachedirective.ObjectResults{}
+	cachedirective.CachableObject(obj, &rv)
+	cachedirective.ExpirationObject(obj, &rv)
+
+	span.SetAttributes(
+		otel.WgResponseCacheControlReasons.String(fmt.Sprint(rv.OutReasons)),
+		otel.WgResponseCacheControlWarnings.String(fmt.Sprint(rv.OutWarnings)),
+		otel.WgResponseCacheControlExpiration.String(rv.OutExpirationTime.String()),
+	)
+
+	var defaultPolicy *cachedirective.Object
+	if rule.Default != "" {
+		if defaultResponseCache, err := cachedirective.ParseResponseCacheControl(rule.Default); err == nil {
+			markStale(defaultResponseCache)
+			// The default stands in for a missing header. Against a fetch's own
+			// header it only caps the lifetime, so it can't withdraw public.
+			if resCacheHeader != "" {
+				defaultResponseCache.Public = resDir.Public
+			} else {
+				// Nothing of its own: the fetch is as public as the default.
+				resDir.Public = defaultResponseCache.Public
+			}
+			defaultPolicy = &cachedirective.Object{RespDirectives: defaultResponseCache}
+		}
+	}
+
+	propagation.m.Lock()
+	defer propagation.m.Unlock()
+	// Merge with the current shared state under lock to avoid lost updates when
+	// multiple subgraph responses compute policies concurrently.
+	policies := []*cachedirective.Object{obj}
+	if defaultPolicy != nil {
+		policies = append(policies, defaultPolicy)
+	}
+	if propagation.previousCacheControl != nil {
+		policies = append(policies, propagation.previousCacheControl)
+	}
+
+	restrictivePolicy, cacheControlHeader := createMostRestrictivePolicy(policies)
+	propagation.previousCacheControl = restrictivePolicy
+	if cacheControlHeader != "" {
+		propagation.header.Set(cacheControlKey, cacheControlHeader)
+	}
+
+	// Update the Expires header if applicable
+	if !expiresHeader.IsZero() && !restrictivePolicy.RespExpiresHeader.IsZero() {
+		propagation.header.Set(expiresKey, restrictivePolicy.RespExpiresHeader.Format(http.TimeFormat))
+	}
+}
+
+func (h *HeaderPropagation) getRequestRuleExpressionValue(rule *config.RequestHeaderRule, reqCtx *requestContext) (value string, err error) {
+	if reqCtx == nil {
+		return "", fmt.Errorf("context cannot be nil")
+	}
+	program, ok := h.compiledRules[rule.Expression]
+	if !ok {
+		return "", fmt.Errorf("expression %s not found in compiled rules for header rule %s", rule.Expression, rule.Name)
+	}
+	value, err = expr.ResolveStringExpression(program, reqCtx.expressionContext)
+	if err != nil {
+		return "", fmt.Errorf("unable to resolve expression %q for header rule %s: %s", rule.Expression, rule.Name, err.Error())
+	}
+	return
+}
+
+func (h *HeaderPropagation) getRouterResponseRuleExpressionValue(rule *config.RouterResponseHeaderRule, reqCtx *requestContext) (value string, err error) {
+	if reqCtx == nil {
+		return "", fmt.Errorf("context cannot be nil")
+	}
+	program, ok := h.compiledRouterResponseRules[rule.Expression]
+	if !ok {
+		return "", fmt.Errorf("expression %s not found in compiled rules for header rule %s", rule.Expression, rule.Name)
+	}
+	value, err = expr.ResolveStringExpression(program, reqCtx.expressionContext)
+	if err != nil {
+		return "", fmt.Errorf("unable to resolve expression %q for header rule %s: %w", rule.Expression, rule.Name, err)
+	}
+	return
+}
+
+// ApplyRouterResponseHeaderRules applies router response header rules to the response writer
+func (h *HeaderPropagation) ApplyRouterResponseHeaderRules(w http.ResponseWriter, reqCtx *requestContext) error {
+	for _, rule := range h.rules.Router.Response {
+		if rule.Expression == "" {
+			continue
+		}
+		value, err := h.getRouterResponseRuleExpressionValue(rule, reqCtx)
+		if err != nil {
+			return fmt.Errorf("failed to evaluate router response header expression for %s: %w", rule.Name, err)
+		}
+		if value != "" {
+			w.Header().Set(rule.Name, value)
+		}
+	}
+
+	return nil
+}
+
+// cacheControlValue joins every Cache-Control line into one list.
+func cacheControlValue(header http.Header) string {
+	return strings.Join(header.Values(cacheControlKey), ", ")
+}
+
+// parseFreshness parses a response's Cache-Control, Expires standing in for a
+// missing lifetime, net of its Age: lifetimes shortened by the time spent
+// upstream, and stale on arrival as no-cache.
+func parseFreshness(header http.Header) (*cachedirective.ResponseCacheDirectives, error) {
+	dir, err := cachedirective.ParseResponseCacheControl(cacheControlValue(header))
+	if err != nil {
+		return nil, err
+	}
+	expiresAsMaxAge(dir, header)
+	subtractAge(dir, header.Get("Age"))
+	markStale(dir)
+	return dir, nil
+}
+
+// expiresAsMaxAge gives a response without max-age its Expires, less Date, as a
+// max-age; s-maxage only overrides it for shared caches. An invalid Expires is
+// already expired (RFC 9111 §5.3).
+func expiresAsMaxAge(dir *cachedirective.ResponseCacheDirectives, header http.Header) {
+	if dir.MaxAge != -1 || len(header.Values(expiresKey)) == 0 {
+		return
+	}
+	expires, err := http.ParseTime(header.Get(expiresKey))
+	if err != nil {
+		dir.MaxAge = 0
+		return
+	}
+	date, err := http.ParseTime(header.Get("Date"))
+	if err != nil {
+		date = time.Now()
+	}
+	dir.MaxAge = cachedirective.DeltaSeconds(max(expires.Sub(date)/time.Second, 0))
+}
+
+// subtractAge takes time spent in upstream caches off the freshness lifetimes.
+// An invalid Age is ignored; of a list, the first member counts.
+func subtractAge(dir *cachedirective.ResponseCacheDirectives, age string) {
+	first, _, _ := strings.Cut(age, ",")
+	// Out of range parses as the largest value: older than any lifetime.
+	seconds, err := strconv.ParseUint(strings.TrimSpace(first), 10, 31)
+	if (err != nil && !errors.Is(err, strconv.ErrRange)) || seconds == 0 {
+		return
+	}
+	for _, lifetime := range []*cachedirective.DeltaSeconds{&dir.MaxAge, &dir.SMaxAge} {
+		if *lifetime > 0 {
+			*lifetime = max(*lifetime-cachedirective.DeltaSeconds(seconds), 0)
+		}
+	}
+}
+
+// markStale makes a zero lifetime a bare no-cache: stale on arrival, and the
+// merge would drop a zero as unset.
+func markStale(dir *cachedirective.ResponseCacheDirectives) {
+	if dir.MaxAge == 0 || dir.SMaxAge == 0 {
+		dir.NoCachePresent, dir.NoCache = true, nil
+	}
+}
+
+func noStoreDirectives() *cachedirective.ResponseCacheDirectives {
+	return &cachedirective.ResponseCacheDirectives{
+		NoStore:              true,
+		MaxAge:               -1,
+		SMaxAge:              -1,
+		StaleIfError:         -1,
+		StaleWhileRevalidate: -1,
+	}
+}
+
+func createMostRestrictivePolicy(policies []*cachedirective.Object) (*cachedirective.Object, string) {
+	result := cachedirective.Object{
+		RespDirectives: &cachedirective.ResponseCacheDirectives{},
+	}
+	var minMaxAge cachedirective.DeltaSeconds = -1
+	// Shared caches read s-maxage, else max-age.
+	var minShared cachedirective.DeltaSeconds = -1
+	hasSMaxAge := false
+	isPrivate := false
+	// public grants sharing, so it holds only when every policy grants it.
+	isPublic := len(policies) > 0
+	// Field-specific no-cache only bars the named headers; bare no-cache bars all.
+	noCacheFields := cachedirective.FieldNames{}
+	mustRevalidate, proxyRevalidate := false, false
+
+	for _, policy := range policies {
+		// Check no-store and no-cache first
+		if policy.RespDirectives.NoStore {
+			result.RespDirectives.NoStore = true
+			return &result, "no-store"
+		}
+		if policy.RespDirectives.NoCachePresent {
+			if len(policy.RespDirectives.NoCache) == 0 {
+				result.RespDirectives.NoCachePresent = true
+			}
+			for field := range policy.RespDirectives.NoCache {
+				noCacheFields[field] = true
+			}
+		}
+		mustRevalidate = mustRevalidate || policy.RespDirectives.MustRevalidate
+		proxyRevalidate = proxyRevalidate || policy.RespDirectives.ProxyRevalidate
+
+		// Determine the shortest max-age if available
+		if policy.RespDirectives.MaxAge > 0 && (minMaxAge == -1 || policy.RespDirectives.MaxAge < minMaxAge) {
+			minMaxAge = policy.RespDirectives.MaxAge
+		}
+
+		shared := policy.RespDirectives.MaxAge
+		if policy.RespDirectives.SMaxAge > 0 {
+			shared = policy.RespDirectives.SMaxAge
+			hasSMaxAge = true
+		}
+		if shared > 0 && (minShared == -1 || shared < minShared) {
+			minShared = shared
+		}
+
+		// Track if any policy specifies "private"
+		if policy.RespDirectives.PrivatePresent {
+			isPrivate = true
+		}
+		if !policy.RespDirectives.Public {
+			isPublic = false
+		}
+
+		// Handle expires header comparisons
+		if policy.RespExpiresHeader.Before(result.RespExpiresHeader) || result.RespExpiresHeader.IsZero() {
+			result.RespExpiresHeader = policy.RespExpiresHeader
+		}
+	}
+
+	// Set the calculated max-age and privacy level on the result
+	if minMaxAge > 0 {
+		result.RespDirectives.MaxAge = minMaxAge
+	}
+	if hasSMaxAge {
+		result.RespDirectives.SMaxAge = minShared
+	}
+	result.RespDirectives.PrivatePresent = isPrivate
+	result.RespDirectives.Public = isPublic && !isPrivate
+	bareNoCache := result.RespDirectives.NoCachePresent
+	if !bareNoCache && len(noCacheFields) > 0 {
+		// Kept on the result so the next merge still sees them.
+		result.RespDirectives.NoCachePresent, result.RespDirectives.NoCache = true, noCacheFields
+	}
+	result.RespDirectives.MustRevalidate = mustRevalidate
+	result.RespDirectives.ProxyRevalidate = proxyRevalidate
+
+	// Format the final Cache-Control header
+	headerParts := []string{}
+	if bareNoCache {
+		headerParts = append(headerParts, noCache)
+	} else {
+		if minMaxAge > 0 {
+			headerParts = append(headerParts, fmt.Sprintf("max-age=%d", minMaxAge))
+		}
+		if hasSMaxAge {
+			headerParts = append(headerParts, fmt.Sprintf("s-maxage=%d", minShared))
+		}
+		if len(noCacheFields) > 0 {
+			headerParts = append(headerParts, fmt.Sprintf("%s=%q", noCache, strings.Join(slices.Sorted(maps.Keys(noCacheFields)), ", ")))
+		}
+		if mustRevalidate {
+			headerParts = append(headerParts, "must-revalidate")
+		}
+		if proxyRevalidate {
+			headerParts = append(headerParts, "proxy-revalidate")
+		}
+	}
+	if isPrivate {
+		headerParts = append(headerParts, "private")
+	} else if isPublic {
+		headerParts = append(headerParts, "public")
+	}
+	cacheControlHeader := strings.Join(headerParts, ", ")
+
+	return &result, cacheControlHeader
+}
+
+// SubgraphRules returns the list of header rules for the subgraph with the given name
+func SubgraphRules(rules *config.HeaderRules, subgraphName string) []*config.RequestHeaderRule {
+	if rules == nil {
+		return nil
+	}
+	var subgraphRules []*config.RequestHeaderRule
+	if rules.All != nil {
+		subgraphRules = append(subgraphRules, rules.All.Request...)
+	}
+	if rules.Subgraphs != nil {
+		if subgraphSpecificRules, ok := rules.Subgraphs[subgraphName]; ok {
+			subgraphRules = append(subgraphRules, subgraphSpecificRules.Request...)
+		}
+	}
+	return subgraphRules
+}
+
+// FetchURLRules returns the list of header rules for first subgraph that matches the given URL
+func FetchURLRules(rules *config.HeaderRules, subgraphs []*nodev1.Subgraph, routingURL string) []*config.RequestHeaderRule {
+	var subgraphName string
+	for _, subgraph := range subgraphs {
+		if subgraph.RoutingUrl == routingURL {
+			subgraphName = subgraph.Name
+			break
+		}
+	}
+	return SubgraphRules(rules, subgraphName)
+}
+
+// PropagatedHeaders returns the list of header names and regular expressions
+// that will be propagated when applying the given rules.
+func PropagatedHeaders(rules []*config.RequestHeaderRule) (headerNames []string, headerNameRegexps []graphql_datasource.RegularExpression, err error) {
+	for _, rule := range rules {
+		switch rule.Operation {
+		case config.HeaderRuleOperationSet:
+			if rule.Name == "" || (rule.Value == "" && rule.ValueFrom == nil && rule.Expression == "" && rule.FromFile == nil) {
+				return nil, nil, fmt.Errorf("invalid header set rule %+v, no header name/value combination", rule)
+			}
+			headerNames = append(headerNames, rule.Name)
+		case config.HeaderRuleOperationPropagate:
+			if rule.Matching != "" {
+				// Header Names are case insensitive: https://www.w3.org/Protocols/rfc2616/rfc2616.html
+				re, err := regexp.Compile(caseInsensitiveRegexp + rule.Matching)
+				if err != nil {
+					return nil, nil, fmt.Errorf("error compiling regular expression %q in header rule %+v: %w", rule.Matching, rule, err)
+				}
+				headerNameRegexps = append(headerNameRegexps, graphql_datasource.RegularExpression{
+					Pattern:     re,
+					NegateMatch: rule.NegateMatch,
+				})
+			} else if rule.Named != "" {
+				headerNames = append(headerNames, rule.Named)
+			} else {
+				return nil, nil, fmt.Errorf("invalid header propagation rule %+v, no header name nor regular expression", rule)
+			}
+		default:
+			return nil, nil, fmt.Errorf("invalid header rule operation %q in rule %+v", rule.Operation, rule)
+		}
+	}
+	return headerNames, headerNameRegexps, nil
+}

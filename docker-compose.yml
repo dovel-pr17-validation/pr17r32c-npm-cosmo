@@ -1,0 +1,510 @@
+name: cosmo-dev
+services:
+  postgres:
+    image: postgres:${DC_POSTGRESQL_VERSION:-15.3}
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-postgres}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-changeme}
+      POSTGRES_DB: ${POSTGRES_DB:-controlplane}
+      PGDATA: /data/postgres
+    volumes:
+      - ./docker/postgres/init.sql:/docker-entrypoint-initdb.d/init.sql
+      - postgres:/data/postgres
+    ports:
+      - '5432:5432'
+    restart: unless-stopped
+    networks:
+      - primary
+    profiles:
+      - dev
+
+  keycloak:
+    image: ghcr.io/wundergraph/cosmo/keycloak:${DC_KEYCLOAK_VERSION:-latest}
+    build:
+      context: keycloak
+      dockerfile: Dockerfile
+    command: ['start', '--import-realm', '--optimized']
+    environment:
+      KC_HEALTH_ENABLED: 'true'
+      KC_METRICS_ENABLED: 'true'
+      KC_BOOTSTRAP_ADMIN_USERNAME: ${KEYCLOAK_ADMIN:-admin}
+      KC_BOOTSTRAP_ADMIN_PASSWORD: ${KEYCLOAK_ADMIN_PASSWORD:-changeme}
+      KC_DB_URL_PORT: ${POSTGRES_PORT:-5432}
+      KC_DB_URL_HOST: ${POSTGRES_HOST:-postgres}
+      KC_DB_URL_DATABASE: ${POSTGRES_DB_NAME:-keycloak}
+      KC_DB_PASSWORD: ${POSTGRES_PASSWORD:-changeme}
+      KC_DB_USERNAME: ${POSTGRES_USER:-postgres}
+      KC_HTTP_ENABLED: 'true'
+      KC_HOSTNAME_STRICT: 'false'
+    ports:
+      - '8080:8080'
+    volumes:
+      - ./docker/keycloak/realm.json:/opt/keycloak/data/import/realm.json:ro
+    restart: unless-stopped
+    depends_on:
+      - postgres
+    networks:
+      - primary
+    profiles:
+      - dev
+
+  # Only to test OTEL Instrumentation
+  jaeger:
+    image: jaegertracing/all-in-one:latest
+    ports:
+      - '16686:16686'
+      - '14268:14268'
+      - '4319:4318'
+    environment:
+      - COLLECTOR_OTLP_ENABLED=true
+      - LOG_LEVEL=debug
+    networks:
+      - primary
+    profiles:
+      - debug
+
+  # Only to test prometheus integration
+  prometheus:
+    image: prom/prometheus:v3.4.2
+    command:
+      - --web.enable-remote-write-receiver
+      - --enable-feature=native-histograms
+      - --web.enable-otlp-receiver
+      - --config.file=/etc/prometheus/prometheus.yml
+      - --web.config.file=/etc/prometheus/web.yml
+    networks:
+      - primary
+    volumes:
+      - prometheus:/prometheus
+      - ./docker/prometheus/prometheus.yml:/etc/prometheus/prometheus.yml
+      - ./docker/prometheus/web.yml:/etc/prometheus/web.yml
+    extra_hosts:
+      # https://medium.com/@TimvanBaarsen/how-to-connect-to-the-docker-host-from-inside-a-docker-container-112b4c71bc66
+      - 'host.docker.internal:host-gateway'
+    ports:
+      - '9090:9090'
+    profiles:
+      - debug
+
+  grafana:
+    image: grafana/grafana:12.0.2
+    ports:
+      - '9300:3000'
+    volumes:
+      - grafana-storage:/var/lib/grafana
+      - ./docker/grafana/provisioning:/etc/grafana/provisioning
+    restart: unless-stopped
+    networks:
+      - primary
+    environment:
+      - GF_PLUGINS_ALLOW_LOADING_UNSIGNED_PLUGINS=true
+      - GF_INSTALL_PLUGINS=grafana-clickhouse-datasource,grafana-pyroscope-app
+      - CLICKHOUSE_USER=${CLICKHOUSE_USER:-default}
+      - CLICKHOUSE_PASSWORD=${CLICKHOUSE_PASSWORD:-changeme}
+      - GF_AUTH_ANONYMOUS_ENABLED=true
+      - GF_AUTH_ANONYMOUS_ORG_ROLE=Admin
+    profiles:
+      - debug
+
+  pyroscope:
+    image: grafana/pyroscope:latest
+    ports:
+      - '4040:4040'
+    restart: unless-stopped
+    networks:
+      - primary
+    profiles:
+      - debug
+
+  graphqlmetrics:
+    image: ghcr.io/wundergraph/cosmo/graphqlmetrics:${DC_GRAPHQLMETRICS_VERSION:-latest}
+    build:
+      context: graphqlmetrics
+      dockerfile: Dockerfile
+    environment:
+      CLICKHOUSE_DSN: 'clickhouse://${CLICKHOUSE_USER:-default}:${CLICKHOUSE_PASSWORD:-changeme}@clickhouse:9000/${CLICKHOUSE_DATABASE:-cosmo}'
+      INGEST_JWT_SECRET: ${INGEST_JWT_SECRET:-fkczyomvdprgvtmvkuhvprxuggkbgwld}
+      LISTEN_ADDR: '0.0.0.0:4005'
+    ports:
+      - '4005:4005'
+    restart: unless-stopped
+    depends_on:
+      - clickhouse
+    networks:
+      - primary
+    profiles:
+      - dev
+
+  otelcollector:
+    image: ghcr.io/wundergraph/cosmo/otelcollector:${DC_OTELCOLLECTOR_VERSION:-latest}
+    build:
+      context: otelcollector
+      dockerfile: Dockerfile
+    environment:
+      CLICKHOUSE_ENDPOINT: 'clickhouse://${CLICKHOUSE_USER:-default}:${CLICKHOUSE_PASSWORD:-changeme}@clickhouse:9000/${CLICKHOUSE_DATABASE:-cosmo}?dial_timeout=15s&compress=lz4'
+      OTEL_INGEST_JWT_SECRET: ${OTEL_INGEST_JWT_SECRET:-fkczyomvdprgvtmvkuhvprxuggkbgwld}
+      PROMETHEUS_LISTEN_ADDR: ${PROMETHEUS_LISTEN_ADDR:-127.0.0.1:8088}
+      PROMETHEUS_LEVEL: ${PROMETHEUS_LEVEL:-none}
+    ports:
+      - '4317:4317' # otlpgrpc
+      - '4318:4318' # otlphttp
+      - '8089:8088' # prometheus metrics
+    restart: unless-stopped
+    depends_on:
+      - clickhouse
+    networks:
+      - primary
+    profiles:
+      - dev
+
+  clickhouse:
+    image: clickhouse/clickhouse-server:${DC_CLICKHOUSE_VERSION:-24.12}
+    environment:
+      CLICKHOUSE_DB: ${CLICKHOUSE_DATABASE:-cosmo}
+      CLICKHOUSE_USER: ${CLICKHOUSE_USER:-default}
+      CLICKHOUSE_PASSWORD: ${CLICKHOUSE_PASSWORD:-changeme}
+      CLICKHOUSE_DEFAULT_ACCESS_MANAGEMENT: ${CLICKHOUSE_DEFAULT_ACCESS_MANAGEMENT:-1}
+    ports:
+      - '8123:8123'
+      - '9000:9000'
+      - '9440:9440'
+    volumes:
+      - clickhouse:/var/lib/clickhouse
+      - ./docker/clickhouse/init-db.sh:/docker-entrypoint-initdb.d/init-db.sh
+    networks:
+      - primary
+    profiles:
+      - dev
+
+  # Due to previous use of minio and to ensure that data is correctly migrated, we need to
+  # ensure that rustfs is able to access it. Rustfs runs under a different user than minio, so this
+  # is a one-off run to fix permissions on the volume.
+  rustfs_perms:
+    image: alpine
+    user: root
+    volumes:
+      - minio:/data
+    command: chown -R 10001:10001 /data
+
+  rustfs:
+    image: rustfs/rustfs:1.0.0-alpha.92
+    depends_on:
+      rustfs_perms:
+        condition: service_completed_successfully
+    command: 'rustfs server /data'
+    environment:
+      RUSTFS_CONSOLE_ENABLE: 'true'
+      RUSTFS_ACCESS_KEY: ${S3_ACCESS_KEY_ID:-admin}
+      RUSTFS_SECRET_KEY: ${S3_SECRET_ACCESS_KEY:-changeme}
+    ports:
+      - '10000:9000'
+      - '10001:9001'
+    volumes:
+      # We've previously used minio for S3 provider. Since rustfs is storage-compatible
+      # with minio, we want to reuse the existing minio volume so that existing data is kept.
+      - minio:/data
+    networks:
+      - primary
+    profiles:
+      - dev
+    post_start:
+      - command: sh -c "sleep 10 && apk add minio-client && mcli alias set rustfs http://localhost:9000 ${S3_ACCESS_KEY_ID:-admin} ${S3_SECRET_ACCESS_KEY:-changeme} && mcli mb -p rustfs/cosmo"
+        user: root
+
+  cdn:
+    image: ghcr.io/wundergraph/cosmo/cdn:${DC_CDN_VERSION:-latest}
+    build:
+      context: .
+      dockerfile: cdn-server/Dockerfile
+    environment:
+      PORT: 11000
+      NODE_ENV: development
+      AUTH_JWT_SECRET: ${CDN_AUTH_JWT_SECRET:-fkczyomvdprgvtmvkuhvprxuggkbgwld}
+      AUTH_ADMISSION_JWT_SECRET: uXDxJLEvrw4aafPfrf3rRotCoBzRfPEW
+      S3_STORAGE_URL: ${S3_STORAGE_URL:-http://rustfs:9000/cosmo}
+      S3_REGION: ${S3_REGION_CDN:-${S3_REGION:-auto}}
+      S3_ACCESS_KEY_ID: ${S3_ACCESS_KEY_ID:-admin}
+      S3_SECRET_ACCESS_KEY: ${S3_SECRET_ACCESS_KEY:-changeme}
+      S3_FORCE_PATH_STYLE: ${S3_FORCE_PATH_STYLE:-true}
+    ports:
+      - '11000:11000'
+    networks:
+      - primary
+    profiles:
+      - dev
+
+  nats:
+    image: ghcr.io/wundergraph/cosmo/nats:${DC_NATS_VERSION:-2.11.0}
+    build:
+      context: docker/nats
+      dockerfile: Dockerfile
+    ports:
+      - '4222:4222'
+      - '8222:8222'
+      - '6222:6222'
+    healthcheck:
+      test: 'curl -f http://localhost:8222/healthz'
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - primary
+    profiles:
+      - dev
+      - edfs
+
+  redis:
+    image: redis:${DC_REDIS_VERSION:-7.2.4}-alpine
+    ports:
+      - '6379:6379'
+    command: redis-server /usr/local/etc/redis/redis.conf
+    volumes:
+      - ./docker/redis/redis.conf:/usr/local/etc/redis/redis.conf
+      - redis:/data
+    networks:
+      - primary
+    profiles:
+      - dev
+
+  redis-slave:
+    image: redis:${DC_REDIS_VERSION:-7.2.4}-alpine
+    ports:
+      - '6380:6379'
+    command: redis-server /usr/local/etc/redis/redis.conf
+    depends_on:
+      - redis
+    volumes:
+      - ./docker/redis/redis-slave.conf:/usr/local/etc/redis/redis.conf
+      - redis-slave:/data
+    networks:
+      - primary
+    profiles:
+      - dev
+
+  #  3 node minimum for a cluster, per redis documentation
+  redis-cluster-node-1:
+    image: redis:${DC_REDIS_VERSION:-7.2.4}-alpine
+    command: redis-server /usr/local/etc/redis/redis.conf
+    networks:
+      - primary
+    ports:
+      - '7001:6379'
+      - '16371:16379'
+    volumes:
+      - ./docker/redis/redis-cluster.conf:/usr/local/etc/redis/redis.conf
+    healthcheck:
+      test: ['CMD', 'redis-cli', '-p', '6379', 'ping']
+      interval: 10s
+      timeout: 5s
+      retries: 3
+    profiles:
+      - dev
+
+  redis-cluster-node-2:
+    image: redis:${DC_REDIS_VERSION:-7.2.4}-alpine
+    command: redis-server /usr/local/etc/redis/redis.conf
+    networks:
+      - primary
+    ports:
+      - '7002:6379'
+      - '16372:16379'
+    volumes:
+      - ./docker/redis/redis-cluster.conf:/usr/local/etc/redis/redis.conf
+    healthcheck:
+      test: ['CMD', 'redis-cli', '-p', '6379', 'ping']
+      interval: 10s
+      timeout: 5s
+      retries: 3
+    profiles:
+      - dev
+
+  redis-cluster-node-3:
+    image: redis:${DC_REDIS_VERSION:-7.2.4}-alpine
+    command: redis-server /usr/local/etc/redis/redis.conf
+    networks:
+      - primary
+    ports:
+      - '7003:6379'
+      - '16373:16379'
+    volumes:
+      - ./docker/redis/redis-cluster.conf:/usr/local/etc/redis/redis.conf
+    healthcheck:
+      test: ['CMD', 'redis-cli', '-p', '6379', 'ping']
+      interval: 10s
+      timeout: 5s
+      retries: 3
+    profiles:
+      - dev
+
+  # Opt-in replica nodes, one per master, enabled with the redis-cluster-replicas profile:
+  #   docker compose --profile dev --profile redis-cluster-replicas up -d redis-cluster-configure
+  # redis-cluster-create.sh picks up whichever of these are running and joins them with
+  # --cluster-replicas 1, which is what makes read_only=true routing testable locally. Without the
+  # profile the cluster stays three masters with no replicas.
+  redis-cluster-node-4:
+    image: redis:${DC_REDIS_VERSION:-7.2.4}-alpine
+    command: redis-server /usr/local/etc/redis/redis.conf
+    networks:
+      - primary
+    ports:
+      - '7004:6379'
+      - '16374:16379'
+    volumes:
+      - ./docker/redis/redis-cluster.conf:/usr/local/etc/redis/redis.conf
+    healthcheck:
+      test: ['CMD', 'redis-cli', '-p', '6379', 'ping']
+      interval: 10s
+      timeout: 5s
+      retries: 3
+    profiles:
+      - redis-cluster-replicas
+
+  redis-cluster-node-5:
+    image: redis:${DC_REDIS_VERSION:-7.2.4}-alpine
+    command: redis-server /usr/local/etc/redis/redis.conf
+    networks:
+      - primary
+    ports:
+      - '7005:6379'
+      - '16375:16379'
+    volumes:
+      - ./docker/redis/redis-cluster.conf:/usr/local/etc/redis/redis.conf
+    healthcheck:
+      test: ['CMD', 'redis-cli', '-p', '6379', 'ping']
+      interval: 10s
+      timeout: 5s
+      retries: 3
+    profiles:
+      - redis-cluster-replicas
+
+  redis-cluster-node-6:
+    image: redis:${DC_REDIS_VERSION:-7.2.4}-alpine
+    command: redis-server /usr/local/etc/redis/redis.conf
+    networks:
+      - primary
+    ports:
+      - '7006:6379'
+      - '16376:16379'
+    volumes:
+      - ./docker/redis/redis-cluster.conf:/usr/local/etc/redis/redis.conf
+    healthcheck:
+      test: ['CMD', 'redis-cli', '-p', '6379', 'ping']
+      interval: 10s
+      timeout: 5s
+      retries: 3
+    profiles:
+      - redis-cluster-replicas
+
+  redis-cluster-configure:
+    image: redis:${DC_REDIS_VERSION:-7.2.4}-alpine
+    command: /usr/local/etc/redis/redis-cluster-create.sh
+    networks:
+      - primary
+    depends_on:
+      redis-cluster-node-1:
+        condition: service_healthy
+      redis-cluster-node-2:
+        condition: service_healthy
+      redis-cluster-node-3:
+        condition: service_healthy
+      redis-cluster-node-4:
+        condition: service_healthy
+        # Absent unless the redis-cluster-replicas profile is enabled.
+        required: false
+      redis-cluster-node-5:
+        condition: service_healthy
+        # Absent unless the redis-cluster-replicas profile is enabled.
+        required: false
+      redis-cluster-node-6:
+        condition: service_healthy
+        # Absent unless the redis-cluster-replicas profile is enabled.
+        required: false
+    volumes:
+      - ./docker/redis/:/usr/local/etc/redis/
+    restart: on-failure:1
+    profiles:
+      - dev
+
+  # Local OCI plugin registry for gRPC plugin development.
+  # No auth, plain HTTP. For `wgc router plugin publish` to work:
+  #
+  # 1. Trust the registry in the Docker daemon (needed for `docker login`).
+  #    OrbStack: edit ~/.orbstack/config/docker.json, then `orb restart docker`:
+  #      { "insecure-registries": ["host.docker.internal:5050"] }
+  #    Docker Desktop: Settings -> Docker Engine, merge the same key, Apply & Restart.
+  #
+  # 2. Create a buildx builder with insecure registry support (needed for push):
+  #      cat > /tmp/buildkitd.toml << 'EOF'
+  #      [registry."host.docker.internal:5050"]
+  #        http = true
+  #        insecure = true
+  #      EOF
+  #      docker buildx create --name local-registry --driver docker-container --config /tmp/buildkitd.toml --use
+  #
+  # 3. Set PLUGIN_REGISTRY_URL=host.docker.internal:5050 in cli/.env
+  #    (host.docker.internal is required because buildx runs inside a container)
+  #
+  # 4. For the router to pull plugins from this registry, set in router/.env:
+  #      PLUGINS_REGISTRY_URL=localhost:5050
+  #      PLUGINS_REGISTRY_INSECURE=true
+  #    (localhost here because the router runs on the host, not in a container)
+  plugin-registry:
+    image: registry:2
+    ports:
+      - '127.0.0.1:5050:5000'
+    volumes:
+      - plugin-registry:/var/lib/registry
+    networks:
+      - primary
+    profiles:
+      - dev
+
+  kafka:
+    image: bitnamilegacy/kafka:3.7.0
+    ports:
+      - '9092:9092'
+    environment:
+      KAFKA_ENABLE_KRAFT: yes
+      KAFKA_CFG_PROCESS_ROLES: controller,broker
+      KAFKA_CFG_CONTROLLER_LISTENER_NAMES: CONTROLLER
+      KAFKA_CFG_LISTENERS: PLAINTEXT://:9092,CONTROLLER://:9093
+      KAFKA_CFG_LISTENER_SECURITY_PROTOCOL_MAP: CONTROLLER:PLAINTEXT,PLAINTEXT:PLAINTEXT
+      KAFKA_CFG_CONTROLLER_QUORUM_VOTERS: 1@localhost:9093
+      KAFKA_CFG_TRANSACTION_PARTITION_VERIFICATION_ENABLE: false
+      # Set this to "PLAINTEXT://127.0.0.1:9092" if you want to run this container on localhost via Docker
+      KAFKA_CFG_ADVERTISED_LISTENERS: PLAINTEXT://localhost:9092
+      KAFKA_CFG_NODE_ID: 1
+      ALLOW_PLAINTEXT_LISTENER: yes
+      KAFKA_KRAFT_CLUSTER_ID: XkpGZQ27R3eTl3OdTm2LYA # 16 byte base64-encoded UUID
+    healthcheck:
+      test: 'kafka-broker-api-versions.sh --version'
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    profiles:
+      - dev
+      - edfs
+
+# This network is shared between this file and docker-compose.full.yml to
+# allow the demo subgraphs to communicate with the rest of the infra
+networks:
+  primary:
+    driver: bridge
+    name: primary
+
+volumes:
+  postgres:
+  clickhouse:
+  prometheus:
+  grafana-storage:
+  minio:
+  redis:
+  redis-slave:
+  redis-cluster-configure:
+  redis-cluster-node-1:
+  redis-cluster-node-2:
+  redis-cluster-node-3:
+  redis-cluster-node-4:
+  redis-cluster-node-5:
+  redis-cluster-node-6:
+  plugin-registry:

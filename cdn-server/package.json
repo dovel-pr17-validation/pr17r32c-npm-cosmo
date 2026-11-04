@@ -1,0 +1,41 @@
+{
+  "name": "cdn",
+  "version": "0.22.2",
+  "private": true,
+  "author": {
+    "name": "WunderGraph Maintainers",
+    "email": "info@wundergraph.com"
+  },
+  "repository": {
+    "url": "https://github.com/wundergraph/cosmo"
+  },
+  "main": "dist/index.js",
+  "files": [
+    "dist"
+  ],
+  "license": "Apache-2.0",
+  "scripts": {
+    "dev": "tsx watch src/index.ts",
+    "build": "rm -rf dist && tsc",
+    "start": "tsx src/index.ts",
+    "lint": "eslint --cache && prettier -c src test",
+    "test": "vitest run --dir test",
+    "format": "prettier -w -c .",
+    "postversion": "name=$(jq -r .name package.json); version=$(jq -r .version package.json); gh workflow run image-release.yml -F name=$name -F workingDirectory=cdn-server -F tag=$version -F dockerContext=."
+  },
+  "dependencies": {
+    "@aws-sdk/client-s3": "^3.996.0",
+    "@hono/node-server": "catalog:",
+    "@wundergraph/cosmo-cdn": "workspace:*",
+    "dotenv": "catalog:",
+    "hono": "catalog:"
+  },
+  "devDependencies": {
+    "@types/node": "catalog:",
+    "eslint": "catalog:",
+    "eslint-config-unjs": "catalog:",
+    "tsx": "catalog:",
+    "typescript": "catalog:",
+    "vitest": "catalog:"
+  }
+}

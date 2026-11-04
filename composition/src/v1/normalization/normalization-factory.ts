@@ -1,0 +1,4989 @@
+import {
+  BREAK,
+  type ConstArgumentNode,
+  type ConstDirectiveNode,
+  type ConstValueNode,
+  type DefinitionNode,
+  type DirectiveDefinitionNode,
+  type DocumentNode,
+  type EnumValueDefinitionNode,
+  type FieldDefinitionNode,
+  type InputValueDefinitionNode,
+  type InterfaceTypeDefinitionNode,
+  type IntValueNode,
+  Kind,
+  type ListValueNode,
+  type NamedTypeNode,
+  type OperationTypeDefinitionNode,
+  OperationTypeNode,
+  print,
+  type StringValueNode,
+  type TypeDefinitionNode,
+  type TypeExtensionNode,
+  type TypeNode,
+  type ValueNode,
+  visit,
+} from 'graphql';
+import {
+  type EnumTypeNode,
+  formatDescription,
+  type InputObjectTypeNode,
+  type InterfaceTypeNode,
+  isKindAbstract,
+  isValidProvidesParentData,
+  nodeKindToDirectiveLocation,
+  type ObjectTypeNode,
+  operationTypeNodeToDefaultType,
+  safeParse,
+  type ScalarTypeNode,
+  type SchemaNode,
+  setToNamedTypeNodeArray,
+  stringToNamedTypeNode,
+  type UnionTypeNode,
+} from '../../ast/utils';
+import {
+  extractLinkArgs,
+  getConditionalFieldSetDirectiveName,
+  getInitialFieldCoordsPath,
+  getNormalizedFieldSet,
+  initializeDirectiveDefinitionDatas,
+  isNodeQuery,
+  validateArgumentTemplateReferences,
+  validateKeyFieldSets,
+} from './utils';
+import {
+  BASE_SCALARS,
+  DIRECTIVE_DEFINITION_BY_NAME,
+  MAX_OR_SCOPES,
+  V2_DIRECTIVE_DEFINITION_BY_DIRECTIVE_NAME,
+} from '../constants/constants';
+import {
+  addScopes,
+  fieldDatasToSimpleFieldDatas,
+  isCompositeOutputNodeKind,
+  isObjectDefinitionData,
+  isObjectNodeKind,
+  isUnionDefinitionData,
+  kindToConvertedTypeString,
+  mapToArrayOfValues,
+  newAuthorizationData,
+  newFieldAuthorizationData,
+} from '../utils/utils';
+import {
+  configureDescriptionNoDescriptionError,
+  costOnInterfaceFieldErrorMessage,
+  directlyProvidedInterfaceFieldError,
+  duplicateArgumentsError,
+  duplicateDirectiveArgumentDefinitionsErrorMessage,
+  duplicateDirectiveDefinitionArgumentErrorMessage,
+  duplicateDirectiveDefinitionError,
+  duplicateFieldInFieldSetErrorMessage,
+  duplicateImplementedInterfaceError,
+  duplicateTypeDefinitionError,
+  duplicateUnionMemberDefinitionError,
+  entityCacheWithoutKeyErrorMessage,
+  equivalentSourceAndTargetOverrideErrorMessage,
+  expectedEntityError,
+  externalInterfaceFieldsError,
+  fieldAlreadyProvidedErrorMessage,
+  incompatibleInputValueDefaultValueTypeError,
+  incompatibleTypeWithProvidesError,
+  inlineFragmentWithoutTypeConditionErrorMessage,
+  invalidArgumentValueErrorMessage,
+  invalidComposeDirectiveNameError,
+  invalidDirectiveDefinitionError,
+  invalidDirectiveError,
+  invalidDirectiveLocationErrorMessage,
+  invalidEdfsPublishResultObjectErrorMessage,
+  invalidEntityReturnTypeErrorMessage,
+  invalidEventDirectiveError,
+  invalidEventDrivenGraphError,
+  invalidEventDrivenMutationResponseTypeErrorMessage,
+  invalidEventProviderIdErrorMessage,
+  invalidEventSubjectErrorMessage,
+  invalidEventSubjectsErrorMessage,
+  invalidEventSubjectsItemErrorMessage,
+  invalidExternalDirectiveError,
+  invalidImplementedTypeError,
+  invalidInlineFragmentTypeConditionErrorMessage,
+  invalidInlineFragmentTypeConditionTypeErrorMessage,
+  invalidInlineFragmentTypeErrorMessage,
+  invalidInterfaceImplementationError,
+  invalidKeyFieldSetsEventDrivenErrorMessage,
+  invalidMutationOrSubscriptionFieldCoordsErrorMessage,
+  invalidMutuallyExclusiveCacheDirectivesError,
+  invalidNamedTypeError,
+  invalidNatsStreamConfigurationDefinitionErrorMessage,
+  invalidDeliveryGuaranteeModeDefinitionErrorMessage,
+  invalidDeliveryGuaranteesDefinitionErrorMessage,
+  invalidDeliveryGuaranteesInputFieldsErrorMessage,
+  invalidNatsStreamInputErrorMessage,
+  invalidNatsStreamInputFieldsErrorMessage,
+  invalidProvidesOrRequiresDirectivesError,
+  invalidRepeatedDirectiveErrorMessage,
+  invalidRootTypeDefinitionError,
+  invalidRootTypeError,
+  invalidRootTypeFieldEventsDirectivesErrorMessage,
+  invalidRootTypeFieldResponseTypesEventDrivenErrorMessage,
+  invalidSelectionOnUnionErrorMessage,
+  invalidSelectionSetDefinitionErrorMessage,
+  invalidSelectionSetErrorMessage,
+  invalidSubscriptionFilterLocationError,
+  invalidUnionMemberTypeError,
+  listSizeAssumedSizeSlicingArgDefaultErrorMessage,
+  listSizeAssumedSizeWithRequiredSlicingArgumentErrorMessage,
+  listSizeFieldMustReturnListOrUseSizedFieldsErrorMessage,
+  listSizeInvalidSlicingArgumentErrorMessage,
+  listSizeSizedFieldNotFoundErrorMessage,
+  listSizeSizedFieldNotListErrorMessage,
+  listSizeSizedFieldsInvalidReturnTypeErrorMessage,
+  listSizeSizedFieldsOnListsErrorMessage,
+  listSizeSlicingArgumentMalformedPathErrorMessage,
+  listSizeSlicingArgumentNotIntErrorMessage,
+  listSizeSlicingArgumentSegmentNotFoundErrorMessage,
+  listSizeSlicingArgumentSegmentNotInputObjectErrorMessage,
+  maxAgeNotPositiveIntegerErrorMessage,
+  multipleNamedTypeDefinitionError,
+  negativeCacheTTLNotNonNegativeIntegerErrorMessage,
+  noBaseScalarDefinitionError,
+  noDefinedEnumValuesError,
+  noDefinedUnionMembersError,
+  noFieldDefinitionsError,
+  noInputValueDefinitionsError,
+  noLeadingAtComposeDirectiveNameError,
+  nonEntityObjectExtensionsEventDrivenErrorMessage,
+  nonExternalConditionalFieldError,
+  nonExternalKeyFieldNamesEventDrivenErrorMessage,
+  nonKeyComposingObjectTypeNamesEventDrivenErrorMessage,
+  nonKeyFieldNamesEventDrivenErrorMessage,
+  oneOfRequiredFieldsError,
+  operationDefinitionError,
+  orScopesLimitError,
+  selfImplementationError,
+  semanticNonNullArgumentErrorMessage,
+  semanticNonNullLevelsIndexOutOfBoundsErrorMessage,
+  semanticNonNullLevelsNaNIndexErrorMessage,
+  semanticNonNullLevelsNonNullErrorMessage,
+  subgraphInvalidSyntaxError,
+  typeNameAlreadyProvidedErrorMessage,
+  undefinedCompositeOutputTypeError,
+  undefinedDirectiveError,
+  undefinedFieldInFieldSetErrorMessage,
+  undefinedRequiredArgumentsErrorMessage,
+  undefinedTypeError,
+  unexpectedDirectiveArgumentErrorMessage,
+  unexpectedKindFatalError,
+  unimportedComposeDirectiveNameError,
+  unknownComposeDirectiveNameError,
+  unknownInlineFragmentTypeConditionErrorMessage,
+  unknownNamedTypeError,
+  unknownTypeInFieldSetErrorMessage,
+  unparsableFieldSetErrorMessage,
+  unparsableFieldSetSelectionErrorMessage,
+} from '../../errors/errors';
+import {
+  DELIVERY_GUARANTEES_FIELD_NAMES,
+  DEPENDENCIES_BY_DIRECTIVE_NAME,
+  EVENT_DIRECTIVE_NAMES,
+  STREAM_CONFIGURATION_FIELD_NAMES,
+  UNSUPPORTED_DIRECTIVE_NAMES,
+} from '../constants/strings';
+import { buildASTSchema } from '../../buildASTSchema/buildASTSchema';
+import {
+  type CacheInvalidateConfiguration,
+  type CachePopulateConfiguration,
+  type ConfigurationData,
+  type DeliveryGuaranteeMode,
+  type DeliveryGuarantees,
+  type Costs,
+  type EntityCacheConfiguration,
+  type EventConfiguration,
+  type FieldListSizeConfiguration,
+  type FieldWeightConfiguration,
+  type NatsEventType,
+  type RequiredFieldConfiguration,
+} from '../../router-configuration/types';
+import { printTypeNode } from '@graphql-tools/merge';
+import {
+  composedOneOfDirectiveWarning,
+  consumerInactiveThresholdInvalidValueWarning,
+  externalEntityExtensionKeyFieldWarning,
+  externalInterfaceFieldsWarning,
+  fieldAlreadyProvidedWarning,
+  invalidExternalFieldWarning,
+  nonExternalConditionalFieldWarning,
+  overrideDirectiveLabelArgumentWarning,
+  providesOnUnionWarning,
+  providesWithInterfaceFieldSelectionWarning,
+  singleSubgraphInputFieldOneOfWarning,
+  unimplementedInterfaceOutputTypeWarning,
+  unsupportedDirectiveWarning,
+} from '../warnings/warnings';
+import { upsertDirectiveSchemaAndEntityDefinitions, upsertParentsAndChildren } from './walkers';
+import {
+  type AuthorizationData,
+  type CompositeOutputData,
+  type ConditionalFieldData,
+  type ConfigureDescriptionData,
+  type EntityData,
+  type EntityInterfaceSubgraphData,
+  type EnumDefinitionData,
+  type EnumValueData,
+  ExtensionType,
+  type ExternalFieldData,
+  type FieldData,
+  type InputObjectDefinitionData,
+  type InputValueData,
+  type InterfaceDefinitionData,
+  type NodeData,
+  type ObjectDefinitionData,
+  type ParentDefinitionData,
+  type ScalarDefinitionData,
+  type SchemaData,
+  type UnionDefinitionData,
+} from '../../schema-building/types/types';
+import {
+  areDefaultValuesCompatible,
+  childMapToValueArray,
+  getParentTypeName,
+  isFieldData,
+  isInputNodeKind,
+  isInputObjectDefinitionData,
+  isInterfaceDefinitionData,
+  isInterfaceNode,
+  isNodeExternalOrShareable,
+  isOutputNodeKind,
+  isParentDataCompositeOutputType,
+  isTypeNodeListType,
+  isTypeRequired,
+  isTypeValidImplementation,
+  newConditionalFieldData,
+  newExternalFieldData,
+  newFederatedDirectivesData,
+  sanitizeDefaultValue,
+} from '../../schema-building/utils';
+import {
+  type CompositeOutputNode,
+  extractDirectiveLocations,
+  getMutableEnumNode,
+  getMutableFieldNode,
+  getMutableInputObjectNode,
+  getMutableInputValueNode,
+  getMutableInterfaceNode,
+  getMutableObjectNode,
+  getMutableScalarNode,
+  getMutableTypeNode,
+  getMutableUnionNode,
+  getTypeNodeNamedTypeName,
+  type MutableInputValueNode,
+  type MutableTypeNode,
+} from '../../schema-building/ast';
+import { type InvalidRootTypeFieldEventsDirectiveData } from '../../errors/types/types';
+import { Graph } from '../../resolvability-graph/graph';
+import { DEFAULT_CONSUMER_INACTIVE_THRESHOLD } from '../constants/integers';
+import { type Warning } from '../../warnings/types';
+import { type NormalizationResult } from '../../normalization/types';
+import {
+  ARGUMENT,
+  ASSUMED_SIZE,
+  AUTHENTICATED,
+  CHANNEL,
+  CHANNELS,
+  COMPOSE_DIRECTIVE,
+  CONFIGURE_DESCRIPTION,
+  CONSUMER_INACTIVE_THRESHOLD,
+  CONSUMER_NAME,
+  COST,
+  CURSOR_UPPER,
+  DEFAULT_EDFS_PROVIDER_ID,
+  DELIVERY_GUARANTEES,
+  DESCRIPTION_OVERRIDE,
+  EDFS_DELIVERY_GUARANTEE_MODE,
+  EDFS_DELIVERY_GUARANTEES,
+  EDFS_KAFKA_PUBLISH,
+  EDFS_KAFKA_SUBSCRIBE,
+  EDFS_NATS_PUBLISH,
+  EDFS_NATS_REQUEST,
+  EDFS_NATS_STREAM_CONFIGURATION,
+  EDFS_NATS_SUBSCRIBE,
+  EDFS_PUBLISH_RESULT,
+  EDFS_REDIS_PUBLISH,
+  EDFS_REDIS_SUBSCRIBE,
+  ENTITIES_FIELD,
+  EXTENDS,
+  EXTERNAL,
+  FIELDS,
+  FIRST_ORDINAL,
+  FROM_CONTEXT,
+  HYPHEN_JOIN,
+  INACCESSIBLE,
+  INCLUDE_HEADERS,
+  INHERITABLE_DIRECTIVE_NAMES,
+  INPUT_FIELD,
+  INT_SCALAR,
+  INTERFACE_OBJECT,
+  KEY,
+  LABEL,
+  LEVELS,
+  LIST_SIZE,
+  LITERAL_AT,
+  LITERAL_PERIOD,
+  MAX_AGE,
+  MODE,
+  MUTATION,
+  NEGATIVE_CACHE_TTL,
+  NON_NULLABLE_BOOLEAN,
+  NON_NULLABLE_EDFS_PUBLISH_EVENT_RESULT,
+  NON_NULLABLE_INT,
+  NON_NULLABLE_STRING,
+  NOT_APPLICABLE,
+  OFF_UPPER,
+  ONE_OF,
+  OPENFED_CACHE_INVALIDATE,
+  OPENFED_CACHE_POPULATE,
+  OPENFED_ENTITY_CACHE,
+  OPERATION_TO_DEFAULT,
+  OVERRIDE,
+  PARTIAL_CACHE_LOAD,
+  PROPAGATE,
+  PROVIDER_ID,
+  PROVIDER_TYPE_KAFKA,
+  PROVIDER_TYPE_NATS,
+  PROVIDER_TYPE_REDIS,
+  PUBLISH,
+  QUERY,
+  REQUEST,
+  REQUIRE_FETCH_REASONS,
+  REQUIRE_ONE_SLICING_ARGUMENT,
+  REQUIRES_SCOPES,
+  RESOLVABLE,
+  ROOT_TYPE_NAMES,
+  SCHEMA,
+  SCOPES,
+  SEMANTIC_NON_NULL,
+  SERVICE_FIELD,
+  SHADOW_MODE,
+  SHAREABLE,
+  SIZED_FIELDS,
+  SLICING_ARGUMENTS,
+  STREAM_CONFIGURATION,
+  STREAM_NAME,
+  STRING_SCALAR,
+  SUBJECT,
+  SUBJECTS,
+  SUBSCRIBE,
+  SUBSCRIPTION,
+  SUBSCRIPTION_FILTER,
+  SUCCESS,
+  TOPIC,
+  TOPICS,
+  TYPENAME,
+  WEIGHT,
+} from '../../utils/string-constants';
+import { MAX_INT32 } from '../../utils/integer-constants';
+import {
+  addIterableToSet,
+  addOptionalIterableToSet,
+  generateSimpleDirective,
+  getEntriesNotInHashSet,
+  getFirstEntry,
+  getOrThrowError,
+  getValueOrDefault,
+  kindToNodeType,
+  numberToOrdinal,
+} from '../../utils/utils';
+import {
+  type AddInputValueDataByNodeParams,
+  type CachePopulateDirectiveNode,
+  type ComposeDirectiveNode,
+  type ConditionalFieldSetValidationResult,
+  type EntityCacheDirectiveNode,
+  type ExtractDirectiveArgumentDataResult,
+  type FieldSetData,
+  type HandleCostDirectiveParams,
+  type HandleListSizeDirectiveParams,
+  type HandleOverrideDirectiveParams,
+  type HandleRequiresScopesDirectiveParams,
+  type HandleSemanticNonNullDirectiveParams,
+  type KeyFieldSetData,
+  type LinkImportData,
+  type RecordDirectiveWeightOnFieldParams,
+  type UpsertInputObjectResult,
+  type ValidateDirectiveParams,
+} from './types/types';
+import {
+  getOrInitializeEntityCaching,
+  newConfigurationData,
+  newFieldSetConditionData,
+} from '../../router-configuration/utils';
+import { type ImplementationErrors, type InvalidFieldImplementation } from '../../utils/types';
+import {
+  type AbstractTypeName,
+  type ArgumentName,
+  type DirectiveName,
+  type FieldName,
+  type InterfaceTypeName,
+  type SubgraphName,
+  type TypeName,
+} from '../../types/types';
+import {
+  type GetFieldSetParentParams,
+  type HandleFieldInheritableDirectivesParams,
+  type HandleNonExternalConditionalFieldParams,
+  type IsAnyImplementationFieldExternalParams,
+  type NormalizationFactoryParams,
+  type NormalizeSubgraphFromStringParams,
+  type NormalizeSubgraphParams,
+  type ValidateArgumentParams,
+  type ValidateOneOfDirectiveParams,
+} from './types/params';
+import { EDFS_NATS_STREAM_CONFIGURATION_DEFINITION } from '../constants/non-directive-definitions';
+import type { CompositionOptions } from '../../types/params';
+import { type FieldSetParentResult, type SchemaNodeResult } from './types/results';
+import { isArgumentValueValid } from '../../validation/validation';
+import {
+  type AddDirectiveArgumentDataByNodeParams,
+  type ExtractDirectiveArgumentDataParams,
+} from '../../directive-definition-data/types/params';
+import { newDirectiveArgumentData, newDirectiveDefinitionData } from '../../directive-definition-data/utils';
+import { type DirectiveArgumentData, type DirectiveDefinitionData } from '../../directive-definition-data/types/types';
+
+export function normalizeSubgraphFromString({
+  noLocation,
+  options,
+  sdlString,
+}: NormalizeSubgraphFromStringParams): NormalizationResult {
+  const { error, documentNode } = safeParse(sdlString, noLocation);
+  if (error || !documentNode) {
+    return { errors: [subgraphInvalidSyntaxError(error)], success: false, warnings: [] };
+  }
+  const normalizationFactory = new NormalizationFactory({ internalGraph: new Graph(), options });
+  return normalizationFactory.normalize(documentNode);
+}
+
+export function normalizeSubgraph({
+  document,
+  internalGraph,
+  options,
+  subgraphName,
+}: NormalizeSubgraphParams): NormalizationResult {
+  const normalizationFactory = new NormalizationFactory({
+    internalGraph: internalGraph || new Graph(),
+    options,
+    subgraphName,
+  });
+  return normalizationFactory.normalize(document);
+}
+
+export class NormalizationFactory {
+  argumentName = '';
+  authorizationDataByParentTypeName = new Map<TypeName, AuthorizationData>();
+  concreteTypeNamesByAbstractTypeName = new Map<AbstractTypeName, Set<TypeName>>();
+  conditionalFieldDataByCoords = new Map<string, ConditionalFieldData>();
+  configurationDataByTypeName = new Map<TypeName, ConfigurationData>();
+  costs: Costs = {
+    fieldWeights: new Map(),
+    listSizes: new Map(),
+    typeWeights: new Map(),
+    directiveArgumentWeights: new Map(),
+  };
+  customDirectiveDefinitionByName = new Map<DirectiveName, DirectiveDefinitionNode>();
+  definedDirectiveNames = new Set<DirectiveName>();
+  directiveDefinitionByName = new Map<DirectiveName, DirectiveDefinitionNode>();
+  directiveDefinitionDataByName = initializeDirectiveDefinitionDatas();
+  doesParentRequireFetchReasons = false;
+  edfsDirectiveReferences = new Set<string>();
+  /* Cached entity configs keyed by type name, populated by extractEntityCacheDirective() from
+   * @openfed__entityCache. Future caching directives (@openfed__queryCache etc.) use this as a lookup
+   * to verify a field's return type is a cached entity.
+   */
+  entityCacheConfigByTypeName = new Map<TypeName, EntityCacheConfiguration>();
+  errors = new Array<Error>();
+  entityDataByTypeName = new Map<TypeName, EntityData>();
+  entityInterfaceDataByTypeName = new Map<TypeName, EntityInterfaceSubgraphData>();
+  eventsConfigurations = new Map<string, EventConfiguration[]>();
+  federatedDirectiveDataByName = new Map<DirectiveName, DirectiveDefinitionData>();
+  fieldSetDataByTypeName = new Map<TypeName, FieldSetData>();
+  importDataByDirectiveName = new Map<DirectiveName, LinkImportData>();
+  interfaceImplementationTypeNamesByInterfaceTypeName = new Map<InterfaceTypeName, Set<InterfaceTypeName>>();
+  internalGraph: Graph;
+  invalidConfigureDescriptionNodeDatas: Array<NodeData> = [];
+  invalidORScopesCoords = new Set<string>();
+  invalidRepeatedDirectiveNameByCoords = new Map<string, Set<string>>();
+  isParentObjectExternal = false;
+  isParentObjectShareable = false;
+  isSubgraphEventDrivenGraph = false;
+  isSubgraphVersionTwo = false;
+  keyFieldSetDatasByTypeName = new Map<string, Map<string, KeyFieldSetData>>();
+  lastParentNodeKind: Kind = Kind.NULL;
+  lastChildNodeKind: Kind = Kind.NULL;
+  options: CompositionOptions;
+  parentTypeNamesWithAuthDirectives = new Set<TypeName>();
+  keyFieldSetsByEntityTypeNameByFieldCoords = new Map<string, Map<string, Set<string>>>();
+  keyFieldNamesByParentTypeName = new Map<string, Set<string>>();
+  fieldCoordsByNamedTypeName = new Map<string, Set<string>>();
+  operationTypeNodeByTypeName = new Map<string, OperationTypeNode>();
+  originalParentTypeName = '';
+  originalTypeNameByRenamedTypeName = new Map<TypeName, TypeName>();
+  overriddenFieldNamesByTypeNameByTargetSubgraphName = new Map<SubgraphName, Map<TypeName, Set<FieldName>>>();
+  parentDefinitionDataByTypeName = new Map<TypeName, ParentDefinitionData>();
+  referencedDirectiveNames = new Set<DirectiveName>();
+  referencedTypeNames = new Set<TypeName>();
+  renamedParentTypeName = '';
+  schemaData: SchemaData;
+  subgraphName: SubgraphName;
+  unvalidatedExternalFieldCoords = new Set<string>();
+  usesEdfsNatsStreamConfiguration: boolean = false;
+  usesEdfsDeliveryGuarantees: boolean = false;
+  warnings: Array<Warning> = [];
+
+  constructor({ internalGraph, options, subgraphName }: NormalizationFactoryParams) {
+    this.options = options ?? {};
+    this.subgraphName = subgraphName || NOT_APPLICABLE;
+    this.internalGraph = internalGraph;
+    this.internalGraph.setSubgraphName(this.subgraphName);
+    this.schemaData = {
+      directivesByName: new Map<DirectiveName, Array<ConstDirectiveNode>>(),
+      kind: Kind.SCHEMA_DEFINITION,
+      name: SCHEMA,
+      operationTypes: new Map<OperationTypeNode, OperationTypeDefinitionNode>(),
+    };
+  }
+
+  validateArguments({ data, parentKind }: ValidateArgumentParams) {
+    for (const argumentData of data.argumentDataByName.values()) {
+      const namedTypeName = getTypeNodeNamedTypeName(argumentData.type);
+      if (BASE_SCALARS.has(namedTypeName)) {
+        argumentData.namedTypeKind = Kind.SCALAR_TYPE_DEFINITION;
+        continue;
+      }
+
+      const namedTypeData = this.parentDefinitionDataByTypeName.get(namedTypeName);
+      if (!namedTypeData) {
+        // undefined types are handled elsewhere
+        continue;
+      }
+
+      if (isInputNodeKind(namedTypeData.kind)) {
+        argumentData.namedTypeKind = namedTypeData.kind;
+        sanitizeDefaultValue({ data: argumentData, namedTypeData, node: argumentData.node });
+        continue;
+      }
+
+      this.errors.push(
+        invalidNamedTypeError({
+          data: argumentData,
+          namedTypeData,
+          nodeType: `${kindToNodeType(parentKind)} ${parentKind === Kind.DIRECTIVE_DEFINITION ? '' : 'field '}argument`,
+        }),
+      );
+    }
+  }
+
+  isTypeNameRootType(typeName: string): boolean {
+    return ROOT_TYPE_NAMES.has(typeName) || this.operationTypeNodeByTypeName.has(typeName);
+  }
+
+  handleFieldInheritableDirectives({
+    directivesByName,
+    fieldName,
+    inheritedDirectiveNames,
+    parentData,
+  }: HandleFieldInheritableDirectivesParams) {
+    if (this.doesParentRequireFetchReasons && !directivesByName.has(REQUIRE_FETCH_REASONS)) {
+      directivesByName.set(REQUIRE_FETCH_REASONS, [generateSimpleDirective(REQUIRE_FETCH_REASONS)]);
+      inheritedDirectiveNames.add(REQUIRE_FETCH_REASONS);
+    }
+    if (this.doesParentRequireFetchReasons || directivesByName.has(REQUIRE_FETCH_REASONS)) {
+      parentData.requireFetchReasonsFieldNames.add(fieldName);
+    }
+    if (!isObjectDefinitionData(parentData)) {
+      return;
+    }
+    if (this.isParentObjectExternal && !directivesByName.has(EXTERNAL)) {
+      directivesByName.set(EXTERNAL, [generateSimpleDirective(EXTERNAL)]);
+      inheritedDirectiveNames.add(EXTERNAL);
+    }
+    if (directivesByName.has(EXTERNAL)) {
+      this.unvalidatedExternalFieldCoords.add(`${parentData.name}.${fieldName}`);
+    }
+    if (this.isParentObjectShareable && !directivesByName.has(SHAREABLE)) {
+      directivesByName.set(SHAREABLE, [generateSimpleDirective(SHAREABLE)]);
+      inheritedDirectiveNames.add(SHAREABLE);
+    }
+  }
+
+  extractDirectives(
+    node:
+      | TypeDefinitionNode
+      | TypeExtensionNode
+      | FieldDefinitionNode
+      | InputValueDefinitionNode
+      | EnumValueDefinitionNode
+      | SchemaNode,
+    directivesByName: Map<string, Array<ConstDirectiveNode>>,
+  ) {
+    if (!node.directives) {
+      return directivesByName;
+    }
+    const isCompositeKind = isCompositeOutputNodeKind(node.kind);
+    const isObjectKind = isObjectNodeKind(node.kind);
+    for (const directiveNode of node.directives) {
+      const directiveName = directiveNode.name.value;
+      if (directiveName === SHAREABLE) {
+        // @shareable need only be propagated once
+        getValueOrDefault(directivesByName, directiveName, () => [directiveNode]);
+      } else {
+        getValueOrDefault(directivesByName, directiveName, () => []).push(directiveNode);
+      }
+      if (!isCompositeKind) {
+        continue;
+      }
+      this.doesParentRequireFetchReasons ||= directiveName === REQUIRE_FETCH_REASONS;
+      if (!isObjectKind) {
+        continue;
+      }
+      this.isParentObjectExternal ||= directiveName === EXTERNAL;
+      this.isParentObjectShareable ||= directiveName === SHAREABLE;
+    }
+    return directivesByName;
+  }
+
+  validateDirective({
+    data,
+    definitionData,
+    directiveCoords,
+    directiveNode,
+    errorMessages,
+    requiredArgumentNames,
+  }: ValidateDirectiveParams): Array<string> {
+    const directiveName = directiveNode.name.value;
+    const parentTypeName =
+      data.kind === Kind.FIELD_DEFINITION ? data.renamedParentTypeName || data.originalParentTypeName : data.name;
+    const isAuthenticated = directiveName === AUTHENTICATED;
+    const isCost = directiveName === COST;
+    const isField = isFieldData(data);
+    const isListSize = directiveName === LIST_SIZE;
+    const isOverride = directiveName === OVERRIDE;
+    const isRequiresScopes = directiveName === REQUIRES_SCOPES;
+    const isSemanticNonNull = directiveName === SEMANTIC_NON_NULL;
+    if (!directiveNode.arguments || directiveNode.arguments.length < 1) {
+      if (definitionData.requiredArgumentNames.size > 0) {
+        errorMessages.push(undefinedRequiredArgumentsErrorMessage(directiveName, requiredArgumentNames, []));
+      }
+      if (isAuthenticated) {
+        this.handleAuthenticatedDirective(data, parentTypeName);
+      }
+      if (!isField) {
+        return errorMessages;
+      }
+      if (isSemanticNonNull) {
+        // The default argument for levels is [0], so a non-null wrapper is invalid.
+        if (isTypeRequired(data.type)) {
+          errorMessages.push(
+            semanticNonNullLevelsNonNullErrorMessage({
+              typeString: printTypeNode(data.type),
+              value: '0',
+            }),
+          );
+        } else {
+          data.nullLevelsBySubgraphName.set(this.subgraphName, new Set<number>([0]));
+        }
+      }
+      if (isListSize && !isTypeNodeListType(data.type)) {
+        errorMessages.push(
+          listSizeFieldMustReturnListOrUseSizedFieldsErrorMessage(directiveCoords, printTypeNode(data.type)),
+        );
+      }
+      if (!isCost && !isListSize) {
+        this.recordDirectiveWeightOnField({ data: data as FieldData, definitionData, directiveName, directiveNode });
+      }
+      return errorMessages;
+    }
+    const definedArgumentNames = new Set<ArgumentName>();
+    const duplicateArgumentNames = new Set<ArgumentName>();
+    const unexpectedArgumentNames = new Set<ArgumentName>();
+    const requiredScopes: Array<Set<string>> = [];
+    for (const argumentNode of directiveNode.arguments) {
+      const argumentName = argumentNode.name.value;
+      if (definedArgumentNames.has(argumentName)) {
+        duplicateArgumentNames.add(argumentName);
+        continue;
+      }
+      definedArgumentNames.add(argumentName);
+      const argumentData = definitionData.argumentDataByName.get(argumentName);
+      if (!argumentData) {
+        unexpectedArgumentNames.add(argumentName);
+        continue;
+      }
+      if (
+        !isArgumentValueValid({
+          argumentValue: argumentNode.value,
+          parentDefinitionDataByTypeName: this.parentDefinitionDataByTypeName,
+          typeNode: argumentData.type,
+        })
+      ) {
+        errorMessages.push(
+          invalidArgumentValueErrorMessage(
+            print(argumentNode.value),
+            `@${directiveName}`,
+            argumentName,
+            printTypeNode(argumentData.type),
+          ),
+        );
+        continue;
+      }
+      /* Individual directives are handled in the loop because they validate a single argument, and duplicate
+       * arguments would short-circuit.
+       * The directive location validation means the node kind check should be unnecessary
+       * */
+      if (isOverride && isField) {
+        if (argumentNode.name.value === LABEL) {
+          this.warnings.push(
+            overrideDirectiveLabelArgumentWarning({
+              coords: `${data.originalParentTypeName}.${data.name}`,
+              subgraphName: this.subgraphName,
+            }),
+          );
+          continue;
+        }
+
+        this.handleOverrideDirective({
+          data,
+          directiveCoords,
+          errorMessages,
+          targetSubgraphName: (argumentNode.value as StringValueNode).value,
+        });
+        continue;
+      }
+      if (isSemanticNonNull && isField) {
+        this.handleSemanticNonNullDirective({
+          data,
+          directiveNode,
+          errorMessages,
+        });
+        continue;
+      }
+      if (!isRequiresScopes || argumentName !== SCOPES) {
+        continue;
+      }
+      this.extractRequiredScopes({
+        directiveCoords,
+        // Casts are safe because invalid arguments would short circuit
+        orScopes: (argumentNode.value as ListValueNode).values,
+        requiredScopes,
+      });
+    }
+    if (isCost) {
+      this.handleCostDirective({ data, directiveCoords, directiveNode, errorMessages });
+    } else if (isField) {
+      if (isListSize) {
+        this.handleListSizeDirective({ data, directiveCoords, directiveNode, errorMessages });
+      } else {
+        this.recordDirectiveWeightOnField({ data: data as FieldData, definitionData, directiveName, directiveNode });
+      }
+    }
+    if (duplicateArgumentNames.size > 0) {
+      errorMessages.push(duplicateDirectiveArgumentDefinitionsErrorMessage([...duplicateArgumentNames]));
+    }
+    if (unexpectedArgumentNames.size > 0) {
+      errorMessages.push(unexpectedDirectiveArgumentErrorMessage(directiveName, [...unexpectedArgumentNames]));
+    }
+    const undefinedArgumentNames = getEntriesNotInHashSet(requiredArgumentNames, definedArgumentNames);
+    if (undefinedArgumentNames.length > 0) {
+      errorMessages.push(
+        undefinedRequiredArgumentsErrorMessage(directiveName, requiredArgumentNames, undefinedArgumentNames),
+      );
+    }
+    if (errorMessages.length > 0 || !isRequiresScopes) {
+      return errorMessages;
+    }
+    const parentAuthorizationData = getValueOrDefault(this.authorizationDataByParentTypeName, parentTypeName, () =>
+      newAuthorizationData(parentTypeName),
+    );
+    if (data.kind !== Kind.FIELD_DEFINITION) {
+      this.parentTypeNamesWithAuthDirectives.add(parentTypeName);
+      parentAuthorizationData.requiredScopes.push(...requiredScopes);
+    } else {
+      const fieldAuthData = getValueOrDefault(parentAuthorizationData.fieldAuthDataByFieldName, data.name, () =>
+        newFieldAuthorizationData(data.name),
+      );
+      fieldAuthData.inheritedData.requiredScopes.push(...requiredScopes);
+      fieldAuthData.originalData.requiredScopes.push(...requiredScopes);
+    }
+    return errorMessages;
+  }
+
+  handleComposeDirective(node: ComposeDirectiveNode): void {
+    const argNode = node.arguments[0];
+    if (!argNode) {
+      return;
+    }
+
+    const rawValue = argNode.value.value;
+    if (!rawValue.startsWith(LITERAL_AT)) {
+      this.errors.push(noLeadingAtComposeDirectiveNameError(rawValue));
+      return;
+    }
+
+    const directiveName = rawValue.substring(1);
+    if (DIRECTIVE_DEFINITION_BY_NAME.has(directiveName)) {
+      if (directiveName === ONE_OF) {
+        this.warnings.push(composedOneOfDirectiveWarning(this.subgraphName));
+      } else {
+        this.errors.push(invalidComposeDirectiveNameError(rawValue));
+        return;
+      }
+    }
+
+    const definitionData = this.directiveDefinitionDataByName.get(directiveName);
+    if (!definitionData) {
+      this.errors.push(unknownComposeDirectiveNameError(rawValue));
+      return;
+    }
+
+    const importData = this.importDataByDirectiveName.get(rawValue);
+    if (!importData) {
+      this.errors.push(unimportedComposeDirectiveNameError(rawValue));
+      return;
+    }
+
+    definitionData.majorVersion = importData.majorVersion;
+    definitionData.minorVersion = importData.minorVersion;
+    definitionData.isComposed = true;
+
+    this.federatedDirectiveDataByName.set(directiveName, definitionData);
+  }
+
+  handleExecutableDirectives() {
+    for (const [directiveName, definitionData] of this.directiveDefinitionDataByName) {
+      if (definitionData.isComposed || definitionData.executableLocations.size < 1) {
+        continue;
+      }
+      this.federatedDirectiveDataByName.set(directiveName, definitionData);
+    }
+  }
+
+  validateDirectives(data: NodeData | SchemaData, directiveCoords: string) {
+    const undefinedDirectiveNames = new Set<DirectiveName>();
+    for (const [directiveName, directiveNodes] of data.directivesByName) {
+      const definitionData = this.directiveDefinitionDataByName.get(directiveName);
+      if (!definitionData) {
+        if (!undefinedDirectiveNames.has(directiveName)) {
+          this.errors.push(undefinedDirectiveError(directiveName, directiveCoords));
+          undefinedDirectiveNames.add(directiveName);
+        }
+        continue;
+      }
+
+      if (definitionData.isComposed) {
+        definitionData.isReferenced = true;
+      }
+
+      const definitionErrorMessages: Array<string> = [];
+      const directiveLocation = nodeKindToDirectiveLocation(data.kind);
+      if (!definitionData.locations.has(directiveLocation)) {
+        definitionErrorMessages.push(invalidDirectiveLocationErrorMessage(directiveName, directiveLocation));
+      }
+
+      if (directiveNodes.length > 1 && !definitionData.isRepeatable) {
+        const handledDirectiveNames = getValueOrDefault(
+          this.invalidRepeatedDirectiveNameByCoords,
+          directiveCoords,
+          () => new Set<string>(),
+        );
+        if (!handledDirectiveNames.has(directiveName)) {
+          handledDirectiveNames.add(directiveName);
+          definitionErrorMessages.push(invalidRepeatedDirectiveErrorMessage(directiveName));
+        }
+      }
+      const requiredArgumentNames = [...definitionData.requiredArgumentNames];
+      for (const argumentNode of definitionData.node.arguments ?? []) {
+        if (!argumentNode.defaultValue) {
+          continue;
+        }
+
+        const argumentData = definitionData.argumentDataByName.get(argumentNode.name.value);
+        if (!argumentData) {
+          continue;
+        }
+
+        const namedTypeData = this.parentDefinitionDataByTypeName.get(getTypeNodeNamedTypeName(argumentData.type));
+        // Undefined types are handled elsewhere
+        if (!namedTypeData) {
+          continue;
+        }
+
+        sanitizeDefaultValue({ data: argumentData, namedTypeData, node: argumentNode as MutableInputValueNode });
+      }
+
+      for (let i = 0; i < directiveNodes.length; i++) {
+        const directiveNode = directiveNodes[i];
+        const errorMessages = this.validateDirective({
+          data,
+          directiveNode,
+          definitionData,
+          directiveCoords,
+          errorMessages: i < 1 ? definitionErrorMessages : [],
+          requiredArgumentNames,
+        });
+        if (errorMessages.length > 0) {
+          this.errors.push(
+            invalidDirectiveError(directiveName, directiveCoords, numberToOrdinal(i + 1), errorMessages),
+          );
+        }
+      }
+    }
+    switch (data.kind) {
+      case Kind.ENUM_TYPE_DEFINITION: {
+        for (const [enumValueName, enumValueData] of data.enumValueDataByName) {
+          this.validateDirectives(enumValueData, `${data.name}.${enumValueName}`);
+        }
+        return;
+      }
+      case Kind.FIELD_DEFINITION: {
+        for (const [argumentName, argumentData] of data.argumentDataByName) {
+          this.validateDirectives(argumentData, `${data.originalParentTypeName}.${data.name}(${argumentName}: ...)`);
+        }
+        return;
+      }
+      case Kind.INPUT_OBJECT_TYPE_DEFINITION: {
+        for (const [inputValueName, inputValueData] of data.inputValueDataByName) {
+          this.validateDirectives(inputValueData, `${data.name}.${inputValueName}`);
+        }
+        return;
+      }
+      case Kind.INTERFACE_TYPE_DEFINITION:
+      // intentional fallthrough
+      case Kind.OBJECT_TYPE_DEFINITION: {
+        for (const [fieldName, fieldData] of data.fieldDataByName) {
+          this.validateDirectives(fieldData, `${data.name}.${fieldName}`);
+        }
+        return;
+      }
+      default:
+        return;
+    }
+  }
+
+  /* ExtensionType uses a trichotomy rather than a boolean because @extends is still a definition.
+   * A definition and another definition with @extends would still be an error, so it cannot be treated
+   * as a regular extension.
+   * V1 definitions with @extends need a base type.
+   */
+  getNodeExtensionType(
+    isRealExtension: boolean,
+    directivesByName: Map<string, Array<ConstDirectiveNode>>,
+    isRootType = false,
+  ): ExtensionType {
+    // If the extend keyword is present, it's simply an extension
+    if (isRealExtension) {
+      return ExtensionType.REAL;
+    }
+    /*
+     * @extends is not interpreted as an extension under the following circumstances:
+     * 1. It's a root type
+     * 2. It's a V2 subgraph (but extends is temporarily propagated to handle @external key fields)
+     * 3. And (of course) if @extends isn't defined at all
+     */
+    if (isRootType || !directivesByName.has(EXTENDS)) {
+      return ExtensionType.NONE;
+    }
+    // If a V1 non-root Object defines @extends, it is considered an extension across subgraphs.
+    return ExtensionType.EXTENDS;
+  }
+
+  setParentDataExtensionType(parentData: ParentDefinitionData, incomingExtensionType: ExtensionType) {
+    switch (parentData.extensionType) {
+      case ExtensionType.EXTENDS:
+      // intentional fallthrough
+      case ExtensionType.NONE: {
+        if (incomingExtensionType === ExtensionType.REAL) {
+          return;
+        }
+        this.errors.push(duplicateTypeDefinitionError(kindToNodeType(parentData.kind), parentData.name));
+        return;
+      }
+      default: {
+        parentData.extensionType = incomingExtensionType;
+      }
+    }
+  }
+
+  extractConfigureDescriptionData(data: NodeData, directiveNode: ConstDirectiveNode) {
+    if (!directiveNode.arguments || directiveNode.arguments.length < 1) {
+      if (!data.description) {
+        this.invalidConfigureDescriptionNodeDatas.push(data);
+      }
+      data.configureDescriptionDataBySubgraphName.set(this.subgraphName, {
+        propagate: true,
+        description: data.description?.value || '',
+      });
+      return;
+    }
+    const configureDescriptionData: ConfigureDescriptionData = {
+      propagate: true,
+      description: data.description?.value || '',
+    };
+    for (const argument of directiveNode.arguments) {
+      switch (argument.name.value) {
+        case PROPAGATE: {
+          if (argument.value.kind !== Kind.BOOLEAN) {
+            return;
+          }
+          configureDescriptionData.propagate = argument.value.value;
+          break;
+        }
+        case DESCRIPTION_OVERRIDE: {
+          if (argument.value.kind !== Kind.STRING) {
+            return;
+          }
+          configureDescriptionData.description = argument.value.value;
+          break;
+        }
+        default: {
+          return;
+        }
+      }
+    }
+    if (!data.description && !configureDescriptionData.description) {
+      this.invalidConfigureDescriptionNodeDatas.push(data);
+    }
+    data.configureDescriptionDataBySubgraphName.set(this.subgraphName, configureDescriptionData);
+  }
+
+  extractConfigureDescriptionsData(data: NodeData) {
+    const configureDescriptionNodes = data.directivesByName.get(CONFIGURE_DESCRIPTION);
+    if (configureDescriptionNodes && configureDescriptionNodes.length == 1) {
+      this.extractConfigureDescriptionData(data, configureDescriptionNodes[0]);
+    }
+    // TODO configureChildDescriptions will be added in another PR
+    // const configureChildDescriptionsNodes = data.directivesByName.get(CONFIGURE_CHILD_DESCRIPTIONS);
+    // if (configureChildDescriptionsNodes && configureChildDescriptionsNodes.length == 1) {
+    // }
+  }
+
+  extractImplementedInterfaceTypeNames(
+    node: InterfaceTypeNode | ObjectTypeNode,
+    implementedInterfaceTypeNames: Set<AbstractTypeName>,
+  ): Set<AbstractTypeName> {
+    if (!node.interfaces) {
+      return implementedInterfaceTypeNames;
+    }
+    const isInterface = isInterfaceNode(node);
+    const parentTypeName = node.name.value;
+    for (const implementedInterface of node.interfaces) {
+      const interfaceTypeName = implementedInterface.name.value;
+      if (implementedInterfaceTypeNames.has(interfaceTypeName)) {
+        this.errors.push(
+          duplicateImplementedInterfaceError(kindToConvertedTypeString(node.kind), parentTypeName, interfaceTypeName),
+        );
+        continue;
+      }
+      if (isInterface) {
+        getValueOrDefault(
+          this.interfaceImplementationTypeNamesByInterfaceTypeName,
+          interfaceTypeName,
+          () => new Set<AbstractTypeName>(),
+        ).add(parentTypeName);
+      }
+      implementedInterfaceTypeNames.add(interfaceTypeName);
+    }
+    return implementedInterfaceTypeNames;
+  }
+
+  updateCompositeOutputDataByNode(node: CompositeOutputNode, data: CompositeOutputData, extensionType: ExtensionType) {
+    this.setParentDataExtensionType(data, extensionType);
+    this.extractImplementedInterfaceTypeNames(node, data.implementedInterfaceTypeNames);
+    data.description ||= formatDescription('description' in node ? node.description : undefined);
+    this.extractConfigureDescriptionsData(data);
+    data.isEntity ||= data.directivesByName.has(KEY);
+    data.isInaccessible ||= data.directivesByName.has(INACCESSIBLE);
+    data.subgraphNames.add(this.subgraphName);
+  }
+
+  addConcreteTypeNamesForImplementedInterfaces(interfaceTypeNames: Set<AbstractTypeName>, concreteTypeName: TypeName) {
+    for (const interfaceName of interfaceTypeNames) {
+      getValueOrDefault(this.concreteTypeNamesByAbstractTypeName, interfaceName, () => new Set<TypeName>()).add(
+        concreteTypeName,
+      );
+      this.internalGraph.addEdge(
+        this.internalGraph.addOrUpdateNode(interfaceName, { isAbstract: true }),
+        this.internalGraph.addOrUpdateNode(concreteTypeName),
+        concreteTypeName,
+        true,
+      );
+    }
+  }
+
+  extractArguments(
+    argumentDataByName: Map<string, InputValueData>,
+    node: FieldDefinitionNode,
+  ): Map<string, InputValueData> {
+    if (!node.arguments?.length) {
+      return argumentDataByName;
+    }
+    const fieldName = node.name.value;
+    const originalFieldPath = `${this.originalParentTypeName}.${fieldName}`;
+    const duplicatedArguments = new Set<string>();
+    for (const argumentNode of node.arguments) {
+      const argumentName = argumentNode.name.value;
+      if (argumentDataByName.has(argumentName)) {
+        duplicatedArguments.add(argumentName);
+        continue;
+      }
+      this.addInputValueDataByNode({
+        fieldName,
+        inputValueDataByName: argumentDataByName,
+        isArgument: true,
+        node: argumentNode,
+        originalParentTypeName: this.originalParentTypeName,
+        renamedParentTypeName: this.renamedParentTypeName,
+      });
+    }
+    if (duplicatedArguments.size > 0) {
+      this.errors.push(duplicateArgumentsError(originalFieldPath, [...duplicatedArguments]));
+    }
+    return argumentDataByName;
+  }
+
+  extractDirectiveArgumentData({
+    argumentNodes,
+    directiveName,
+    errorMessages,
+  }: ExtractDirectiveArgumentDataParams): ExtractDirectiveArgumentDataResult {
+    const argumentDataByName = new Map<ArgumentName, DirectiveArgumentData>();
+    const optionalArgumentNames = new Set<ArgumentName>();
+    const requiredArgumentNames = new Set<ArgumentName>();
+    const output = {
+      argumentDataByName,
+      optionalArgumentNames,
+      requiredArgumentNames,
+    };
+    if (!argumentNodes) {
+      return output;
+    }
+    const duplicateArgumentNames = new Set<ArgumentName>();
+    for (const node of argumentNodes) {
+      const name = node.name.value;
+      if (argumentDataByName.has(name)) {
+        duplicateArgumentNames.add(name);
+        continue;
+      }
+      argumentDataByName.set(
+        name,
+        this.addDirectiveArgumentDataByNode({ directiveName, node, optionalArgumentNames, requiredArgumentNames }),
+      );
+    }
+    if (duplicateArgumentNames.size > 0) {
+      errorMessages.push(duplicateDirectiveDefinitionArgumentErrorMessage([...duplicateArgumentNames]));
+    }
+    return output;
+  }
+
+  // extracts cost weights from @cost directives applied to arguments of directive definitions.
+  // It works on nodes of this kind: "directive @myDirective(arg1: Int @cost(weight: 5)) on FIELD"
+  extractDirectiveArgumentCosts(node: DirectiveDefinitionNode) {
+    if (!node.arguments) {
+      return;
+    }
+    const directiveName = node.name.value;
+    for (const argNode of node.arguments) {
+      if (!argNode.directives) {
+        continue;
+      }
+      for (const directive of argNode.directives) {
+        if (directive.name.value !== COST) {
+          continue;
+        }
+        const weightArg = directive.arguments?.find((a) => a.name.value === WEIGHT);
+        if (!weightArg) {
+          continue;
+        }
+        if (weightArg.value.kind !== Kind.INT) {
+          const directiveCoords = `@${directiveName}(${argNode.name.value}: ...)`;
+          this.errors.push(
+            invalidDirectiveError(COST, directiveCoords, '1st', [
+              invalidArgumentValueErrorMessage(print(weightArg.value), `@${COST}`, WEIGHT, 'Int!'),
+            ]),
+          );
+          continue;
+        }
+        const weightValue = parseInt((weightArg.value as IntValueNode).value, 10);
+        this.costs.directiveArgumentWeights.set(`${directiveName}.${argNode.name.value}`, weightValue);
+      }
+    }
+  }
+
+  addDirectiveArgumentDataByNode({
+    directiveName,
+    node,
+    optionalArgumentNames,
+    requiredArgumentNames,
+  }: AddDirectiveArgumentDataByNodeParams): DirectiveArgumentData {
+    const name = node.name.value;
+    const parentName = `@${directiveName}`;
+    if (node.defaultValue && !areDefaultValuesCompatible(node.type, node.defaultValue)) {
+      this.errors.push(
+        incompatibleInputValueDefaultValueTypeError(
+          `argument "${name}"`,
+          parentName,
+          printTypeNode(node.type),
+          print(node.defaultValue),
+        ),
+      );
+    }
+    const isRequired = isTypeRequired(node.type);
+    if (node.defaultValue) {
+      optionalArgumentNames.add(name);
+    } else if (isRequired) {
+      requiredArgumentNames.add(name);
+    }
+    const namedTypeName = getTypeNodeNamedTypeName(node.type);
+    const argumentData = newDirectiveArgumentData({
+      name,
+      directive: `@${directiveName}`,
+      directivesByName: this.extractDirectives(node, new Map<DirectiveName, ConstDirectiveNode[]>()),
+      defaultValue: node.defaultValue,
+      description: formatDescription(node.description),
+      namedTypeKind: BASE_SCALARS.has(namedTypeName) ? Kind.SCALAR_TYPE_DEFINITION : Kind.NULL,
+      node: getMutableInputValueNode(node, parentName, this.errors),
+      requiredSubgraphNames: new Set<SubgraphName>(isRequired ? [this.subgraphName] : []),
+      subgraphNames: new Set<SubgraphName>([this.subgraphName]),
+      typeNode: getMutableTypeNode(node.type, parentName, this.errors),
+    });
+    this.extractConfigureDescriptionsData(argumentData);
+    return argumentData;
+  }
+
+  // returns true if the directive is custom; otherwise, false
+  addDirectiveDefinitionDataByNode(node: DirectiveDefinitionNode): boolean {
+    const name = node.name.value;
+    if (this.definedDirectiveNames.has(name)) {
+      this.errors.push(duplicateDirectiveDefinitionError(name));
+      return false;
+    }
+    this.definedDirectiveNames.add(name);
+    this.extractDirectiveArgumentCosts(node);
+    // Normalize federation directives by replacing them with predefined definitions
+    const definition = V2_DIRECTIVE_DEFINITION_BY_DIRECTIVE_NAME.get(name);
+    // Add the V2 directive definitions regardless of use so the subgraph can be recognised as a V2 subgraph.
+    if (definition) {
+      this.directiveDefinitionByName.set(name, definition);
+      // Uses of the directive also set this boolean in the walker.
+      this.isSubgraphVersionTwo = true;
+      return false;
+    }
+    // Other known directives will only be added if they are used.
+    if (DIRECTIVE_DEFINITION_BY_NAME.has(name)) {
+      return false;
+    }
+    this.directiveDefinitionByName.set(name, node);
+    // @TODO
+    const errorMessages: Array<string> = [];
+    const { argumentDataByName, optionalArgumentNames, requiredArgumentNames } = this.extractDirectiveArgumentData({
+      argumentNodes: node.arguments,
+      directiveName: name,
+      errorMessages,
+    });
+    const { errors, locations } = extractDirectiveLocations(node);
+
+    // @TODO
+    if (errors.length > 0) {
+      this.errors.push(...errors);
+    }
+    this.directiveDefinitionDataByName.set(
+      name,
+      newDirectiveDefinitionData({
+        argumentDataByName: argumentDataByName,
+        description: node.description,
+        isRepeatable: node.repeatable,
+        locations,
+        name,
+        node,
+        optionalArgumentNames,
+        requiredArgumentNames,
+        subgraphNames: new Set<SubgraphName>([this.subgraphName]),
+      }),
+    );
+    if (errorMessages.length > 0) {
+      this.errors.push(invalidDirectiveDefinitionError(name, errorMessages));
+    }
+    return true;
+  }
+
+  addFieldDataByNode(
+    fieldDataByName: Map<FieldName, FieldData>,
+    node: FieldDefinitionNode,
+    argumentDataByName: Map<ArgumentName, InputValueData>,
+    directivesByName: Map<DirectiveName, ConstDirectiveNode[]>,
+    inheritedDirectiveNames = new Set<DirectiveName>(),
+  ): FieldData {
+    const name = node.name.value;
+    const parentTypeName = this.renamedParentTypeName || this.originalParentTypeName;
+    const fieldCoords = `${this.originalParentTypeName}.${name}`;
+    const { isExternal, isShareable } = isNodeExternalOrShareable(node, !this.isSubgraphVersionTwo, directivesByName);
+    const namedTypeName = getTypeNodeNamedTypeName(node.type);
+    const fieldData: FieldData = {
+      argumentDataByName: argumentDataByName,
+      configureDescriptionDataBySubgraphName: new Map<string, ConfigureDescriptionData>(),
+      externalFieldDataBySubgraphName: new Map<SubgraphName, ExternalFieldData>([
+        [this.subgraphName, newExternalFieldData(isExternal)],
+      ]),
+      federatedCoords: `${parentTypeName}.${name}`,
+      inheritedDirectiveNames,
+      isInaccessible: directivesByName.has(INACCESSIBLE),
+      isShareableBySubgraphName: new Map<string, boolean>([[this.subgraphName, isShareable]]),
+      kind: Kind.FIELD_DEFINITION,
+      name,
+      namedTypeKind: BASE_SCALARS.has(namedTypeName) ? Kind.SCALAR_TYPE_DEFINITION : Kind.NULL,
+      namedTypeName,
+      node: getMutableFieldNode(node, fieldCoords, this.errors),
+      nullLevelsBySubgraphName: new Map<SubgraphName, Set<number>>(),
+      originalParentTypeName: this.originalParentTypeName,
+      federatedDirectivesData: newFederatedDirectivesData(),
+      renamedParentTypeName: parentTypeName,
+      subgraphNames: new Set<SubgraphName>([this.subgraphName]),
+      type: getMutableTypeNode(node.type, fieldCoords, this.errors),
+      directivesByName: directivesByName,
+      description: formatDescription(node.description),
+    };
+    if (!BASE_SCALARS.has(fieldData.namedTypeName)) {
+      this.referencedTypeNames.add(fieldData.namedTypeName);
+    }
+    this.extractConfigureDescriptionsData(fieldData);
+    fieldDataByName.set(name, fieldData);
+    return fieldData;
+  }
+
+  addInputValueDataByNode({
+    fieldName,
+    inputValueDataByName,
+    isArgument,
+    node,
+    originalParentTypeName,
+    renamedParentTypeName,
+  }: AddInputValueDataByNodeParams) {
+    const federatedParentTypeName = renamedParentTypeName || originalParentTypeName;
+    const name = node.name.value;
+    // directives do not have field names
+    const originalCoords = isArgument
+      ? `${originalParentTypeName}${fieldName ? `.${fieldName}` : ''}(${name}: ...)`
+      : `${originalParentTypeName}.${name}`;
+    if (node.defaultValue && !areDefaultValuesCompatible(node.type, node.defaultValue)) {
+      this.errors.push(
+        incompatibleInputValueDefaultValueTypeError(
+          (isArgument ? ARGUMENT : INPUT_FIELD) + ` "${name}"`,
+          originalCoords,
+          printTypeNode(node.type),
+          print(node.defaultValue),
+        ),
+      );
+    }
+    const federatedCoords = isArgument
+      ? `${federatedParentTypeName}${fieldName ? `.${fieldName}` : ''}(${name}: ...)`
+      : `${federatedParentTypeName}.${name}`;
+    const namedTypeName = getTypeNodeNamedTypeName(node.type);
+    const directivesByName = this.extractDirectives(node, new Map<DirectiveName, ConstDirectiveNode[]>());
+    const inputValueData: InputValueData = {
+      configureDescriptionDataBySubgraphName: new Map<string, ConfigureDescriptionData>(),
+      fromContextSubgraphNames: new Set<SubgraphName>(directivesByName.has(FROM_CONTEXT) ? [this.subgraphName] : []),
+      directivesByName,
+      federatedCoords,
+      fieldName,
+      includeDefaultValue: !!node.defaultValue,
+      isArgument,
+      kind: isArgument ? Kind.ARGUMENT : Kind.INPUT_VALUE_DEFINITION,
+      name,
+      namedTypeKind: BASE_SCALARS.has(namedTypeName) ? Kind.SCALAR_TYPE_DEFINITION : Kind.NULL,
+      namedTypeName,
+      node: getMutableInputValueNode(node, originalParentTypeName, this.errors),
+      originalCoords,
+      originalParentTypeName: originalParentTypeName,
+      federatedDirectivesData: newFederatedDirectivesData(),
+      renamedParentTypeName: federatedParentTypeName,
+      requiredSubgraphNames: new Set<SubgraphName>(isTypeRequired(node.type) ? [this.subgraphName] : []),
+      subgraphNames: new Set<SubgraphName>([this.subgraphName]),
+      type: getMutableTypeNode(node.type, originalParentTypeName, this.errors),
+      defaultValue: node.defaultValue, // TODO validate
+      description: formatDescription(node.description),
+    };
+    this.extractConfigureDescriptionsData(inputValueData);
+    inputValueDataByName.set(name, inputValueData);
+  }
+
+  upsertInterfaceDataByNode(node: InterfaceTypeNode, isRealExtension: boolean = false) {
+    const typeName = node.name.value;
+    const parentData = this.parentDefinitionDataByTypeName.get(typeName);
+    const directivesByName = this.extractDirectives(
+      node,
+      parentData?.directivesByName || new Map<DirectiveName, ConstDirectiveNode[]>(),
+    );
+    const extensionType = this.getNodeExtensionType(isRealExtension, directivesByName);
+    const entityInterfaceData = this.entityInterfaceDataByTypeName.get(typeName);
+    if (entityInterfaceData && node.fields) {
+      for (const fieldNode of node.fields) {
+        entityInterfaceData.interfaceFieldNames.add(fieldNode.name.value);
+      }
+    }
+    if (parentData) {
+      if (parentData.kind !== Kind.INTERFACE_TYPE_DEFINITION) {
+        this.errors.push(
+          multipleNamedTypeDefinitionError(
+            typeName,
+            kindToNodeType(parentData.kind),
+            kindToConvertedTypeString(node.kind),
+          ),
+        );
+        return;
+      }
+      this.updateCompositeOutputDataByNode(node, parentData, extensionType);
+      return;
+    }
+    const newParentData: InterfaceDefinitionData = {
+      configureDescriptionDataBySubgraphName: new Map<string, ConfigureDescriptionData>(),
+      directivesByName: directivesByName,
+      extensionType,
+      fieldDataByName: new Map<string, FieldData>(),
+      implementedInterfaceTypeNames: this.extractImplementedInterfaceTypeNames(node, new Set<AbstractTypeName>()),
+      isEntity: directivesByName.has(KEY),
+      isInaccessible: directivesByName.has(INACCESSIBLE),
+      kind: Kind.INTERFACE_TYPE_DEFINITION,
+      name: typeName,
+      node: getMutableInterfaceNode(node.name),
+      federatedDirectivesData: newFederatedDirectivesData(),
+      requireFetchReasonsFieldNames: new Set<FieldName>(),
+      subgraphNames: new Set<SubgraphName>([this.subgraphName]),
+      description: formatDescription('description' in node ? node.description : undefined),
+    };
+    this.extractConfigureDescriptionsData(newParentData);
+    this.parentDefinitionDataByTypeName.set(typeName, newParentData);
+  }
+
+  getRenamedRootTypeName(typeName: string) {
+    const operationTypeNode = this.operationTypeNodeByTypeName.get(typeName);
+    if (!operationTypeNode) {
+      return typeName;
+    }
+    switch (operationTypeNode) {
+      case OperationTypeNode.MUTATION:
+        return MUTATION;
+      case OperationTypeNode.SUBSCRIPTION:
+        return SUBSCRIPTION;
+      default:
+        return QUERY;
+    }
+  }
+
+  addInterfaceObjectFieldsByNode(node: ObjectTypeNode) {
+    const typeName = node.name.value;
+    const entityInterfaceData = this.entityInterfaceDataByTypeName.get(typeName);
+    if (!entityInterfaceData || !entityInterfaceData.isInterfaceObject || !node.fields) {
+      return;
+    }
+    for (const fieldNode of node.fields) {
+      entityInterfaceData.interfaceObjectFieldNames.add(fieldNode.name.value);
+    }
+  }
+
+  upsertObjectDataByNode(node: ObjectTypeNode, isRealExtension: boolean = false) {
+    const typeName = node.name.value;
+    const parentData = this.parentDefinitionDataByTypeName.get(typeName);
+    const directivesByName = this.extractDirectives(
+      node,
+      parentData?.directivesByName ?? new Map<string, ConstDirectiveNode[]>(),
+    );
+    const isRootType = this.isTypeNameRootType(typeName);
+    const extensionType = this.getNodeExtensionType(isRealExtension, directivesByName, isRootType);
+    this.addInterfaceObjectFieldsByNode(node);
+    if (parentData) {
+      if (parentData.kind !== Kind.OBJECT_TYPE_DEFINITION) {
+        this.errors.push(
+          multipleNamedTypeDefinitionError(
+            typeName,
+            kindToNodeType(parentData.kind),
+            kindToConvertedTypeString(node.kind),
+          ),
+        );
+        return;
+      }
+      this.updateCompositeOutputDataByNode(node, parentData, extensionType);
+      if (!directivesByName.has(INTERFACE_OBJECT)) {
+        this.addConcreteTypeNamesForImplementedInterfaces(parentData.implementedInterfaceTypeNames, typeName);
+        this.extractEntityCacheDirective(parentData);
+      }
+      return;
+    }
+    const implementedInterfaceTypeNames = this.extractImplementedInterfaceTypeNames(node, new Set<AbstractTypeName>());
+    const newParentData: ObjectDefinitionData = {
+      configureDescriptionDataBySubgraphName: new Map<SubgraphName, ConfigureDescriptionData>(),
+      directivesByName: directivesByName,
+      extensionType,
+      fieldDataByName: new Map<FieldName, FieldData>(),
+      implementedInterfaceTypeNames,
+      isEntity: directivesByName.has(KEY),
+      isInaccessible: directivesByName.has(INACCESSIBLE),
+      isRootType,
+      kind: Kind.OBJECT_TYPE_DEFINITION,
+      name: typeName,
+      node: getMutableObjectNode(node.name),
+      federatedDirectivesData: newFederatedDirectivesData(),
+      requireFetchReasonsFieldNames: new Set<FieldName>(),
+      renamedTypeName: this.getRenamedRootTypeName(typeName),
+      subgraphNames: new Set<SubgraphName>([this.subgraphName]),
+      description: formatDescription('description' in node ? node.description : undefined),
+    };
+    if (!directivesByName.has(INTERFACE_OBJECT)) {
+      this.addConcreteTypeNamesForImplementedInterfaces(implementedInterfaceTypeNames, typeName);
+      this.extractEntityCacheDirective(newParentData);
+    }
+    this.extractConfigureDescriptionsData(newParentData);
+    this.parentDefinitionDataByTypeName.set(typeName, newParentData);
+  }
+
+  upsertEnumDataByNode(node: EnumTypeNode, isRealExtension: boolean = false) {
+    const typeName = node.name.value;
+    this.internalGraph.addOrUpdateNode(typeName, { isLeaf: true });
+    const parentData = this.parentDefinitionDataByTypeName.get(typeName);
+    const directivesByName = this.extractDirectives(
+      node,
+      parentData?.directivesByName || new Map<DirectiveName, Array<ConstDirectiveNode>>(),
+    );
+    const extensionType = this.getNodeExtensionType(isRealExtension, directivesByName);
+    if (parentData) {
+      if (parentData.kind !== Kind.ENUM_TYPE_DEFINITION) {
+        this.errors.push(
+          multipleNamedTypeDefinitionError(
+            typeName,
+            kindToNodeType(parentData.kind),
+            kindToConvertedTypeString(node.kind),
+          ),
+        );
+        return;
+      }
+      this.setParentDataExtensionType(parentData, extensionType);
+      parentData.isInaccessible ||= directivesByName.has(INACCESSIBLE);
+      parentData.subgraphNames.add(this.subgraphName);
+      parentData.description ||= formatDescription('description' in node ? node.description : undefined);
+      this.extractConfigureDescriptionsData(parentData);
+      return;
+    }
+    const newParentData: EnumDefinitionData = {
+      appearances: 1,
+      configureDescriptionDataBySubgraphName: new Map<SubgraphName, ConfigureDescriptionData>(),
+      directivesByName: directivesByName,
+      extensionType,
+      enumValueDataByName: new Map<string, EnumValueData>(),
+      isInaccessible: directivesByName.has(INACCESSIBLE),
+      kind: Kind.ENUM_TYPE_DEFINITION,
+      name: typeName,
+      node: getMutableEnumNode(node.name),
+      federatedDirectivesData: newFederatedDirectivesData(),
+      subgraphNames: new Set([this.subgraphName]),
+      description: formatDescription('description' in node ? node.description : undefined),
+    };
+    this.extractConfigureDescriptionsData(newParentData);
+    this.parentDefinitionDataByTypeName.set(typeName, newParentData);
+  }
+
+  upsertInputObjectByNode(node: InputObjectTypeNode, isRealExtension: boolean = false): UpsertInputObjectResult {
+    const typeName = node.name.value;
+    const parentData = this.parentDefinitionDataByTypeName.get(typeName);
+    const directivesByName = this.extractDirectives(
+      node,
+      parentData?.directivesByName || new Map<DirectiveName, Array<ConstDirectiveNode>>(),
+    );
+    const extensionType = this.getNodeExtensionType(isRealExtension, directivesByName);
+    if (parentData) {
+      if (parentData.kind !== Kind.INPUT_OBJECT_TYPE_DEFINITION) {
+        // TODO
+        this.errors.push(
+          multipleNamedTypeDefinitionError(
+            typeName,
+            kindToNodeType(parentData.kind),
+            kindToConvertedTypeString(node.kind),
+          ),
+        );
+        return {
+          success: false,
+        };
+      }
+      this.setParentDataExtensionType(parentData, extensionType);
+      parentData.isInaccessible ||= directivesByName.has(INACCESSIBLE);
+      parentData.subgraphNames.add(this.subgraphName);
+      parentData.description ||= formatDescription('description' in node ? node.description : undefined);
+      this.extractConfigureDescriptionsData(parentData);
+      return {
+        success: true,
+        data: parentData,
+      };
+    }
+    const newParentData: InputObjectDefinitionData = {
+      configureDescriptionDataBySubgraphName: new Map<string, ConfigureDescriptionData>(),
+      directivesByName: directivesByName,
+      extensionType,
+      inputValueDataByName: new Map<string, InputValueData>(),
+      isInaccessible: directivesByName.has(INACCESSIBLE),
+      kind: Kind.INPUT_OBJECT_TYPE_DEFINITION,
+      name: typeName,
+      node: getMutableInputObjectNode(node.name),
+      federatedDirectivesData: newFederatedDirectivesData(),
+      subgraphNames: new Set<SubgraphName>([this.subgraphName]),
+      description: formatDescription('description' in node ? node.description : undefined),
+    };
+    this.extractConfigureDescriptionsData(newParentData);
+    this.parentDefinitionDataByTypeName.set(typeName, newParentData);
+    return {
+      success: true,
+      data: newParentData,
+    };
+  }
+
+  upsertScalarByNode(node: ScalarTypeNode, isRealExtension: boolean = false) {
+    const typeName = node.name.value;
+    this.internalGraph.addOrUpdateNode(typeName, { isLeaf: true });
+    const parentData = this.parentDefinitionDataByTypeName.get(typeName);
+    const directivesByName = this.extractDirectives(
+      node,
+      parentData?.directivesByName || new Map<string, Array<ConstDirectiveNode>>(),
+    );
+    const extensionType = this.getNodeExtensionType(isRealExtension, directivesByName);
+    if (parentData) {
+      if (parentData.kind !== Kind.SCALAR_TYPE_DEFINITION) {
+        this.errors.push(
+          multipleNamedTypeDefinitionError(
+            typeName,
+            kindToNodeType(parentData.kind),
+            kindToConvertedTypeString(node.kind),
+          ),
+        );
+        return;
+      }
+      this.setParentDataExtensionType(parentData, extensionType);
+      parentData.description ||= formatDescription('description' in node ? node.description : undefined);
+      parentData.subgraphNames.add(this.subgraphName);
+      this.extractConfigureDescriptionsData(parentData);
+      return;
+    }
+    const newParentData: ScalarDefinitionData = {
+      configureDescriptionDataBySubgraphName: new Map<string, ConfigureDescriptionData>(),
+      directivesByName: directivesByName,
+      extensionType,
+      kind: Kind.SCALAR_TYPE_DEFINITION,
+      name: typeName,
+      node: getMutableScalarNode(node.name),
+      federatedDirectivesData: newFederatedDirectivesData(),
+      subgraphNames: new Set([this.subgraphName]),
+      description: formatDescription('description' in node ? node.description : undefined),
+    };
+    this.extractConfigureDescriptionsData(newParentData);
+    this.parentDefinitionDataByTypeName.set(typeName, newParentData);
+  }
+
+  extractUnionMembers(
+    node: UnionTypeNode,
+    membersByMemberTypeName: Map<string, NamedTypeNode>,
+  ): Map<string, NamedTypeNode> {
+    if (!node.types) {
+      return membersByMemberTypeName;
+    }
+    const unionTypeName = node.name.value;
+    for (const member of node.types) {
+      const memberTypeName = member.name.value;
+      if (membersByMemberTypeName.has(memberTypeName)) {
+        this.errors.push(duplicateUnionMemberDefinitionError(unionTypeName, memberTypeName));
+        continue;
+      }
+      getValueOrDefault(this.concreteTypeNamesByAbstractTypeName, unionTypeName, () => new Set<string>()).add(
+        memberTypeName,
+      );
+      /*
+       * Scalars are never valid Union member types.
+       * However, base scalars are not upserted to the type definition data.
+       * Consequently, reference checks would yield unknown type errors in addition to invalid member errors.
+       * This check prevents error doubling were a Union member a base Scalar.
+       * */
+      if (!BASE_SCALARS.has(memberTypeName)) {
+        this.referencedTypeNames.add(memberTypeName);
+      }
+      membersByMemberTypeName.set(memberTypeName, member);
+    }
+    return membersByMemberTypeName;
+  }
+
+  upsertUnionByNode(node: UnionTypeNode, isRealExtension: boolean = false) {
+    const typeName = node.name.value;
+    const parentData = this.parentDefinitionDataByTypeName.get(typeName);
+    const directivesByName = this.extractDirectives(
+      node,
+      parentData?.directivesByName || new Map<string, ConstDirectiveNode[]>(),
+    );
+    const extensionType = this.getNodeExtensionType(isRealExtension, directivesByName);
+    // Also adds the concrete type name edges to the internal graph
+    this.addConcreteTypeNamesForUnion(node);
+    if (parentData) {
+      if (parentData.kind !== Kind.UNION_TYPE_DEFINITION) {
+        this.errors.push(
+          multipleNamedTypeDefinitionError(
+            typeName,
+            kindToNodeType(parentData.kind),
+            kindToConvertedTypeString(node.kind),
+          ),
+        );
+        return;
+      }
+      this.setParentDataExtensionType(parentData, extensionType);
+      this.extractUnionMembers(node, parentData.memberByMemberTypeName);
+      parentData.description ||= formatDescription('description' in node ? node.description : undefined);
+      parentData.subgraphNames.add(this.subgraphName);
+      this.extractConfigureDescriptionsData(parentData);
+      return;
+    }
+    const newParentData: UnionDefinitionData = {
+      configureDescriptionDataBySubgraphName: new Map<string, ConfigureDescriptionData>(),
+      directivesByName: directivesByName,
+      extensionType,
+      kind: Kind.UNION_TYPE_DEFINITION,
+      memberByMemberTypeName: this.extractUnionMembers(node, new Map<string, NamedTypeNode>()),
+      name: typeName,
+      node: getMutableUnionNode(node.name),
+      federatedDirectivesData: newFederatedDirectivesData(),
+      subgraphNames: new Set([this.subgraphName]),
+      description: formatDescription('description' in node ? node.description : undefined),
+    };
+    this.extractConfigureDescriptionsData(newParentData);
+    this.parentDefinitionDataByTypeName.set(typeName, newParentData);
+  }
+
+  extractKeyFieldSets(node: CompositeOutputNode, keyFieldSetDataByFieldSet: Map<string, KeyFieldSetData>) {
+    const parentTypeName = node.name.value;
+    if (!node.directives?.length) {
+      // This should never happen
+      this.errors.push(expectedEntityError(parentTypeName));
+      return;
+    }
+    // full validation happens elsewhere
+    let keyNumber = 0;
+    for (const directive of node.directives) {
+      if (directive.name.value !== KEY) {
+        continue;
+      }
+      keyNumber += 1;
+      if (!directive.arguments || directive.arguments.length < 1) {
+        continue;
+      }
+      let rawFieldSet;
+      let isUnresolvable = false;
+      for (const arg of directive.arguments) {
+        if (arg.name.value === RESOLVABLE) {
+          if (arg.value.kind === Kind.BOOLEAN && !arg.value.value) {
+            isUnresolvable = true;
+          }
+          continue;
+        }
+        if (arg.name.value !== FIELDS) {
+          rawFieldSet = undefined;
+          break;
+        }
+        if (arg.value.kind !== Kind.STRING) {
+          rawFieldSet = undefined;
+          break;
+        }
+        rawFieldSet = arg.value.value;
+      }
+      if (rawFieldSet === undefined) {
+        continue;
+      }
+      const { error, documentNode } = safeParse('{' + rawFieldSet + '}');
+      if (error || !documentNode) {
+        this.errors.push(
+          invalidDirectiveError(KEY, parentTypeName, numberToOrdinal(keyNumber), [
+            unparsableFieldSetErrorMessage(rawFieldSet, error),
+          ]),
+        );
+        continue;
+      }
+      const normalizedFieldSet = getNormalizedFieldSet(documentNode);
+      const keyFieldSetData = keyFieldSetDataByFieldSet.get(normalizedFieldSet);
+      if (keyFieldSetData) {
+        // Duplicate keys should potentially be a warning. For now, simply propagate if it's resolvable.
+        keyFieldSetData.isUnresolvable ||= isUnresolvable;
+      } else {
+        keyFieldSetDataByFieldSet.set(normalizedFieldSet, {
+          documentNode,
+          isUnresolvable,
+          normalizedFieldSet,
+          rawFieldSet,
+        });
+      }
+    }
+  }
+
+  getFieldSetParent({
+    isProvides,
+    parentData,
+    fieldName,
+    fieldSet,
+    parentTypeName,
+  }: GetFieldSetParentParams): FieldSetParentResult {
+    if (!isProvides) {
+      return {
+        data: parentData,
+        success: true,
+      };
+    }
+    const fieldData = getOrThrowError(parentData.fieldDataByName, fieldName, `${parentTypeName}.fieldDataByFieldName`);
+    const fieldNamedTypeName = getTypeNodeNamedTypeName(fieldData.node.type);
+    const fieldCoords = `${parentTypeName}.${fieldName}`;
+
+    if (BASE_SCALARS.has(fieldNamedTypeName)) {
+      return {
+        error: incompatibleTypeWithProvidesError({
+          fieldCoords,
+          responseType: fieldNamedTypeName,
+          subgraphName: this.subgraphName,
+        }),
+        success: false,
+      };
+    }
+
+    const namedTypeData = this.parentDefinitionDataByTypeName.get(fieldNamedTypeName);
+    // This error should never happen
+    if (!namedTypeData) {
+      return {
+        error: unknownNamedTypeError(fieldCoords, fieldNamedTypeName),
+        success: false,
+      };
+    }
+    // @TODO handle abstract types and fragments
+    if (isValidProvidesParentData(namedTypeData)) {
+      if (isUnionDefinitionData(namedTypeData)) {
+        this.warnings.push(
+          providesOnUnionWarning({
+            directiveCoords: fieldCoords,
+            fieldSet,
+            namedTypeName: fieldNamedTypeName,
+            subgraphName: this.subgraphName,
+          }),
+        );
+      }
+
+      return {
+        data: namedTypeData,
+        success: true,
+      };
+    }
+
+    return {
+      error: incompatibleTypeWithProvidesError({
+        fieldCoords,
+        responseType: fieldNamedTypeName,
+        subgraphName: this.subgraphName,
+      }),
+      success: false,
+    };
+  }
+
+  #handleNonExternalConditionalField({
+    currentFieldCoords,
+    directiveCoords,
+    directiveName,
+    fieldSet,
+    parentData,
+    selection,
+  }: HandleNonExternalConditionalFieldParams): void {
+    if (isInterfaceDefinitionData(parentData)) {
+      this.errors.push(
+        directlyProvidedInterfaceFieldError({
+          directiveCoords,
+          directiveName,
+          fieldSet,
+          selection,
+          subgraphName: this.subgraphName,
+          targetCoords: currentFieldCoords,
+        }),
+      );
+      return;
+    }
+    if (this.isSubgraphVersionTwo) {
+      this.errors.push(
+        nonExternalConditionalFieldError({
+          directiveCoords,
+          directiveName,
+          fieldSet,
+          subgraphName: this.subgraphName,
+          targetCoords: currentFieldCoords,
+        }),
+      );
+      return;
+    }
+    /* In V1, @requires and @provides do not need to declare any part of the field set @external.
+     * It would appear that any such non-external fields are treated as if they are non-conditionally provided.
+     * */
+    this.warnings.push(
+      nonExternalConditionalFieldWarning(
+        directiveCoords,
+        this.subgraphName,
+        currentFieldCoords,
+        fieldSet,
+        directiveName,
+      ),
+    );
+  }
+
+  // Returns true if at least one implementation field is @external
+  handleConditionalImplementationField({
+    fieldCoordsPath,
+    fieldName,
+    fieldPath,
+    interfaceTypeName,
+    isProvides,
+  }: IsAnyImplementationFieldExternalParams): boolean {
+    const implementationTypeNames = this.concreteTypeNamesByAbstractTypeName.get(interfaceTypeName);
+    if (!implementationTypeNames) {
+      return false;
+    }
+
+    let hasExternalField = false;
+    for (const typeName of implementationTypeNames) {
+      const data = this.parentDefinitionDataByTypeName.get(typeName);
+      if (!isObjectDefinitionData(data)) {
+        continue;
+      }
+
+      const fieldData = data.fieldDataByName.get(fieldName);
+      if (!fieldData?.directivesByName.has(EXTERNAL)) {
+        continue;
+      }
+
+      const externalData = fieldData.externalFieldDataBySubgraphName.get(this.subgraphName);
+      if (!externalData || externalData.isUnconditionallyProvided) {
+        continue;
+      }
+
+      if (!isProvides) {
+        return true;
+      }
+
+      getValueOrDefault(
+        this.conditionalFieldDataByCoords,
+        `${typeName}.${fieldName}`,
+        newConditionalFieldData,
+      ).providedBy.push(
+        newFieldSetConditionData({
+          fieldCoordinatesPath: [...fieldCoordsPath],
+          fieldPath: [...fieldPath],
+        }),
+      );
+
+      hasExternalField = true;
+    }
+
+    return hasExternalField;
+  }
+
+  validateConditionalFieldSet(
+    selectionSetParentData: CompositeOutputData | UnionDefinitionData,
+    fieldSet: string,
+    directiveFieldName: string,
+    isProvides: boolean,
+    directiveParentTypeName: string,
+  ): ConditionalFieldSetValidationResult {
+    // Create a new selection set so that the value can be parsed as a new DocumentNode
+    const { error, documentNode } = safeParse('{' + fieldSet + '}');
+    if (error || !documentNode) {
+      return { errorMessages: [unparsableFieldSetErrorMessage(fieldSet, error)] };
+    }
+    const nf = this;
+    const parentDatas: Array<CompositeOutputData | UnionDefinitionData> = [selectionSetParentData];
+    const directiveName = getConditionalFieldSetDirectiveName(isProvides);
+    const definedFields: Array<Set<string>> = [];
+    const directiveCoords = `${directiveParentTypeName}.${directiveFieldName}`;
+    const fieldCoordsPath = getInitialFieldCoordsPath(isProvides, directiveCoords);
+    const fieldPath = [directiveFieldName];
+    const externalAncestors = new Set<string>();
+    const errorMessages: Array<string> = [];
+    let currentDepth = -1;
+    let shouldDefineSelectionSet = true;
+    let lastFieldName = directiveFieldName;
+    let hasConditionalField = false;
+    visit(documentNode, {
+      Argument: {
+        enter() {
+          return false;
+        },
+      },
+      Field: {
+        enter(node) {
+          const parentData = parentDatas[currentDepth];
+          const parentTypeName = parentData.name;
+          if (parentData.kind === Kind.UNION_TYPE_DEFINITION) {
+            errorMessages.push(invalidSelectionOnUnionErrorMessage(fieldSet, fieldCoordsPath, parentTypeName));
+            return BREAK;
+          }
+          const fieldName = node.name.value;
+          const currentFieldCoords = `${parentTypeName}.${fieldName}`;
+          nf.unvalidatedExternalFieldCoords.delete(currentFieldCoords);
+          // If an object-like was just visited, a selection set should have been entered
+          if (shouldDefineSelectionSet) {
+            errorMessages.push(
+              invalidSelectionSetErrorMessage(
+                fieldSet,
+                fieldCoordsPath,
+                parentTypeName,
+                kindToNodeType(parentData.kind),
+              ),
+            );
+            return BREAK;
+          }
+          fieldCoordsPath.push(currentFieldCoords);
+          fieldPath.push(fieldName);
+          lastFieldName = fieldName;
+          const isInterfaceParent = isInterfaceDefinitionData(parentData);
+          if (fieldName === TYPENAME) {
+            if (isProvides) {
+              errorMessages.push(typeNameAlreadyProvidedErrorMessage(currentFieldCoords, nf.subgraphName));
+              return BREAK;
+            }
+            if (externalAncestors.size < 1) {
+              if (isProvides && isInterfaceParent) {
+                nf.warnings.push(
+                  providesWithInterfaceFieldSelectionWarning({
+                    directiveCoords,
+                    fieldCoords: currentFieldCoords,
+                    fieldSet,
+                    selection: fieldPath.length < 2 ? fieldName : `${fieldPath.at(-2)} { ${fieldName} }`,
+                    subgraphName: nf.subgraphName,
+                  }),
+                );
+              }
+              nf.#handleNonExternalConditionalField({
+                currentFieldCoords,
+                directiveCoords,
+                directiveName,
+                fieldSet,
+                parentData,
+                selection: fieldPath.length < 2 ? fieldName : `${fieldPath.at(-2)} { ${fieldName} }`,
+              });
+            }
+            return;
+          }
+          const fieldData = parentData.fieldDataByName.get(fieldName);
+          // undefined if the field does not exist on the parent
+          if (!fieldData) {
+            errorMessages.push(undefinedFieldInFieldSetErrorMessage(fieldSet, parentTypeName, fieldName));
+            return BREAK;
+          }
+          if (definedFields[currentDepth].has(fieldName)) {
+            errorMessages.push(duplicateFieldInFieldSetErrorMessage(fieldSet, currentFieldCoords));
+            return BREAK;
+          }
+          definedFields[currentDepth].add(fieldName);
+          const { isDefinedExternal, isUnconditionallyProvided } = getOrThrowError(
+            fieldData.externalFieldDataBySubgraphName,
+            nf.subgraphName,
+            `${currentFieldCoords}.externalFieldDataBySubgraphName`,
+          );
+          const isFieldConditional = isDefinedExternal && !isUnconditionallyProvided;
+          if (!isUnconditionallyProvided) {
+            hasConditionalField = true;
+          }
+          const namedTypeName = getTypeNodeNamedTypeName(fieldData.node.type);
+          // The child could itself be a parent
+          const namedTypeData = nf.parentDefinitionDataByTypeName.get(namedTypeName);
+          // The base scalars are not in the parents map
+          if (
+            BASE_SCALARS.has(namedTypeName) ||
+            namedTypeData?.kind === Kind.SCALAR_TYPE_DEFINITION ||
+            namedTypeData?.kind === Kind.ENUM_TYPE_DEFINITION
+          ) {
+            if (externalAncestors.size < 1 && !isDefinedExternal) {
+              if (isProvides && isInterfaceParent) {
+                nf.warnings.push(
+                  providesWithInterfaceFieldSelectionWarning({
+                    directiveCoords,
+                    fieldCoords: currentFieldCoords,
+                    fieldSet,
+                    selection: fieldPath.length < 2 ? fieldName : `${fieldPath.at(-2)} { ${fieldName} }`,
+                    subgraphName: nf.subgraphName,
+                  }),
+                );
+              }
+              nf.#handleNonExternalConditionalField({
+                currentFieldCoords,
+                directiveCoords,
+                directiveName,
+                fieldSet,
+                parentData,
+                selection: fieldPath.length < 2 ? fieldName : `${fieldPath.at(-2)} { ${fieldName} }`,
+              });
+              return;
+            }
+            if (isInterfaceParent) {
+              if (isProvides) {
+                nf.warnings.push(
+                  providesWithInterfaceFieldSelectionWarning({
+                    directiveCoords,
+                    fieldCoords: currentFieldCoords,
+                    fieldSet,
+                    selection: fieldPath.length < 2 ? fieldName : `${fieldPath.at(-2)} { ${fieldName} }`,
+                    subgraphName: nf.subgraphName,
+                  }),
+                );
+              }
+              nf.handleConditionalImplementationField({
+                fieldCoordsPath,
+                fieldName,
+                fieldPath,
+                interfaceTypeName: parentData.name,
+                isProvides,
+              });
+            }
+            if (externalAncestors.size < 1 && isUnconditionallyProvided) {
+              // V2 subgraphs return an error when an external key field on an entity extension is provided.
+              if (nf.isSubgraphVersionTwo) {
+                errorMessages.push(
+                  fieldAlreadyProvidedErrorMessage(currentFieldCoords, nf.subgraphName, directiveName),
+                );
+              } else {
+                nf.warnings.push(
+                  fieldAlreadyProvidedWarning(currentFieldCoords, directiveName, directiveCoords, nf.subgraphName),
+                );
+              }
+              return;
+            }
+            // @TODO re-assess in v2 because this would be breaking for @provides in v1
+            if (!isFieldConditional && !isProvides) {
+              // Do not add unnecessary @requires configurations
+              return;
+            }
+            const conditionalFieldData = getValueOrDefault(
+              nf.conditionalFieldDataByCoords,
+              currentFieldCoords,
+              newConditionalFieldData,
+            );
+            const fieldSetCondition = newFieldSetConditionData({
+              fieldCoordinatesPath: [...fieldCoordsPath],
+              fieldPath: [...fieldPath],
+            });
+            isProvides
+              ? conditionalFieldData.providedBy.push(fieldSetCondition)
+              : conditionalFieldData.requiredBy.push(fieldSetCondition);
+            return;
+          }
+          if (!namedTypeData) {
+            // Should not be possible to receive this error
+            errorMessages.push(unknownTypeInFieldSetErrorMessage(fieldSet, currentFieldCoords, namedTypeName));
+            return BREAK;
+          }
+          // TODO isFieldConditional
+          if (isDefinedExternal) {
+            if (isProvides) {
+              getValueOrDefault(
+                nf.conditionalFieldDataByCoords,
+                currentFieldCoords,
+                newConditionalFieldData,
+              ).providedBy.push(
+                newFieldSetConditionData({
+                  fieldCoordinatesPath: [...fieldCoordsPath],
+                  fieldPath: [...fieldPath],
+                }),
+              );
+            }
+            externalAncestors.add(currentFieldCoords);
+          }
+          if (!isValidProvidesParentData(namedTypeData)) {
+            return;
+          }
+
+          shouldDefineSelectionSet = true;
+          parentDatas.push(namedTypeData);
+          if (!isInterfaceParent) {
+            return;
+          }
+
+          if (isProvides) {
+            nf.warnings.push(
+              providesWithInterfaceFieldSelectionWarning({
+                directiveCoords,
+                fieldCoords: currentFieldCoords,
+                fieldSet,
+                selection: fieldPath.length < 2 ? fieldName : `${fieldPath.at(-2)} { ${fieldName} }`,
+                subgraphName: nf.subgraphName,
+              }),
+            );
+          }
+          if (
+            !nf.handleConditionalImplementationField({
+              fieldCoordsPath,
+              fieldName,
+              fieldPath,
+              interfaceTypeName: parentData.name,
+              isProvides,
+            }) ||
+            externalAncestors.size > 0
+          ) {
+            return;
+          }
+          hasConditionalField = true;
+          externalAncestors.add(currentFieldCoords);
+        },
+        leave() {
+          externalAncestors.delete(fieldCoordsPath.pop() || '');
+          fieldPath.pop();
+        },
+      },
+      InlineFragment: {
+        enter(node) {
+          const parentData = parentDatas[currentDepth];
+          const parentTypeName = parentData.name;
+          const fieldCoordinates =
+            fieldCoordsPath.length < 1 ? selectionSetParentData.name : fieldCoordsPath[fieldCoordsPath.length - 1];
+          if (!node.typeCondition) {
+            errorMessages.push(inlineFragmentWithoutTypeConditionErrorMessage(fieldSet, fieldCoordinates));
+            return BREAK;
+          }
+          const typeConditionName = node.typeCondition.name.value;
+          // It's possible to infinitely define fragments
+          if (typeConditionName === parentTypeName) {
+            parentDatas.push(parentData);
+            shouldDefineSelectionSet = true;
+            return;
+          }
+          const fragmentNamedTypeData = nf.parentDefinitionDataByTypeName.get(typeConditionName);
+          if (!fragmentNamedTypeData) {
+            errorMessages.push(
+              unknownInlineFragmentTypeConditionErrorMessage(
+                fieldSet,
+                fieldCoordsPath,
+                parentTypeName,
+                typeConditionName,
+              ),
+            );
+            return BREAK;
+          }
+          shouldDefineSelectionSet = true;
+          switch (fragmentNamedTypeData.kind) {
+            case Kind.INTERFACE_TYPE_DEFINITION: {
+              // The enclosing type is an Object
+              if (!isKindAbstract(parentData.kind)) {
+                if (
+                  !isObjectDefinitionData(parentData) ||
+                  !parentData.implementedInterfaceTypeNames.has(typeConditionName)
+                ) {
+                  break;
+                }
+                parentDatas.push(fragmentNamedTypeData);
+                return;
+              }
+
+              // The enclosing type is an Interface or Union
+              const concreteTypeNames = nf.concreteTypeNamesByAbstractTypeName.get(typeConditionName);
+              const parentConcreteTypeNames = nf.concreteTypeNamesByAbstractTypeName.get(parentData.name);
+              if (
+                !concreteTypeNames ||
+                !parentConcreteTypeNames ||
+                parentConcreteTypeNames.isDisjointFrom(concreteTypeNames)
+              ) {
+                break;
+              }
+
+              parentDatas.push(fragmentNamedTypeData);
+              return;
+            }
+            case Kind.OBJECT_TYPE_DEFINITION: {
+              if (!isKindAbstract(parentData.kind)) {
+                errorMessages.push(
+                  invalidInlineFragmentTypeErrorMessage(fieldSet, fieldCoordsPath, typeConditionName, parentTypeName),
+                );
+                return BREAK;
+              }
+              const concreteTypeNames = nf.concreteTypeNamesByAbstractTypeName.get(parentTypeName);
+              if (!concreteTypeNames || !concreteTypeNames.has(typeConditionName)) {
+                break;
+              }
+              parentDatas.push(fragmentNamedTypeData);
+              return;
+            }
+            case Kind.UNION_TYPE_DEFINITION: {
+              const concreteTypeNames = nf.concreteTypeNamesByAbstractTypeName.get(typeConditionName);
+              if (!concreteTypeNames) {
+                break;
+              }
+              // The enclosing type is an Object
+              if (!isKindAbstract(parentData.kind)) {
+                // The enclosing Object is a valid part of the Union
+                if (concreteTypeNames.has(parentTypeName)) {
+                  parentDatas.push(fragmentNamedTypeData);
+                  return;
+                }
+                break;
+              }
+
+              // The enclosing type is an Interface or Union; fetch its implementations/members respectively.
+              const parentConcreteTypeNames = nf.concreteTypeNamesByAbstractTypeName.get(parentTypeName);
+              if (!parentConcreteTypeNames || parentConcreteTypeNames.isDisjointFrom(concreteTypeNames)) {
+                break;
+              }
+
+              parentDatas.push(fragmentNamedTypeData);
+              return;
+            }
+            default: {
+              errorMessages.push(
+                invalidInlineFragmentTypeConditionTypeErrorMessage(
+                  fieldSet,
+                  fieldCoordsPath,
+                  parentTypeName,
+                  typeConditionName,
+                  kindToNodeType(fragmentNamedTypeData.kind),
+                ),
+              );
+              return BREAK;
+            }
+          }
+          errorMessages.push(
+            invalidInlineFragmentTypeConditionErrorMessage(
+              fieldSet,
+              fieldCoordsPath,
+              typeConditionName,
+              kindToNodeType(parentData.kind),
+              parentTypeName,
+              kindToNodeType(fragmentNamedTypeData.kind),
+            ),
+          );
+          return BREAK;
+        },
+      },
+      SelectionSet: {
+        enter() {
+          if (!shouldDefineSelectionSet) {
+            const parentData = parentDatas[currentDepth];
+            if (parentData.kind === Kind.UNION_TYPE_DEFINITION) {
+              // Should never happen
+              errorMessages.push(unparsableFieldSetSelectionErrorMessage(fieldSet, lastFieldName));
+              return BREAK;
+            }
+            if (lastFieldName === TYPENAME) {
+              errorMessages.push(
+                invalidSelectionSetDefinitionErrorMessage(
+                  fieldSet,
+                  fieldCoordsPath,
+                  STRING_SCALAR,
+                  kindToNodeType(Kind.SCALAR_TYPE_DEFINITION),
+                ),
+              );
+              return BREAK;
+            }
+            const fieldData = parentData.fieldDataByName.get(lastFieldName);
+            if (!fieldData) {
+              errorMessages.push(undefinedFieldInFieldSetErrorMessage(fieldSet, parentData.name, lastFieldName));
+              return BREAK;
+            }
+            const fieldNamedTypeName = getTypeNodeNamedTypeName(fieldData.node.type);
+            // If the child is not found, it's a base scalar. Undefined types would have already been handled.
+            const namedTypeData = nf.parentDefinitionDataByTypeName.get(fieldNamedTypeName);
+            const childKind = namedTypeData ? namedTypeData.kind : Kind.SCALAR_TYPE_DEFINITION;
+            errorMessages.push(
+              invalidSelectionSetDefinitionErrorMessage(
+                fieldSet,
+                fieldCoordsPath,
+                fieldNamedTypeName,
+                kindToNodeType(childKind),
+              ),
+            );
+            return BREAK;
+          }
+          currentDepth += 1;
+          shouldDefineSelectionSet = false;
+          if (currentDepth < 0 || currentDepth >= parentDatas.length) {
+            errorMessages.push(unparsableFieldSetSelectionErrorMessage(fieldSet, lastFieldName));
+            return BREAK;
+          }
+          definedFields.push(new Set<string>());
+        },
+        leave() {
+          if (shouldDefineSelectionSet) {
+            const parentData = parentDatas[currentDepth + 1];
+            errorMessages.push(
+              invalidSelectionSetErrorMessage(
+                fieldSet,
+                fieldCoordsPath,
+                parentData.name,
+                kindToNodeType(parentData.kind),
+              ),
+            );
+            shouldDefineSelectionSet = false;
+          }
+          // Empty selection sets would be a parse error, so it is unnecessary to handle them
+          currentDepth -= 1;
+          parentDatas.pop();
+          definedFields.pop();
+        },
+      },
+    });
+    if (errorMessages.length > 0 || !hasConditionalField) {
+      return { errorMessages };
+    }
+    return {
+      configuration: { fieldName: directiveFieldName, selectionSet: getNormalizedFieldSet(documentNode) },
+      errorMessages,
+    };
+  }
+
+  validateProvidesOrRequires(
+    parentData: CompositeOutputData,
+    fieldSetByFieldName: Map<string, string>,
+    isProvides: boolean,
+  ): RequiredFieldConfiguration[] | undefined {
+    const allErrorMessages: Array<string> = [];
+    const configurations: Array<RequiredFieldConfiguration> = [];
+    const parentTypeName = getParentTypeName(parentData);
+    for (const [fieldName, fieldSet] of fieldSetByFieldName) {
+      /* It is possible to encounter a field before encountering the type definition.
+       Consequently, at that time, it is unknown whether the named type is an entity.
+       If it isn't, the @provides directive does not make sense and can be ignored.
+      */
+      const result = this.getFieldSetParent({
+        fieldName,
+        fieldSet,
+        isProvides,
+        parentData,
+        parentTypeName,
+      });
+      if (!result.success) {
+        allErrorMessages.push(result.error.message);
+        continue;
+      }
+
+      const fieldCoords = `${parentTypeName}.${fieldName}`;
+      const { errorMessages, configuration } = this.validateConditionalFieldSet(
+        result.data,
+        fieldSet,
+        fieldName,
+        isProvides,
+        parentTypeName,
+      );
+      /*
+       * It is possible to return no error messages nor configuration if the @provides or @requires directive is
+       * considered completely redundant, i.e.,:
+       * 1. All fields to which the directive refers are declared @external but are also key fields on an entity extension.
+       * 2. The subgraph is V1 and all fields to which the directive refers are not declared @external.
+       * In these cases, the fields are considered unconditionally provided.
+       * If all the fields to which the directive refers are unconditionally provided, the directive is redundant.
+       * For V2 subgraphs, this will propagate as an error; for V1 subgraphs, this will propagate as a warning.
+       * */
+      if (errorMessages.length > 0) {
+        allErrorMessages.push(` On field "${fieldCoords}":\n -` + errorMessages.join(HYPHEN_JOIN));
+        continue;
+      }
+
+      if (configuration) {
+        configurations.push(configuration);
+      }
+    }
+    if (allErrorMessages.length > 0) {
+      this.errors.push(
+        invalidProvidesOrRequiresDirectivesError(getConditionalFieldSetDirectiveName(isProvides), allErrorMessages),
+      );
+      return;
+    }
+
+    if (configurations.length > 0) {
+      return configurations;
+    }
+  }
+
+  validateInterfaceImplementations(data: CompositeOutputData) {
+    if (data.implementedInterfaceTypeNames.size < 1) {
+      return;
+    }
+
+    const isParentInaccessible = data.directivesByName.has(INACCESSIBLE);
+    const implementationErrorsMap = new Map<string, ImplementationErrors>();
+    const invalidImplementationTypeStringByTypeName = new Map<string, string>();
+    let doesInterfaceImplementItself = false;
+    for (const interfaceTypeName of data.implementedInterfaceTypeNames) {
+      const interfaceData = this.parentDefinitionDataByTypeName.get(interfaceTypeName);
+      // This check is so undefined type errors are not improperly propagated
+      if (BASE_SCALARS.has(interfaceTypeName)) {
+        this.referencedTypeNames.add(interfaceTypeName);
+      }
+      if (!interfaceData) {
+        continue;
+      }
+      if (interfaceData.kind !== Kind.INTERFACE_TYPE_DEFINITION) {
+        invalidImplementationTypeStringByTypeName.set(interfaceData.name, kindToNodeType(interfaceData.kind));
+        continue;
+      }
+      if (data.name === interfaceData.name) {
+        doesInterfaceImplementItself = true;
+        continue;
+      }
+      const implementationErrors: ImplementationErrors = {
+        invalidFieldImplementations: new Map<string, InvalidFieldImplementation>(),
+        unimplementedFields: [],
+      };
+      let hasErrors = false;
+      for (const [fieldName, interfaceField] of interfaceData.fieldDataByName) {
+        this.unvalidatedExternalFieldCoords.delete(`${data.name}.${fieldName}`);
+        let hasNestedErrors = false;
+        const fieldData = data.fieldDataByName.get(fieldName);
+        if (!fieldData) {
+          hasErrors = true;
+          implementationErrors.unimplementedFields.push(fieldName);
+          continue;
+        }
+        const invalidFieldImplementation: InvalidFieldImplementation = {
+          implementationContextCoords: new Set<string>(),
+          interfaceContextCoords: new Set<string>(),
+          invalidAdditionalArguments: new Set<string>(),
+          invalidImplementedArguments: [],
+          isInaccessible: false,
+          originalResponseType: printTypeNode(interfaceField.node.type),
+          unimplementedArguments: new Set<string>(),
+        };
+        // The implemented field type must be equally or more restrictive than the original interface field type
+        if (
+          !isTypeValidImplementation({
+            concreteTypeNamesByAbstractTypeName: this.concreteTypeNamesByAbstractTypeName,
+            implementationType: fieldData.node.type,
+            interfaceImplementationTypeNamesByInterfaceTypeName:
+              this.interfaceImplementationTypeNamesByInterfaceTypeName,
+            originalType: interfaceField.node.type,
+          })
+        ) {
+          hasErrors = true;
+          hasNestedErrors = true;
+          invalidFieldImplementation.implementedResponseType = printTypeNode(fieldData.node.type);
+        }
+        const handledArguments = new Set<string>();
+        for (const [argumentName, interfaceArgument] of interfaceField.argumentDataByName) {
+          handledArguments.add(argumentName);
+          const containerArgument = fieldData.argumentDataByName.get(argumentName);
+          // The type implementing the interface must include all arguments with no variation for that argument
+          if (!containerArgument) {
+            hasErrors = true;
+            hasNestedErrors = true;
+            invalidFieldImplementation.unimplementedArguments.add(argumentName);
+            continue;
+          }
+          // Implemented arguments should be the exact same type
+          const actualType = printTypeNode(containerArgument.type as TypeNode);
+          const expectedType = printTypeNode(interfaceArgument.type as TypeNode);
+          if (expectedType !== actualType) {
+            hasErrors = true;
+            hasNestedErrors = true;
+            invalidFieldImplementation.invalidImplementedArguments.push({ actualType, argumentName, expectedType });
+          }
+        }
+        // Additional arguments must be optional (nullable)
+        for (const [argumentName, argumentData] of fieldData.argumentDataByName) {
+          if (handledArguments.has(argumentName)) {
+            continue;
+          }
+          if (argumentData.type.kind !== Kind.NON_NULL_TYPE) {
+            continue;
+          }
+          hasErrors = true;
+          hasNestedErrors = true;
+          invalidFieldImplementation.invalidAdditionalArguments.add(argumentName);
+        }
+        if (!isParentInaccessible && fieldData.isInaccessible && !interfaceField.isInaccessible) {
+          hasErrors = true;
+          hasNestedErrors = true;
+          invalidFieldImplementation.isInaccessible = true;
+        }
+        if (hasNestedErrors) {
+          implementationErrors.invalidFieldImplementations.set(fieldName, invalidFieldImplementation);
+        }
+      }
+      if (hasErrors) {
+        implementationErrorsMap.set(interfaceTypeName, implementationErrors);
+      }
+    }
+    if (invalidImplementationTypeStringByTypeName.size > 0) {
+      this.errors.push(invalidImplementedTypeError(data.name, invalidImplementationTypeStringByTypeName));
+    }
+    if (doesInterfaceImplementItself) {
+      this.errors.push(selfImplementationError(data.name));
+    }
+    if (implementationErrorsMap.size > 0) {
+      this.errors.push(
+        invalidInterfaceImplementationError(data.name, kindToNodeType(data.kind), implementationErrorsMap),
+      );
+    }
+  }
+
+  handleAuthenticatedDirective(data: NodeData | SchemaData, parentTypeName: string) {
+    const parentAuthData = getValueOrDefault(this.authorizationDataByParentTypeName, parentTypeName, () =>
+      newAuthorizationData(parentTypeName),
+    );
+    if (data.kind === Kind.FIELD_DEFINITION) {
+      const fieldAuthData = getValueOrDefault(parentAuthData.fieldAuthDataByFieldName, data.name, () =>
+        newFieldAuthorizationData(data.name),
+      );
+      fieldAuthData.inheritedData.requiresAuthentication = true;
+      fieldAuthData.originalData.requiresAuthentication = true;
+    } else {
+      parentAuthData.requiresAuthentication = true;
+      this.parentTypeNamesWithAuthDirectives.add(parentTypeName);
+    }
+  }
+
+  handleOverrideDirective({ data, directiveCoords, errorMessages, targetSubgraphName }: HandleOverrideDirectiveParams) {
+    if (targetSubgraphName === this.subgraphName) {
+      errorMessages.push(equivalentSourceAndTargetOverrideErrorMessage(targetSubgraphName, directiveCoords));
+      return;
+    }
+    const overrideDataForSubgraph = getValueOrDefault(
+      this.overriddenFieldNamesByTypeNameByTargetSubgraphName,
+      targetSubgraphName,
+      () => new Map<string, Set<string>>(),
+    );
+    getValueOrDefault(overrideDataForSubgraph, data.renamedParentTypeName, () => new Set<string>()).add(data.name);
+  }
+
+  handleSemanticNonNullDirective({ data, directiveNode, errorMessages }: HandleSemanticNonNullDirectiveParams) {
+    const nonNullIndices = new Set<number>();
+    let currentType: MutableTypeNode | null = data.node.type;
+    let index = 0;
+    while (currentType) {
+      switch (currentType.kind) {
+        case Kind.LIST_TYPE: {
+          index += 1;
+          currentType = currentType.type;
+          break;
+        }
+        case Kind.NON_NULL_TYPE: {
+          nonNullIndices.add(index);
+          currentType = currentType.type;
+          break;
+        }
+        default: {
+          currentType = null;
+          break;
+        }
+      }
+    }
+    const levelsArg = directiveNode.arguments?.find((arg) => arg.name.value === LEVELS);
+    if (!levelsArg || levelsArg.value.kind !== Kind.LIST) {
+      // Should never happen because the argument will have just been validated.
+      errorMessages.push(semanticNonNullArgumentErrorMessage);
+      return;
+    }
+    const values = levelsArg.value.values as ReadonlyArray<IntValueNode>;
+    const typeString = printTypeNode(data.type);
+    const levels = new Set<number>();
+    for (const { value } of values) {
+      const int = parseInt(value, 10);
+      if (Number.isNaN(int)) {
+        errorMessages.push(semanticNonNullLevelsNaNIndexErrorMessage(value));
+        continue;
+      }
+      if (int < 0 || int > index) {
+        errorMessages.push(
+          semanticNonNullLevelsIndexOutOfBoundsErrorMessage({
+            maxIndex: index,
+            typeString,
+            value,
+          }),
+        );
+        continue;
+      }
+      if (!nonNullIndices.has(int)) {
+        levels.add(int);
+        continue;
+      }
+      errorMessages.push(
+        semanticNonNullLevelsNonNullErrorMessage({
+          typeString,
+          value,
+        }),
+      );
+    }
+    data.nullLevelsBySubgraphName.set(this.subgraphName, levels);
+  }
+
+  getOrCreateFieldWeight(typeName: TypeName, fieldName: FieldName): FieldWeightConfiguration {
+    const fieldCoords = `${typeName}.${fieldName}`;
+    return getValueOrDefault(
+      this.costs.fieldWeights,
+      fieldCoords,
+      (): FieldWeightConfiguration => ({
+        typeName,
+        fieldName,
+        argumentWeights: new Map(),
+        directiveArgumentWeights: new Map(),
+      }),
+    );
+  }
+
+  handleCostDirective({ data, directiveCoords, directiveNode, errorMessages }: HandleCostDirectiveParams) {
+    const weightArg = directiveNode.arguments?.find((arg) => arg.name.value === WEIGHT);
+    if (!weightArg || weightArg.value.kind !== Kind.INT) {
+      return; // type validation handled upstream
+    }
+    const weightValue = parseInt((weightArg.value as IntValueNode).value, 10);
+    switch (data.kind) {
+      case Kind.OBJECT_TYPE_DEFINITION:
+      case Kind.SCALAR_TYPE_DEFINITION:
+      case Kind.ENUM_TYPE_DEFINITION:
+        this.costs.typeWeights.set(data.name, weightValue);
+        break;
+      case Kind.FIELD_DEFINITION: {
+        const typeName = data.renamedParentTypeName || data.originalParentTypeName;
+        const parentTypeData = this.parentDefinitionDataByTypeName.get(typeName);
+        if (!parentTypeData) {
+          // undefined types are handled elsewhere
+          break;
+        }
+        if (parentTypeData.kind === Kind.INTERFACE_TYPE_DEFINITION) {
+          errorMessages.push(costOnInterfaceFieldErrorMessage(directiveCoords));
+          break;
+        }
+        const fieldWeight = this.getOrCreateFieldWeight(typeName, data.name);
+        fieldWeight.weight = weightValue;
+        break;
+      }
+      case Kind.INPUT_VALUE_DEFINITION:
+      case Kind.ARGUMENT: {
+        const ivData = data as InputValueData;
+        if (ivData.isArgument && ivData.fieldName) {
+          const typeName = ivData.renamedParentTypeName || ivData.originalParentTypeName;
+          const parentTypeData = this.parentDefinitionDataByTypeName.get(typeName);
+          if (!parentTypeData) {
+            // undefined types are handled elsewhere
+            break;
+          }
+          if (parentTypeData.kind === Kind.INTERFACE_TYPE_DEFINITION) {
+            errorMessages.push(costOnInterfaceFieldErrorMessage(directiveCoords));
+            break;
+          }
+          const fieldWeight = this.getOrCreateFieldWeight(typeName, ivData.fieldName!);
+          fieldWeight.argumentWeights.set(ivData.name, weightValue);
+        } else {
+          const typeName = ivData.renamedParentTypeName || ivData.originalParentTypeName;
+          const fieldWeight = this.getOrCreateFieldWeight(typeName, ivData.name);
+          fieldWeight.weight = weightValue;
+        }
+        break;
+      }
+    }
+  }
+
+  recordDirectiveWeightOnField({
+    data,
+    definitionData,
+    directiveName,
+    directiveNode,
+  }: RecordDirectiveWeightOnFieldParams) {
+    // This method walks every argument defined on the directive and records a directive weight
+    // on the field only when all these conditions hold:
+    // 1. The argument of the directive has a cost weight assigned
+    // 2. The argument is non-null
+    // 3. The parent type is not an interface type.
+    const typeName = data.renamedParentTypeName || data.originalParentTypeName;
+    const parentTypeData = this.parentDefinitionDataByTypeName.get(typeName);
+    // Directive argument weights should only be recorded for concrete type fields.
+    if (!parentTypeData || parentTypeData.kind === Kind.INTERFACE_TYPE_DEFINITION) {
+      return;
+    }
+
+    // Determine which arguments are non-null on this directive usage.
+    // Record the DirectiveArgument coords if its argument has an explicit non-null value or
+    // if it has a default value and was not explicitly set to null.
+    const suppliedArgNodeByName = new Map<string, ConstValueNode>();
+    for (const arg of directiveNode.arguments ?? []) {
+      suppliedArgNodeByName.set(arg.name.value, arg.value);
+    }
+
+    for (const [argName, argData] of definitionData.argumentDataByName) {
+      const coords = `${directiveName}.${argName}`;
+      const argWeight = this.costs.directiveArgumentWeights.get(coords);
+      // Bail if the argName argument does not have cost attached to it.
+      if (argWeight === undefined) {
+        continue;
+      }
+      // Check if this argument is non-null at the usage site:
+      const argNode = suppliedArgNodeByName.get(argName);
+      if (argNode) {
+        if (argNode.kind === Kind.NULL) {
+          continue;
+        }
+      } else if (!argData.defaultValue || argData.defaultValue.kind === Kind.NULL) {
+        continue;
+      }
+      const fieldWeight = this.getOrCreateFieldWeight(typeName, data.name);
+      // Accumulate across directive usages so that repeatable directives on the same
+      // field are charged once per usage.
+      const existingWeight = fieldWeight.directiveArgumentWeights.get(coords) ?? 0;
+      fieldWeight.directiveArgumentWeights.set(coords, existingWeight + argWeight);
+    }
+  }
+
+  handleListSizeDirective({ data, directiveCoords, directiveNode, errorMessages }: HandleListSizeDirectiveParams) {
+    const args = directiveNode.arguments;
+    if (!args) {
+      return;
+    }
+
+    let hasSizedFields = false;
+    const typeName = data.renamedParentTypeName || data.originalParentTypeName;
+    const listSizeConfig: FieldListSizeConfiguration = {
+      typeName,
+      fieldName: data.name,
+      slicingArguments: [],
+      sizedFields: [],
+      requireOneSlicingArgument: true, // per IBM cost spec
+    };
+    /**
+     * For each accepted slicing argument, capture the full resolved chain:
+     * (argument + each intermediate input field + leaf).
+     * Later we check the assumedSize against the default value of every element of the chain.
+     */
+    const slicingArgChainByPath = new Map<string, InputValueData[]>();
+
+    for (const argumentNode of args) {
+      const argumentName = argumentNode.name.value;
+      // type validation handled upstream
+      switch (argumentName) {
+        case ASSUMED_SIZE:
+          if (argumentNode.value.kind === Kind.INT) {
+            listSizeConfig.assumedSize = parseInt((argumentNode.value as IntValueNode).value, 10);
+          }
+          break;
+        case REQUIRE_ONE_SLICING_ARGUMENT:
+          if (argumentNode.value.kind === Kind.BOOLEAN) {
+            listSizeConfig.requireOneSlicingArgument = argumentNode.value.value;
+          }
+          break;
+        case SLICING_ARGUMENTS: {
+          let argumentValues: ReadonlyArray<ValueNode>;
+          if (argumentNode.value.kind === Kind.LIST) {
+            argumentValues = (argumentNode.value as ListValueNode).values;
+          } else if (argumentNode.value.kind === Kind.STRING) {
+            argumentValues = [argumentNode.value];
+          } else {
+            continue;
+          }
+          for (const valueNode of argumentValues) {
+            if (valueNode.kind !== Kind.STRING) {
+              continue;
+            }
+
+            // slicingArgPath could be just an argument "inputA" or a dot-path "inputA.page.first".
+            const slicingArgPath = (valueNode as StringValueNode).value;
+            const segments = slicingArgPath.split(LITERAL_PERIOD);
+
+            // Reject empty segments (e.g. "", "a.", ".b", "a..b").
+            if (segments.length === 0 || segments.some((s) => s.length === 0)) {
+              errorMessages.push(listSizeSlicingArgumentMalformedPathErrorMessage(directiveCoords, slicingArgPath));
+              continue;
+            }
+
+            // First segment should be valid argument name:
+            const firstSegment = segments[0];
+            const argData = data.argumentDataByName.get(firstSegment);
+            if (!argData) {
+              errorMessages.push(listSizeInvalidSlicingArgumentErrorMessage(directiveCoords, slicingArgPath));
+              continue;
+            }
+
+            /**
+             * Walk the rest of the path in the slicingArgument.
+             * `current` tracks the input value reached so far:
+             * the argument itself for a flat path, or the nested input field for each step of a
+             * dot-path. After the loop it is the leaf, which must be Int/Int!.
+             */
+            let current: InputValueData = argData;
+            const chain: Array<InputValueData> = [argData];
+            let isPathInvalid = false;
+
+            for (let i = 1; i < segments.length; i++) {
+              // Non-leaf step: `current` must unwrap to an Input Object. Lists are rejected here.
+              const unwrapped = current.type.kind === Kind.NON_NULL_TYPE ? current.type.type : current.type;
+              const parentTypeData = this.parentDefinitionDataByTypeName.get(current.namedTypeName);
+              if (
+                unwrapped.kind === Kind.LIST_TYPE ||
+                !parentTypeData ||
+                parentTypeData.kind !== Kind.INPUT_OBJECT_TYPE_DEFINITION
+              ) {
+                errorMessages.push(
+                  listSizeSlicingArgumentSegmentNotInputObjectErrorMessage(
+                    directiveCoords,
+                    slicingArgPath,
+                    current.name,
+                    printTypeNode(current.type),
+                  ),
+                );
+                isPathInvalid = true;
+                break;
+              }
+              const inputValue = parentTypeData.inputValueDataByName.get(segments[i]);
+              if (!inputValue) {
+                errorMessages.push(
+                  listSizeSlicingArgumentSegmentNotFoundErrorMessage(
+                    directiveCoords,
+                    slicingArgPath,
+                    segments[i],
+                    current.namedTypeName,
+                  ),
+                );
+                isPathInvalid = true;
+                break;
+              }
+              current = inputValue;
+              chain.push(inputValue);
+            }
+
+            if (isPathInvalid) {
+              continue;
+            }
+
+            // Leaf check: the final value must be Int or Int!
+            const unwrappedType = current.type.kind === Kind.NON_NULL_TYPE ? current.type.type : current.type;
+            if (unwrappedType.kind === Kind.LIST_TYPE || current.namedTypeName !== INT_SCALAR) {
+              errorMessages.push(
+                listSizeSlicingArgumentNotIntErrorMessage(directiveCoords, slicingArgPath, printTypeNode(current.type)),
+              );
+              continue;
+            }
+
+            listSizeConfig.slicingArguments.push(slicingArgPath);
+            slicingArgChainByPath.set(slicingArgPath, chain);
+          }
+          break;
+        }
+        case SIZED_FIELDS: {
+          let fieldValues: ReadonlyArray<ValueNode>;
+          if (argumentNode.value.kind === Kind.LIST) {
+            fieldValues = (argumentNode.value as ListValueNode).values;
+          } else if (argumentNode.value.kind === Kind.STRING) {
+            fieldValues = [argumentNode.value];
+          } else {
+            continue;
+          }
+          if (fieldValues.length < 1) {
+            continue;
+          }
+          hasSizedFields = true;
+          const returnTypeName = data.namedTypeName;
+          const returnTypeData = this.parentDefinitionDataByTypeName.get(returnTypeName);
+          if (!returnTypeData || !isParentDataCompositeOutputType(returnTypeData)) {
+            errorMessages.push(listSizeSizedFieldsInvalidReturnTypeErrorMessage(directiveCoords, returnTypeName));
+            continue;
+          }
+          for (const valueNode of fieldValues) {
+            if (valueNode.kind !== Kind.STRING) {
+              continue;
+            }
+            const sizedFieldName = (valueNode as StringValueNode).value;
+            const fieldData = returnTypeData.fieldDataByName.get(sizedFieldName);
+            if (!fieldData) {
+              errorMessages.push(
+                listSizeSizedFieldNotFoundErrorMessage(directiveCoords, sizedFieldName, returnTypeName),
+              );
+              continue;
+            }
+            if (!isTypeNodeListType(fieldData.type)) {
+              errorMessages.push(
+                listSizeSizedFieldNotListErrorMessage(
+                  directiveCoords,
+                  sizedFieldName,
+                  returnTypeName,
+                  printTypeNode(fieldData.type),
+                ),
+              );
+              continue;
+            }
+            listSizeConfig.sizedFields.push(sizedFieldName);
+          }
+          break;
+        }
+      }
+    }
+
+    if (!hasSizedFields && !isTypeNodeListType(data.type)) {
+      errorMessages.push(
+        listSizeFieldMustReturnListOrUseSizedFieldsErrorMessage(directiveCoords, printTypeNode(data.type)),
+      );
+    }
+    if (hasSizedFields && isTypeNodeListType(data.type)) {
+      errorMessages.push(listSizeSizedFieldsOnListsErrorMessage(directiveCoords, printTypeNode(data.type)));
+    }
+
+    if (listSizeConfig.assumedSize !== undefined && listSizeConfig.slicingArguments.length > 0) {
+      if (listSizeConfig.requireOneSlicingArgument) {
+        errorMessages.push(listSizeAssumedSizeWithRequiredSlicingArgumentErrorMessage(directiveCoords));
+      } else {
+        /**
+         * When assumedSize is set together with slicingArguments, the slicing argument must not have
+         * a default leaf value in any element of the slicingArgument's chain.
+         * That will be checked for all slicing Arguments.
+         * For example, if the query is defined like this:
+         *    search(a: SearchInput): [Book]
+         *        @listSize(assumedSize: 50, slicingArguments: ["a.b.c"], requireOneSlicingArgument: false)
+         * any of those defaults are forbidden:
+         *     input SearchInput { b: PaginationInput = { c: 10 } }
+         *     input PaginationInput { c: Int = 10 }
+         * Notably, this query definition is also forbidden with the @listSize above:
+         *     search(a: SearchInput = { b: { c: 10 } }): [Book]
+         * A default along the chain only matters if it actually supplies a value for the leaf:
+         * walk the remaining tail through the default's AST and reject only when the walk resolves.
+         * E.g. `a: SearchInput = { b: {} }` is allowed, and the leaf stays undefined.
+         */
+        for (const slicingArgPath of listSizeConfig.slicingArguments) {
+          const chain = slicingArgChainByPath.get(slicingArgPath);
+          if (!chain) {
+            continue;
+          }
+          const segments = slicingArgPath.split(LITERAL_PERIOD);
+          // Outer loop: which default are we starting from?
+          for (let i = 0; i < chain.length; i++) {
+            let value: ConstValueNode | undefined = chain[i].defaultValue;
+            // Inner loop: try to find a defined leaf in the chain:
+            for (let j = i + 1; j < segments.length; j++) {
+              if (!value || value.kind !== Kind.OBJECT) {
+                value = undefined;
+                break;
+              }
+              const field = value.fields.find((f) => f.name.value === segments[j]);
+              value = field?.value;
+            }
+            if (value !== undefined) {
+              errorMessages.push(listSizeAssumedSizeSlicingArgDefaultErrorMessage(directiveCoords, slicingArgPath));
+              break;
+            }
+          }
+        }
+      }
+    }
+    const fieldCoords = `${typeName}.${data.name}`;
+    this.costs.listSizes.set(fieldCoords, listSizeConfig);
+  }
+
+  extractRequiredScopes({ directiveCoords, orScopes, requiredScopes }: HandleRequiresScopesDirectiveParams) {
+    if (orScopes.length > MAX_OR_SCOPES) {
+      this.invalidORScopesCoords.add(directiveCoords);
+      return;
+    }
+    for (const scopes of orScopes) {
+      const newANDScopes = new Set<string>();
+      for (const scope of (scopes as ListValueNode).values) {
+        newANDScopes.add((scope as StringValueNode).value);
+      }
+      if (newANDScopes.size < 1) {
+        continue;
+      }
+      addScopes(requiredScopes, newANDScopes);
+    }
+  }
+
+  getKafkaPublishConfiguration(
+    directive: ConstDirectiveNode,
+    argumentDataByArgumentName: Map<string, InputValueData>,
+    fieldName: string,
+    errorMessages: string[],
+  ): EventConfiguration | undefined {
+    const topics: string[] = [];
+    let providerId = DEFAULT_EDFS_PROVIDER_ID;
+    for (const argumentNode of directive.arguments || []) {
+      switch (argumentNode.name.value) {
+        case TOPIC: {
+          if (argumentNode.value.kind !== Kind.STRING || argumentNode.value.value.length < 1) {
+            errorMessages.push(invalidEventSubjectErrorMessage(TOPIC));
+            continue;
+          }
+          validateArgumentTemplateReferences(argumentNode.value.value, argumentDataByArgumentName, errorMessages);
+          topics.push(argumentNode.value.value);
+          break;
+        }
+        case PROVIDER_ID: {
+          if (argumentNode.value.kind !== Kind.STRING || argumentNode.value.value.length < 1) {
+            errorMessages.push(invalidEventProviderIdErrorMessage);
+            continue;
+          }
+          providerId = argumentNode.value.value;
+          break;
+        }
+      }
+    }
+    if (errorMessages.length > 0) {
+      return;
+    }
+    return { fieldName, providerId, providerType: PROVIDER_TYPE_KAFKA, topics, type: PUBLISH };
+  }
+
+  /* Parses the optional "deliveryGuarantees" argument of the @edfs__kafkaSubscribe directive.
+   * Returns the delivery guarantees to spread into the configuration. The object is empty unless the mode is CURSOR
+   * (or if the argument value is invalid, in which case an error message is appended).
+   */
+  getDeliveryGuaranteeMode(argumentNode: ConstArgumentNode, errorMessages: Array<string>): DeliveryGuarantees {
+    this.usesEdfsDeliveryGuarantees = true;
+    /* The argument is nullable, so an explicit null is equivalent to omitting the argument. */
+    if (argumentNode.value.kind !== Kind.OBJECT) {
+      return {};
+    }
+    let mode: DeliveryGuaranteeMode = OFF_UPPER;
+    let invalidModeValue: string | undefined;
+    const duplicateFieldNames = new Set<FieldName>();
+    const invalidFieldNames = new Set<FieldName>();
+    const definedFieldNames = new Set<FieldName>();
+    for (const field of argumentNode.value.fields) {
+      const fieldName = field.name.value;
+      if (!DELIVERY_GUARANTEES_FIELD_NAMES.has(fieldName)) {
+        invalidFieldNames.add(fieldName);
+        continue;
+      }
+      if (definedFieldNames.has(fieldName)) {
+        duplicateFieldNames.add(fieldName);
+        continue;
+      }
+      definedFieldNames.add(fieldName);
+      // MODE is currently the only valid field
+      if (field.value.kind !== Kind.ENUM || (field.value.value !== OFF_UPPER && field.value.value !== CURSOR_UPPER)) {
+        invalidModeValue = print(field.value);
+        continue;
+      }
+      mode = field.value.value as DeliveryGuaranteeMode;
+    }
+    if (duplicateFieldNames.size > 0 || invalidFieldNames.size > 0 || invalidModeValue !== undefined) {
+      errorMessages.push(
+        invalidDeliveryGuaranteesInputFieldsErrorMessage({
+          duplicateFieldNames: [...duplicateFieldNames],
+          invalidFieldNames: [...invalidFieldNames],
+          invalidModeValue,
+        }),
+      );
+      return {};
+    }
+
+    if (mode === CURSOR_UPPER) {
+      return { deliveryGuarantees: { mode } };
+    }
+
+    return {};
+  }
+
+  getKafkaSubscribeConfiguration(
+    directive: ConstDirectiveNode,
+    argumentDataByArgumentName: Map<string, InputValueData>,
+    fieldName: string,
+    errorMessages: string[],
+  ): EventConfiguration | undefined {
+    const topics: string[] = [];
+    let providerId = DEFAULT_EDFS_PROVIDER_ID;
+    let deliveryGuarantees: DeliveryGuarantees = {};
+    for (const argumentNode of directive.arguments || []) {
+      switch (argumentNode.name.value) {
+        case TOPICS: {
+          //@TODO list coercion
+          if (argumentNode.value.kind !== Kind.LIST) {
+            errorMessages.push(invalidEventSubjectsErrorMessage(TOPICS));
+            continue;
+          }
+          for (const value of argumentNode.value.values) {
+            if (value.kind !== Kind.STRING || value.value.length < 1) {
+              errorMessages.push(invalidEventSubjectsItemErrorMessage(TOPICS));
+              break;
+            }
+            validateArgumentTemplateReferences(value.value, argumentDataByArgumentName, errorMessages);
+            topics.push(value.value);
+          }
+          break;
+        }
+        case PROVIDER_ID: {
+          if (argumentNode.value.kind !== Kind.STRING || argumentNode.value.value.length < 1) {
+            errorMessages.push(invalidEventProviderIdErrorMessage);
+            continue;
+          }
+          providerId = argumentNode.value.value;
+          break;
+        }
+        case DELIVERY_GUARANTEES: {
+          deliveryGuarantees = this.getDeliveryGuaranteeMode(argumentNode, errorMessages);
+          break;
+        }
+      }
+    }
+    if (errorMessages.length > 0) {
+      return;
+    }
+    return {
+      fieldName,
+      providerId,
+      providerType: PROVIDER_TYPE_KAFKA,
+      topics: topics,
+      type: SUBSCRIBE,
+      ...deliveryGuarantees,
+    };
+  }
+
+  getNatsPublishAndRequestConfiguration(
+    eventType: NatsEventType,
+    directive: ConstDirectiveNode,
+    argumentDataByArgumentName: Map<string, InputValueData>,
+    fieldName: string,
+    errorMessages: string[],
+  ): EventConfiguration | undefined {
+    const subjects: string[] = [];
+    let providerId = DEFAULT_EDFS_PROVIDER_ID;
+    for (const argumentNode of directive.arguments || []) {
+      switch (argumentNode.name.value) {
+        case SUBJECT: {
+          if (argumentNode.value.kind !== Kind.STRING || argumentNode.value.value.length < 1) {
+            errorMessages.push(invalidEventSubjectErrorMessage(SUBJECT));
+            continue;
+          }
+          validateArgumentTemplateReferences(argumentNode.value.value, argumentDataByArgumentName, errorMessages);
+          subjects.push(argumentNode.value.value);
+          break;
+        }
+        case PROVIDER_ID: {
+          if (argumentNode.value.kind !== Kind.STRING || argumentNode.value.value.length < 1) {
+            errorMessages.push(invalidEventProviderIdErrorMessage);
+            continue;
+          }
+          providerId = argumentNode.value.value;
+          break;
+        }
+      }
+    }
+    if (errorMessages.length > 0) {
+      return;
+    }
+    return { fieldName, providerId, providerType: PROVIDER_TYPE_NATS, subjects, type: eventType };
+  }
+
+  getNatsSubscribeConfiguration(
+    directive: ConstDirectiveNode,
+    argumentDataByArgumentName: Map<string, InputValueData>,
+    fieldName: string,
+    errorMessages: string[],
+  ): EventConfiguration | undefined {
+    const subjects: string[] = [];
+    let providerId = DEFAULT_EDFS_PROVIDER_ID;
+    let consumerInactiveThreshold = DEFAULT_CONSUMER_INACTIVE_THRESHOLD;
+    let consumerName = '';
+    let streamName = '';
+    for (const argumentNode of directive.arguments || []) {
+      switch (argumentNode.name.value) {
+        case SUBJECTS: {
+          // @TODO list coercion
+          if (argumentNode.value.kind !== Kind.LIST) {
+            errorMessages.push(invalidEventSubjectsErrorMessage(SUBJECTS));
+            continue;
+          }
+          for (const value of argumentNode.value.values) {
+            if (value.kind !== Kind.STRING || value.value.length < 1) {
+              errorMessages.push(invalidEventSubjectsItemErrorMessage(SUBJECTS));
+              break;
+            }
+            validateArgumentTemplateReferences(value.value, argumentDataByArgumentName, errorMessages);
+            subjects.push(value.value);
+          }
+          break;
+        }
+        case PROVIDER_ID: {
+          if (argumentNode.value.kind !== Kind.STRING || argumentNode.value.value.length < 1) {
+            errorMessages.push(invalidEventProviderIdErrorMessage);
+            continue;
+          }
+          providerId = argumentNode.value.value;
+          break;
+        }
+        case STREAM_CONFIGURATION: {
+          this.usesEdfsNatsStreamConfiguration = true;
+          if (argumentNode.value.kind !== Kind.OBJECT || argumentNode.value.fields.length < 1) {
+            errorMessages.push(invalidNatsStreamInputErrorMessage);
+            continue;
+          }
+          let isValid = true;
+          const invalidFieldNames = new Set<string>();
+          const allowedFieldNames = new Set(STREAM_CONFIGURATION_FIELD_NAMES);
+          const missingRequiredFieldNames = new Set<string>([CONSUMER_NAME, STREAM_NAME]);
+          const duplicateFieldNames = new Set<string>();
+          const invalidRequiredFieldNames = new Set<string>();
+          for (const field of argumentNode.value.fields) {
+            const fieldName = field.name.value;
+            if (!STREAM_CONFIGURATION_FIELD_NAMES.has(fieldName)) {
+              invalidFieldNames.add(fieldName);
+              isValid = false;
+              continue;
+            }
+            if (allowedFieldNames.has(fieldName)) {
+              allowedFieldNames.delete(fieldName);
+            } else {
+              duplicateFieldNames.add(fieldName);
+              isValid = false;
+              continue;
+            }
+            if (missingRequiredFieldNames.has(fieldName)) {
+              missingRequiredFieldNames.delete(fieldName);
+            }
+            switch (fieldName) {
+              case CONSUMER_NAME:
+                if (field.value.kind !== Kind.STRING || field.value.value.length < 1) {
+                  invalidRequiredFieldNames.add(fieldName);
+                  isValid = false;
+                  continue;
+                }
+                consumerName = field.value.value;
+                break;
+              case STREAM_NAME:
+                if (field.value.kind !== Kind.STRING || field.value.value.length < 1) {
+                  invalidRequiredFieldNames.add(fieldName);
+                  isValid = false;
+                  continue;
+                }
+                streamName = field.value.value;
+                break;
+              case CONSUMER_INACTIVE_THRESHOLD:
+                if (field.value.kind !== Kind.INT) {
+                  errorMessages.push(
+                    invalidArgumentValueErrorMessage(
+                      print(field.value),
+                      'edfs__NatsStreamConfiguration',
+                      `consumerInactiveThreshold`,
+                      INT_SCALAR,
+                    ),
+                  );
+                  isValid = false;
+                  continue;
+                }
+
+                // It should not be possible for this to error
+                try {
+                  consumerInactiveThreshold = parseInt(field.value.value, 10);
+                } catch (e) {
+                  errorMessages.push(
+                    invalidArgumentValueErrorMessage(
+                      print(field.value),
+                      'edfs__NatsStreamConfiguration',
+                      `consumerInactiveThreshold`,
+                      INT_SCALAR,
+                    ),
+                  );
+                  isValid = false;
+                }
+                break;
+            }
+          }
+          if (!isValid || missingRequiredFieldNames.size > 0) {
+            errorMessages.push(
+              invalidNatsStreamInputFieldsErrorMessage(
+                [...missingRequiredFieldNames],
+                [...duplicateFieldNames],
+                [...invalidRequiredFieldNames],
+                [...invalidFieldNames],
+              ),
+            );
+          }
+          break;
+        }
+      }
+    }
+    if (errorMessages.length > 0) {
+      return;
+    }
+    if (consumerInactiveThreshold < 0) {
+      consumerInactiveThreshold = DEFAULT_CONSUMER_INACTIVE_THRESHOLD;
+      this.warnings.push(
+        consumerInactiveThresholdInvalidValueWarning(
+          this.subgraphName,
+          `The value has been set to ${DEFAULT_CONSUMER_INACTIVE_THRESHOLD}.`,
+        ),
+      );
+    } else if (consumerInactiveThreshold > MAX_INT32) {
+      consumerInactiveThreshold = 0;
+      this.warnings.push(
+        consumerInactiveThresholdInvalidValueWarning(
+          this.subgraphName,
+          'The value has been set to 0. This means the consumer will remain indefinitely active until its manual deletion.',
+        ),
+      );
+    }
+    return {
+      fieldName,
+      providerId,
+      providerType: PROVIDER_TYPE_NATS,
+      subjects,
+      type: SUBSCRIBE,
+      ...(consumerName && streamName
+        ? {
+            streamConfiguration: {
+              consumerInactiveThreshold: consumerInactiveThreshold,
+              consumerName: consumerName,
+              streamName,
+            },
+          }
+        : {}),
+    };
+  }
+
+  getRedisPublishConfiguration(
+    directive: ConstDirectiveNode,
+    argumentDataByArgumentName: Map<string, InputValueData>,
+    fieldName: string,
+    errorMessages: string[],
+  ): EventConfiguration | undefined {
+    const channels: string[] = [];
+    let providerId = DEFAULT_EDFS_PROVIDER_ID;
+    for (const argumentNode of directive.arguments || []) {
+      switch (argumentNode.name.value) {
+        case CHANNEL: {
+          if (argumentNode.value.kind !== Kind.STRING || argumentNode.value.value.length < 1) {
+            errorMessages.push(invalidEventSubjectErrorMessage(CHANNEL));
+            continue;
+          }
+          validateArgumentTemplateReferences(argumentNode.value.value, argumentDataByArgumentName, errorMessages);
+          channels.push(argumentNode.value.value);
+          break;
+        }
+        case PROVIDER_ID: {
+          if (argumentNode.value.kind !== Kind.STRING || argumentNode.value.value.length < 1) {
+            errorMessages.push(invalidEventProviderIdErrorMessage);
+            continue;
+          }
+          providerId = argumentNode.value.value;
+          break;
+        }
+      }
+    }
+    if (errorMessages.length > 0) {
+      return;
+    }
+    return { fieldName, providerId, providerType: PROVIDER_TYPE_REDIS, channels, type: PUBLISH };
+  }
+
+  getRedisSubscribeConfiguration(
+    directive: ConstDirectiveNode,
+    argumentDataByArgumentName: Map<string, InputValueData>,
+    fieldName: string,
+    errorMessages: string[],
+  ): EventConfiguration | undefined {
+    const channels: string[] = [];
+    let providerId = DEFAULT_EDFS_PROVIDER_ID;
+    for (const argumentNode of directive.arguments || []) {
+      switch (argumentNode.name.value) {
+        case CHANNELS: {
+          //@TODO list coercion
+          if (argumentNode.value.kind !== Kind.LIST) {
+            errorMessages.push(invalidEventSubjectsErrorMessage(CHANNELS));
+            continue;
+          }
+          for (const value of argumentNode.value.values) {
+            if (value.kind !== Kind.STRING || value.value.length < 1) {
+              errorMessages.push(invalidEventSubjectsItemErrorMessage(CHANNELS));
+              break;
+            }
+            validateArgumentTemplateReferences(value.value, argumentDataByArgumentName, errorMessages);
+            channels.push(value.value);
+          }
+          break;
+        }
+        case PROVIDER_ID: {
+          if (argumentNode.value.kind !== Kind.STRING || argumentNode.value.value.length < 1) {
+            errorMessages.push(invalidEventProviderIdErrorMessage);
+            continue;
+          }
+          providerId = argumentNode.value.value;
+          break;
+        }
+      }
+    }
+    if (errorMessages.length > 0) {
+      return;
+    }
+    return {
+      fieldName,
+      providerId,
+      providerType: PROVIDER_TYPE_REDIS,
+      channels,
+      type: SUBSCRIBE,
+    };
+  }
+
+  validateSubscriptionFilterDirectiveLocation(node: FieldDefinitionNode) {
+    if (!node.directives) {
+      return;
+    }
+    const parentTypeName = this.renamedParentTypeName || this.originalParentTypeName;
+    const fieldCoords = `${parentTypeName}.${node.name.value}`;
+    const isSubscription = this.getOperationTypeNodeForRootTypeName(parentTypeName) === OperationTypeNode.SUBSCRIPTION;
+    for (const directiveNode of node.directives) {
+      if (directiveNode.name.value !== SUBSCRIPTION_FILTER) {
+        continue;
+      }
+      if (!isSubscription) {
+        this.errors.push(invalidSubscriptionFilterLocationError(fieldCoords));
+        return;
+      }
+    }
+  }
+
+  extractEventDirectivesToConfiguration(
+    node: FieldDefinitionNode,
+    argumentDataByArgumentName: Map<string, InputValueData>,
+  ) {
+    // Validation is handled elsewhere
+    if (!node.directives) {
+      return;
+    }
+    const fieldName = node.name.value;
+    const fieldCoords = `${this.renamedParentTypeName || this.originalParentTypeName}.${fieldName}`;
+    for (const directive of node.directives) {
+      const errorMessages: string[] = [];
+      let eventConfiguration: EventConfiguration | undefined;
+      switch (directive.name.value) {
+        case EDFS_KAFKA_PUBLISH:
+          eventConfiguration = this.getKafkaPublishConfiguration(
+            directive,
+            argumentDataByArgumentName,
+            fieldName,
+            errorMessages,
+          );
+          break;
+        case EDFS_KAFKA_SUBSCRIBE:
+          eventConfiguration = this.getKafkaSubscribeConfiguration(
+            directive,
+            argumentDataByArgumentName,
+            fieldName,
+            errorMessages,
+          );
+          break;
+        case EDFS_NATS_PUBLISH: {
+          eventConfiguration = this.getNatsPublishAndRequestConfiguration(
+            PUBLISH,
+            directive,
+            argumentDataByArgumentName,
+            fieldName,
+            errorMessages,
+          );
+          break;
+        }
+        case EDFS_NATS_REQUEST: {
+          eventConfiguration = this.getNatsPublishAndRequestConfiguration(
+            REQUEST,
+            directive,
+            argumentDataByArgumentName,
+            fieldName,
+            errorMessages,
+          );
+          break;
+        }
+        case EDFS_NATS_SUBSCRIBE: {
+          eventConfiguration = this.getNatsSubscribeConfiguration(
+            directive,
+            argumentDataByArgumentName,
+            fieldName,
+            errorMessages,
+          );
+          break;
+        }
+        case EDFS_REDIS_PUBLISH: {
+          eventConfiguration = this.getRedisPublishConfiguration(
+            directive,
+            argumentDataByArgumentName,
+            fieldName,
+            errorMessages,
+          );
+          break;
+        }
+        case EDFS_REDIS_SUBSCRIBE: {
+          eventConfiguration = this.getRedisSubscribeConfiguration(
+            directive,
+            argumentDataByArgumentName,
+            fieldName,
+            errorMessages,
+          );
+          break;
+        }
+        default:
+          continue;
+      }
+
+      if (errorMessages.length > 0) {
+        this.errors.push(invalidEventDirectiveError(directive.name.value, fieldCoords, errorMessages));
+        continue;
+      }
+
+      // should never happen
+      if (!eventConfiguration) {
+        continue;
+      }
+
+      getValueOrDefault(
+        this.eventsConfigurations,
+        this.renamedParentTypeName || this.originalParentTypeName,
+        () => [],
+      ).push(eventConfiguration);
+    }
+  }
+
+  getValidEventsDirectiveNamesForOperationTypeNode(operationTypeNode: OperationTypeNode): Set<string> {
+    switch (operationTypeNode) {
+      case OperationTypeNode.MUTATION:
+        return new Set<string>([EDFS_KAFKA_PUBLISH, EDFS_NATS_PUBLISH, EDFS_NATS_REQUEST, EDFS_REDIS_PUBLISH]);
+      case OperationTypeNode.QUERY:
+        return new Set<string>([EDFS_NATS_REQUEST]);
+      case OperationTypeNode.SUBSCRIPTION:
+        return new Set<string>([EDFS_KAFKA_SUBSCRIBE, EDFS_NATS_SUBSCRIBE, EDFS_REDIS_SUBSCRIBE]);
+    }
+  }
+
+  getOperationTypeNodeForRootTypeName(parentTypeName: string): OperationTypeNode | undefined {
+    const operationTypeNode = this.operationTypeNodeByTypeName.get(parentTypeName);
+    if (operationTypeNode) {
+      return operationTypeNode;
+    }
+    switch (parentTypeName) {
+      case MUTATION:
+        return OperationTypeNode.MUTATION;
+      case QUERY:
+        return OperationTypeNode.QUERY;
+      case SUBSCRIPTION:
+        return OperationTypeNode.SUBSCRIPTION;
+      default:
+        return;
+    }
+  }
+
+  validateEventDrivenRootType(
+    data: ObjectDefinitionData,
+    invalidEventsDirectiveDataByRootFieldPath: Map<string, InvalidRootTypeFieldEventsDirectiveData>,
+    invalidResponseTypeStringByRootFieldPath: Map<string, string>,
+    invalidResponseTypeNameByMutationPath: Map<string, string>,
+  ) {
+    const operationTypeNode = this.getOperationTypeNodeForRootTypeName(data.name);
+    if (!operationTypeNode) {
+      // should never happen
+      this.errors.push(invalidRootTypeError(data.name));
+      return;
+    }
+    const validEventDirectiveNames = this.getValidEventsDirectiveNamesForOperationTypeNode(operationTypeNode);
+    for (const [fieldName, fieldData] of data.fieldDataByName) {
+      const fieldCoords = `${fieldData.originalParentTypeName}.${fieldName}`;
+      const definedEventsDirectiveNames = new Set<string>();
+      for (const eventsDirectiveName of EVENT_DIRECTIVE_NAMES) {
+        if (fieldData.directivesByName.has(eventsDirectiveName)) {
+          definedEventsDirectiveNames.add(eventsDirectiveName);
+        }
+      }
+      const invalidEventsDirectiveNames = new Set<string>();
+      for (const definedEventsDirectiveName of definedEventsDirectiveNames) {
+        if (!validEventDirectiveNames.has(definedEventsDirectiveName)) {
+          invalidEventsDirectiveNames.add(definedEventsDirectiveName);
+        }
+      }
+      if (definedEventsDirectiveNames.size < 1 || invalidEventsDirectiveNames.size > 0) {
+        invalidEventsDirectiveDataByRootFieldPath.set(fieldCoords, {
+          definesDirectives: definedEventsDirectiveNames.size > 0,
+          invalidDirectiveNames: [...invalidEventsDirectiveNames],
+        });
+      }
+      if (operationTypeNode === OperationTypeNode.MUTATION) {
+        const typeString = printTypeNode(fieldData.type);
+        if (typeString !== NON_NULLABLE_EDFS_PUBLISH_EVENT_RESULT) {
+          invalidResponseTypeNameByMutationPath.set(fieldCoords, typeString);
+        }
+        continue;
+      }
+      const fieldTypeString = printTypeNode(fieldData.type);
+      const expectedTypeString = fieldData.namedTypeName + '!';
+      let isValid = false;
+      const concreteTypeNames =
+        this.concreteTypeNamesByAbstractTypeName.get(fieldData.namedTypeName) ||
+        new Set<string>([fieldData.namedTypeName]);
+      for (const concreteTypeName of concreteTypeNames) {
+        isValid ||= this.entityDataByTypeName.has(concreteTypeName);
+        if (isValid) {
+          break;
+        }
+      }
+      if (!isValid || fieldTypeString !== expectedTypeString) {
+        invalidResponseTypeStringByRootFieldPath.set(fieldCoords, fieldTypeString);
+      }
+    }
+  }
+
+  validateEventDrivenKeyDefinition(typeName: string, invalidKeyFieldSetsByEntityTypeName: Map<string, Array<string>>) {
+    const keyFieldSetDataByFieldSet = this.keyFieldSetDatasByTypeName.get(typeName);
+    if (!keyFieldSetDataByFieldSet) {
+      return;
+    }
+    for (const [keyFieldSet, { isUnresolvable }] of keyFieldSetDataByFieldSet) {
+      if (isUnresolvable) {
+        continue;
+      }
+      getValueOrDefault(invalidKeyFieldSetsByEntityTypeName, typeName, () => []).push(keyFieldSet);
+    }
+  }
+
+  validateEventDrivenObjectFields(
+    fieldDataByFieldName: Map<string, FieldData>,
+    keyFieldNames: Set<string>,
+    nonExternalKeyFieldNameByFieldPath: Map<string, string>,
+    nonKeyFieldNameByFieldPath: Map<string, string>,
+  ) {
+    for (const [fieldName, fieldData] of fieldDataByFieldName) {
+      const fieldCoords = `${fieldData.originalParentTypeName}.${fieldName}`;
+      if (keyFieldNames.has(fieldName)) {
+        if (!fieldData.externalFieldDataBySubgraphName.get(this.subgraphName)?.isDefinedExternal) {
+          nonExternalKeyFieldNameByFieldPath.set(fieldCoords, fieldName);
+        }
+        continue;
+      }
+      nonKeyFieldNameByFieldPath.set(fieldCoords, fieldName);
+    }
+  }
+
+  isEdfsPublishResultValid(): boolean {
+    const data = this.parentDefinitionDataByTypeName.get(EDFS_PUBLISH_RESULT);
+    if (!data) {
+      return true;
+    }
+    if (data.kind !== Kind.OBJECT_TYPE_DEFINITION) {
+      return false;
+    }
+    if (data.fieldDataByName.size !== 1) {
+      return false;
+    }
+    for (const [fieldName, fieldData] of data.fieldDataByName) {
+      if (fieldData.argumentDataByName.size > 0) {
+        return false;
+      }
+      if (fieldName !== SUCCESS) {
+        return false;
+      }
+      if (printTypeNode(fieldData.type) !== NON_NULLABLE_BOOLEAN) {
+        return false;
+      }
+    }
+    return true;
+  }
+
+  isNatsStreamConfigurationInputObjectValid(streamConfigurationInputData: ParentDefinitionData): boolean {
+    if (!isInputObjectDefinitionData(streamConfigurationInputData)) {
+      return false;
+    }
+    if (streamConfigurationInputData.inputValueDataByName.size !== 3) {
+      return false;
+    }
+    for (const [inputValueName, inputValueData] of streamConfigurationInputData.inputValueDataByName) {
+      switch (inputValueName) {
+        case CONSUMER_INACTIVE_THRESHOLD: {
+          if (printTypeNode(inputValueData.type) !== NON_NULLABLE_INT) {
+            return false;
+          }
+          if (
+            !inputValueData.defaultValue ||
+            inputValueData.defaultValue.kind !== Kind.INT ||
+            inputValueData.defaultValue.value !== `${DEFAULT_CONSUMER_INACTIVE_THRESHOLD}`
+          ) {
+            return false;
+          }
+          break;
+        }
+        case CONSUMER_NAME:
+        // intentional fallthrough
+        case STREAM_NAME: {
+          if (printTypeNode(inputValueData.type) !== NON_NULLABLE_STRING) {
+            return false;
+          }
+          break;
+        }
+        default: {
+          return false;
+        }
+      }
+    }
+    return true;
+  }
+
+  isDeliveryGuaranteesInputObjectValid(deliveryGuaranteesInputData: ParentDefinitionData): boolean {
+    if (!isInputObjectDefinitionData(deliveryGuaranteesInputData)) {
+      return false;
+    }
+    if (deliveryGuaranteesInputData.inputValueDataByName.size !== 1) {
+      return false;
+    }
+    const modeData = deliveryGuaranteesInputData.inputValueDataByName.get(MODE);
+    if (!modeData || printTypeNode(modeData.type) !== `${EDFS_DELIVERY_GUARANTEE_MODE}!`) {
+      return false;
+    }
+    return modeData.defaultValue?.kind === Kind.ENUM && modeData.defaultValue.value === OFF_UPPER;
+  }
+
+  isDeliveryGuaranteeModeEnumValid(deliveryGuaranteeModeData: ParentDefinitionData): boolean {
+    if (deliveryGuaranteeModeData.kind !== Kind.ENUM_TYPE_DEFINITION) {
+      return false;
+    }
+    const valueNames = deliveryGuaranteeModeData.enumValueDataByName;
+    return valueNames.size === 2 && valueNames.has(OFF_UPPER) && valueNames.has(CURSOR_UPPER);
+  }
+
+  validateEventDrivenSubgraph() {
+    const errorMessages: Array<string> = [];
+    const invalidEventsDirectiveDataByRootFieldPath = new Map<string, InvalidRootTypeFieldEventsDirectiveData>();
+    const invalidResponseTypeStringByRootFieldPath = new Map<string, string>();
+    const invalidResponseTypeNameByMutationPath = new Map<string, string>();
+    const invalidKeyFieldSetsByEntityTypeName = new Map<string, string[]>();
+    const nonExternalKeyFieldNameByFieldPath = new Map<string, string>();
+    const nonKeyFieldNameByFieldPath = new Map<string, string>();
+    const nonEntityExtensionTypeNames = new Set<string>();
+    const invalidObjectTypeNames = new Set<string>();
+    for (const [typeName, data] of this.parentDefinitionDataByTypeName) {
+      // validate edfs__PublishResult and edfs__NatsStreamConfiguration separately
+      if (typeName === EDFS_PUBLISH_RESULT || typeName === EDFS_NATS_STREAM_CONFIGURATION) {
+        continue;
+      }
+      if (data.kind !== Kind.OBJECT_TYPE_DEFINITION) {
+        continue;
+      }
+      if (data.isRootType) {
+        this.validateEventDrivenRootType(
+          data,
+          invalidEventsDirectiveDataByRootFieldPath,
+          invalidResponseTypeStringByRootFieldPath,
+          invalidResponseTypeNameByMutationPath,
+        );
+        continue;
+      }
+      const keyFieldNames = this.keyFieldNamesByParentTypeName.get(typeName);
+      if (!keyFieldNames) {
+        invalidObjectTypeNames.add(typeName);
+        continue;
+      }
+      this.validateEventDrivenKeyDefinition(typeName, invalidKeyFieldSetsByEntityTypeName);
+      this.validateEventDrivenObjectFields(
+        data.fieldDataByName,
+        keyFieldNames,
+        nonExternalKeyFieldNameByFieldPath,
+        nonKeyFieldNameByFieldPath,
+      );
+    }
+    if (!this.isEdfsPublishResultValid()) {
+      errorMessages.push(invalidEdfsPublishResultObjectErrorMessage);
+    }
+    if (this.edfsDirectiveReferences.has(EDFS_NATS_SUBSCRIBE)) {
+      const streamConfigurationInputData = this.parentDefinitionDataByTypeName.get(EDFS_NATS_STREAM_CONFIGURATION);
+      if (
+        streamConfigurationInputData &&
+        this.usesEdfsNatsStreamConfiguration &&
+        !this.isNatsStreamConfigurationInputObjectValid(streamConfigurationInputData)
+      ) {
+        errorMessages.push(invalidNatsStreamConfigurationDefinitionErrorMessage);
+      }
+      this.parentDefinitionDataByTypeName.delete(EDFS_NATS_STREAM_CONFIGURATION);
+    }
+    if (this.edfsDirectiveReferences.has(EDFS_KAFKA_SUBSCRIBE)) {
+      const deliveryGuaranteesInputData = this.parentDefinitionDataByTypeName.get(EDFS_DELIVERY_GUARANTEES);
+      if (
+        deliveryGuaranteesInputData &&
+        this.usesEdfsDeliveryGuarantees &&
+        !this.isDeliveryGuaranteesInputObjectValid(deliveryGuaranteesInputData)
+      ) {
+        errorMessages.push(invalidDeliveryGuaranteesDefinitionErrorMessage);
+      }
+      const deliveryGuaranteeModeData = this.parentDefinitionDataByTypeName.get(EDFS_DELIVERY_GUARANTEE_MODE);
+      if (
+        deliveryGuaranteeModeData &&
+        this.usesEdfsDeliveryGuarantees &&
+        !this.isDeliveryGuaranteeModeEnumValid(deliveryGuaranteeModeData)
+      ) {
+        errorMessages.push(invalidDeliveryGuaranteeModeDefinitionErrorMessage);
+      }
+      /* The canonical definitions are injected into the document as dependencies of @edfs__kafkaSubscribe,
+       * and both type names are ignored by federation, so any user-declared definitions are simply dropped.
+       */
+      this.parentDefinitionDataByTypeName.delete(EDFS_DELIVERY_GUARANTEES);
+      this.parentDefinitionDataByTypeName.delete(EDFS_DELIVERY_GUARANTEE_MODE);
+    }
+
+    if (invalidEventsDirectiveDataByRootFieldPath.size > 0) {
+      errorMessages.push(invalidRootTypeFieldEventsDirectivesErrorMessage(invalidEventsDirectiveDataByRootFieldPath));
+    }
+    if (invalidResponseTypeNameByMutationPath.size > 0) {
+      errorMessages.push(invalidEventDrivenMutationResponseTypeErrorMessage(invalidResponseTypeNameByMutationPath));
+    }
+    if (invalidResponseTypeStringByRootFieldPath.size > 0) {
+      errorMessages.push(
+        invalidRootTypeFieldResponseTypesEventDrivenErrorMessage(invalidResponseTypeStringByRootFieldPath),
+      );
+    }
+    if (invalidKeyFieldSetsByEntityTypeName.size > 0) {
+      errorMessages.push(invalidKeyFieldSetsEventDrivenErrorMessage(invalidKeyFieldSetsByEntityTypeName));
+    }
+    if (nonExternalKeyFieldNameByFieldPath.size > 0) {
+      errorMessages.push(nonExternalKeyFieldNamesEventDrivenErrorMessage(nonExternalKeyFieldNameByFieldPath));
+    }
+    if (nonKeyFieldNameByFieldPath.size > 0) {
+      errorMessages.push(nonKeyFieldNamesEventDrivenErrorMessage(nonKeyFieldNameByFieldPath));
+    }
+    if (nonEntityExtensionTypeNames.size > 0) {
+      errorMessages.push(nonEntityObjectExtensionsEventDrivenErrorMessage([...nonEntityExtensionTypeNames]));
+    }
+    if (invalidObjectTypeNames.size > 0) {
+      errorMessages.push(nonKeyComposingObjectTypeNamesEventDrivenErrorMessage([...invalidObjectTypeNames]));
+    }
+    if (errorMessages.length > 0) {
+      this.errors.push(invalidEventDrivenGraphError(errorMessages));
+    }
+  }
+
+  validateUnionMembers(data: UnionDefinitionData) {
+    if (data.memberByMemberTypeName.size < 1) {
+      this.errors.push(noDefinedUnionMembersError(data.name));
+      return;
+    }
+    const invalidMembers: string[] = [];
+    for (const memberName of data.memberByMemberTypeName.keys()) {
+      const memberData = this.parentDefinitionDataByTypeName.get(memberName);
+      // Invalid references are propagated as an error elsewhere
+      if (!memberData) {
+        continue;
+      }
+      if (memberData.kind !== Kind.OBJECT_TYPE_DEFINITION) {
+        invalidMembers.push(`"${memberName}", which is type "${kindToNodeType(memberData.kind)}"`);
+      }
+    }
+    if (invalidMembers.length > 0) {
+      this.errors.push(invalidUnionMemberTypeError(data.name, invalidMembers));
+    }
+  }
+
+  addConcreteTypeNamesForUnion(node: UnionTypeNode) {
+    if (!node.types || node.types.length < 1) {
+      return;
+    }
+    const unionTypeName = node.name.value;
+    for (const member of node.types) {
+      const memberTypeName = member.name.value;
+      getValueOrDefault(this.concreteTypeNamesByAbstractTypeName, unionTypeName, () => new Set<string>()).add(
+        memberTypeName,
+      );
+      this.internalGraph.addEdge(
+        this.internalGraph.addOrUpdateNode(unionTypeName, { isAbstract: true }),
+        this.internalGraph.addOrUpdateNode(memberTypeName),
+        memberTypeName,
+        true,
+      );
+    }
+  }
+
+  addValidKeyFieldSetConfigurations() {
+    for (const [entityTypeName, keyFieldSetDataByFieldSet] of this.keyFieldSetDatasByTypeName) {
+      const parentData = this.parentDefinitionDataByTypeName.get(entityTypeName);
+      if (
+        !parentData ||
+        (parentData.kind !== Kind.OBJECT_TYPE_DEFINITION && parentData.kind !== Kind.INTERFACE_TYPE_DEFINITION)
+      ) {
+        this.errors.push(undefinedCompositeOutputTypeError(entityTypeName));
+        continue;
+      }
+      const typeName = getParentTypeName(parentData);
+      const configurationData = getValueOrDefault(this.configurationDataByTypeName, typeName, () =>
+        newConfigurationData(true, typeName),
+      );
+      const keys = validateKeyFieldSets(this, parentData, keyFieldSetDataByFieldSet);
+      if (keys) {
+        configurationData.keys = keys;
+      }
+    }
+  }
+
+  getValidFlattenedDirectiveArray(
+    directivesByName: Map<string, ConstDirectiveNode[]>,
+    directiveCoords: string,
+    removeInheritedDirectives = false,
+  ): ConstDirectiveNode[] {
+    const flattenedArray: Array<ConstDirectiveNode> = [];
+    for (const [directiveName, directiveNodes] of directivesByName) {
+      if (removeInheritedDirectives && INHERITABLE_DIRECTIVE_NAMES.has(directiveName)) {
+        continue;
+      }
+      const directiveDefinition = this.directiveDefinitionDataByName.get(directiveName);
+      if (!directiveDefinition) {
+        continue;
+      }
+      if (!directiveDefinition.isRepeatable && directiveNodes.length > 1) {
+        const handledDirectiveNames = getValueOrDefault(
+          this.invalidRepeatedDirectiveNameByCoords,
+          directiveCoords,
+          () => new Set<string>(),
+        );
+        if (!handledDirectiveNames.has(directiveName)) {
+          handledDirectiveNames.add(directiveName);
+          this.errors.push(
+            invalidDirectiveError(directiveName, directiveCoords, '1st', [
+              invalidRepeatedDirectiveErrorMessage(directiveName),
+            ]),
+          );
+        }
+        continue;
+      }
+      if (directiveName !== KEY) {
+        flattenedArray.push(...directiveNodes);
+        continue;
+      }
+      const normalizedDirectiveNodes: ConstDirectiveNode[] = [];
+      const entityKeys = new Set<string>();
+      for (let i = 0; i < directiveNodes.length; i++) {
+        const keyDirectiveNode = directiveNodes[i];
+        const directiveValue = keyDirectiveNode.arguments![0].value;
+        if (directiveValue.kind !== Kind.STRING) {
+          continue;
+        }
+        const entityKey = directiveValue.value;
+        if (entityKeys.has(entityKey)) {
+          continue;
+        }
+        entityKeys.add(entityKey);
+        flattenedArray.push(keyDirectiveNode);
+        normalizedDirectiveNodes.push(keyDirectiveNode);
+      }
+      directivesByName.set(directiveName, normalizedDirectiveNodes);
+    }
+    return flattenedArray;
+  }
+
+  getEnumNodeByData(enumDefinitionData: EnumDefinitionData) {
+    enumDefinitionData.node.description = enumDefinitionData.description;
+    enumDefinitionData.node.directives = this.getValidFlattenedDirectiveArray(
+      enumDefinitionData.directivesByName,
+      enumDefinitionData.name,
+    );
+    enumDefinitionData.node.values = childMapToValueArray(enumDefinitionData.enumValueDataByName);
+    return enumDefinitionData.node;
+  }
+
+  getInputObjectNodeByData(inputObjectDefinitionData: InputObjectDefinitionData) {
+    inputObjectDefinitionData.node.description = inputObjectDefinitionData.description;
+    inputObjectDefinitionData.node.directives = this.getValidFlattenedDirectiveArray(
+      inputObjectDefinitionData.directivesByName,
+      inputObjectDefinitionData.name,
+    );
+    inputObjectDefinitionData.node.fields = childMapToValueArray(inputObjectDefinitionData.inputValueDataByName);
+    return inputObjectDefinitionData.node;
+  }
+
+  getCompositeOutputNodeByData(compositeOutputData: CompositeOutputData): ObjectTypeNode | InterfaceTypeDefinitionNode {
+    compositeOutputData.node.description = compositeOutputData.description;
+    compositeOutputData.node.directives = this.getValidFlattenedDirectiveArray(
+      compositeOutputData.directivesByName,
+      compositeOutputData.name,
+      true,
+    );
+    compositeOutputData.node.fields = childMapToValueArray(compositeOutputData.fieldDataByName);
+    compositeOutputData.node.interfaces = setToNamedTypeNodeArray(compositeOutputData.implementedInterfaceTypeNames);
+    return compositeOutputData.node;
+  }
+
+  getScalarNodeByData(scalarDefinitionData: ScalarDefinitionData) {
+    scalarDefinitionData.node.description = scalarDefinitionData.description;
+    scalarDefinitionData.node.directives = this.getValidFlattenedDirectiveArray(
+      scalarDefinitionData.directivesByName,
+      scalarDefinitionData.name,
+    );
+    return scalarDefinitionData.node;
+  }
+
+  schemaNodeFromData(schemaData: SchemaData): SchemaNodeResult {
+    const operationTypes: Array<OperationTypeDefinitionNode> = [];
+    for (const [
+      operation,
+      {
+        type: {
+          name: { value },
+        },
+      },
+    ] of schemaData.operationTypes) {
+      const data = this.parentDefinitionDataByTypeName.get(value);
+      if (!data || !isObjectDefinitionData(data)) {
+        continue;
+      }
+      operationTypes.push({
+        kind: Kind.OPERATION_TYPE_DEFINITION,
+        operation,
+        type: stringToNamedTypeNode(value),
+      });
+    }
+
+    const linkResult = extractLinkArgs(schemaData.directivesByName);
+    if (!linkResult.success) {
+      return linkResult;
+    }
+
+    this.importDataByDirectiveName = linkResult.importDataByDirectiveName;
+
+    const composeDirectives = schemaData.directivesByName.get(COMPOSE_DIRECTIVE);
+    for (const composeDirective of composeDirectives ?? []) {
+      this.handleComposeDirective(composeDirective as ComposeDirectiveNode);
+    }
+
+    // If the directive is not part of @composeDirective, it is effectively ignored by federation.
+    for (const directiveName of this.importDataByDirectiveName.keys()) {
+      if (!this.federatedDirectiveDataByName.has(directiveName.substring(1))) {
+        this.importDataByDirectiveName.delete(directiveName);
+      }
+    }
+
+    if (operationTypes.length > 0) {
+      return {
+        node: {
+          ...(schemaData.description ? { description: schemaData.description } : {}),
+          directives: this.getValidFlattenedDirectiveArray(schemaData.directivesByName, schemaData.name),
+          kind: Kind.SCHEMA_DEFINITION,
+          operationTypes: operationTypes,
+        },
+        success: true,
+      };
+    }
+
+    if (schemaData.directivesByName.size < 1) {
+      return {
+        node: undefined,
+        success: true,
+      };
+    }
+
+    return {
+      node: {
+        directives: this.getValidFlattenedDirectiveArray(schemaData.directivesByName, schemaData.name),
+        kind: Kind.SCHEMA_EXTENSION,
+      },
+      success: true,
+    };
+  }
+
+  getUnionNodeByData(unionDefinitionData: UnionDefinitionData) {
+    unionDefinitionData.node.description = unionDefinitionData.description;
+    unionDefinitionData.node.directives = this.getValidFlattenedDirectiveArray(
+      unionDefinitionData.directivesByName,
+      unionDefinitionData.name,
+    );
+    unionDefinitionData.node.types = mapToArrayOfValues(unionDefinitionData.memberByMemberTypeName);
+    return unionDefinitionData.node;
+  }
+
+  evaluateExternalKeyFields() {
+    const invalidTypeNames: Array<string> = [];
+    for (const [entityTypeName, keyFieldSetDataByFieldSet] of this.keyFieldSetDatasByTypeName) {
+      const entityParentData = this.parentDefinitionDataByTypeName.get(entityTypeName);
+      // The parent data should always exist.
+      if (
+        !entityParentData ||
+        (entityParentData.kind !== Kind.OBJECT_TYPE_DEFINITION &&
+          entityParentData.kind !== Kind.INTERFACE_TYPE_DEFINITION)
+      ) {
+        // If somehow the parent data does not exist, prevent the same error occurring by removing that type from the map.
+        invalidTypeNames.push(entityTypeName);
+        this.errors.push(undefinedCompositeOutputTypeError(entityTypeName));
+        continue;
+      }
+      const nf = this;
+      for (const keyFieldSetData of keyFieldSetDataByFieldSet.values()) {
+        const parentDatas: CompositeOutputData[] = [entityParentData];
+        // Entity extension fields are effectively never @external, so propagate a warning.
+        const externalExtensionFieldCoordsByRawFieldSet = new Map<string, Set<string>>();
+        let currentDepth = -1;
+        let shouldDefineSelectionSet = true;
+        visit(keyFieldSetData.documentNode, {
+          Argument: {
+            enter() {
+              return BREAK;
+            },
+          },
+          Field: {
+            enter(node) {
+              const parentData = parentDatas[currentDepth];
+              const parentTypeName = parentData.name;
+              // If a composite type was just visited, a selection set should have been entered
+              if (shouldDefineSelectionSet) {
+                return BREAK;
+              }
+              const fieldName = node.name.value;
+              const fieldCoords = `${parentTypeName}.${fieldName}`;
+              // If a field declared @external is a key field, it is valid use of @external.
+              nf.unvalidatedExternalFieldCoords.delete(fieldCoords);
+              const fieldData = parentData.fieldDataByName.get(fieldName);
+              // undefined if the field does not exist on the parent
+              if (!fieldData || fieldData.argumentDataByName.size) {
+                return BREAK;
+              }
+              // Fields that form part of an entity key are intrinsically shareable
+              fieldData.isShareableBySubgraphName.set(nf.subgraphName, true);
+              /* !!! IMPORTANT NOTE REGARDING INCONSISTENT APOLLO BEHAVIOUR !!!
+               * V1 entities with "@extends" may define unique nested key fields as @external without restriction.
+               * However, V1 entity extensions (with the "extend" keyword) cannot do this.
+               * Instead, an error is returned stating that there must be a non-external definition of the field.
+               * This inconsistency in behaviour appears to be a bug.
+               * It doesn't make much sense to enforce "origin fields" only sometimes (or ever, honestly).
+               * Consequently, a decision was made not ever to enforce meaningless origin fields for extensions.
+               *
+               * In the event the nested key field is not unique, the error may propagate as a field resolvability
+               * error, e.g., unable to use the nested @external key field to satisfy a field set in another subgraph.
+               *
+               * In addition, the nested key field of a V2 entity extension (either "@extends" or "extend" keyword)
+               * are considered unconditionally provided regardless of the presence of "@external".
+               *
+               * However, if the subgraph is an EDG, the @external state should be kept regardless of extension.
+               * */
+              const externalFieldData = fieldData.externalFieldDataBySubgraphName.get(nf.subgraphName);
+              if (
+                nf.edfsDirectiveReferences.size < 1 &&
+                externalFieldData &&
+                externalFieldData.isDefinedExternal &&
+                !externalFieldData.isUnconditionallyProvided
+              ) {
+                /*
+                 * The key field is unconditionally provided if all the following are true:
+                 * 1. The root entity is an extension type.
+                 * 2. The field is also a key field for the parent entity.
+                 */
+                if (entityParentData.extensionType !== ExtensionType.NONE) {
+                  externalFieldData.isUnconditionallyProvided = true;
+                  getValueOrDefault(
+                    externalExtensionFieldCoordsByRawFieldSet,
+                    keyFieldSetData.rawFieldSet,
+                    () => new Set<string>(),
+                  ).add(fieldCoords);
+                }
+              }
+              getValueOrDefault(nf.keyFieldNamesByParentTypeName, parentTypeName, () => new Set<string>()).add(
+                fieldName,
+              );
+              const namedTypeName = getTypeNodeNamedTypeName(fieldData.node.type);
+              // The base scalars are not in the parents map
+              if (BASE_SCALARS.has(namedTypeName)) {
+                return;
+              }
+              // The child could itself be a parent
+              const namedTypeData = nf.parentDefinitionDataByTypeName.get(namedTypeName);
+              if (!namedTypeData) {
+                return BREAK;
+              }
+              if (namedTypeData.kind === Kind.OBJECT_TYPE_DEFINITION) {
+                shouldDefineSelectionSet = true;
+                parentDatas.push(namedTypeData);
+                return;
+              }
+              // interfaces and unions are invalid in a key directive
+              if (isKindAbstract(namedTypeData.kind)) {
+                return BREAK;
+              }
+            },
+          },
+          InlineFragment: {
+            enter() {
+              return BREAK;
+            },
+          },
+          SelectionSet: {
+            enter() {
+              if (!shouldDefineSelectionSet) {
+                return BREAK;
+              }
+              currentDepth += 1;
+              shouldDefineSelectionSet = false;
+              if (currentDepth < 0 || currentDepth >= parentDatas.length) {
+                return BREAK;
+              }
+            },
+            leave() {
+              if (shouldDefineSelectionSet) {
+                shouldDefineSelectionSet = false;
+              }
+              // Empty selection sets would be a parse error, so it is unnecessary to handle them
+              currentDepth -= 1;
+              parentDatas.pop();
+            },
+          },
+        });
+        if (externalExtensionFieldCoordsByRawFieldSet.size < 1) {
+          continue;
+        }
+        for (const [rawFieldSet, fieldCoords] of externalExtensionFieldCoordsByRawFieldSet) {
+          this.warnings.push(
+            externalEntityExtensionKeyFieldWarning(
+              entityParentData.name,
+              rawFieldSet,
+              [...fieldCoords],
+              this.subgraphName,
+            ),
+          );
+        }
+      }
+    }
+    for (const invalidTypeName of invalidTypeNames) {
+      this.keyFieldSetDatasByTypeName.delete(invalidTypeName);
+    }
+  }
+
+  addValidConditionalFieldSetConfigurations() {
+    for (const [typeName, fieldSetData] of this.fieldSetDataByTypeName) {
+      const parentData = this.parentDefinitionDataByTypeName.get(typeName);
+      if (
+        !parentData ||
+        (parentData.kind !== Kind.OBJECT_TYPE_DEFINITION && parentData.kind !== Kind.INTERFACE_TYPE_DEFINITION)
+      ) {
+        this.errors.push(undefinedCompositeOutputTypeError(typeName));
+        continue;
+      }
+      const parentTypeName = getParentTypeName(parentData);
+      const configurationData = getValueOrDefault(this.configurationDataByTypeName, parentTypeName, () =>
+        newConfigurationData(false, parentTypeName),
+      );
+      const provides = this.validateProvidesOrRequires(parentData, fieldSetData.provides, true);
+      if (provides) {
+        configurationData.provides = provides;
+      }
+      const requires = this.validateProvidesOrRequires(parentData, fieldSetData.requires, false);
+      if (requires) {
+        configurationData.requires = requires;
+      }
+    }
+  }
+
+  extractEntityCacheDirective({ directivesByName, name: typeName }: ObjectDefinitionData) {
+    const entityCacheDirectives = directivesByName.get(OPENFED_ENTITY_CACHE);
+    if (!entityCacheDirectives || entityCacheDirectives.length === 0) {
+      return;
+    }
+
+    if (!this.keyFieldSetDatasByTypeName.has(typeName)) {
+      this.errors.push(
+        invalidDirectiveError(OPENFED_ENTITY_CACHE, typeName, FIRST_ORDINAL, [
+          entityCacheWithoutKeyErrorMessage(typeName),
+        ]),
+      );
+      return;
+    }
+
+    /* validateDirectives() (run earlier in normalize()) has already guaranteed each argument's type —
+     * Int for maxAge/negativeCacheTTL, Boolean for the flags — so the generic ConstDirectiveNode is
+     * narrowed once to the precise typed node, mirroring RequestScopedDirectiveNode/ComposeDirectiveNode.
+     * Optional arguments may be absent (definition defaults are not materialized onto the usage AST),
+     * so the config starts at the directive's documented defaults and each present argument overrides it.
+     */
+    const directive = entityCacheDirectives[0] as EntityCacheDirectiveNode;
+    if (this.entityCacheConfigByTypeName.has(typeName)) {
+      // The error would be caught in directive validation as an invalid repeated directive use.
+      return;
+    }
+
+    const config: EntityCacheConfiguration = {
+      typeName,
+      maxAgeSeconds: 0,
+      notFoundCacheTtlSeconds: 0,
+      includeHeaders: false,
+      partialCacheLoad: false,
+      shadowMode: false,
+    };
+
+    for (const arg of directive.arguments) {
+      if (!arg) {
+        continue;
+      }
+
+      const { name, value } = arg;
+
+      switch (value.kind) {
+        case Kind.INT: {
+          switch (name.value) {
+            case MAX_AGE: {
+              config.maxAgeSeconds = parseInt(value.value, 10);
+              break;
+            }
+            case NEGATIVE_CACHE_TTL: {
+              config.notFoundCacheTtlSeconds = parseInt(value.value, 10);
+              break;
+            }
+          }
+          break;
+        }
+        default: {
+          switch (name.value) {
+            case INCLUDE_HEADERS: {
+              config.includeHeaders = value.value;
+              break;
+            }
+            case PARTIAL_CACHE_LOAD: {
+              config.partialCacheLoad = value.value;
+              break;
+            }
+            case SHADOW_MODE: {
+              config.shadowMode = value.value;
+              break;
+            }
+          }
+          break;
+        }
+      }
+    }
+
+    const entityCacheErrors: Array<Error> = [];
+
+    if (config.maxAgeSeconds <= 0) {
+      entityCacheErrors.push(
+        invalidDirectiveError(OPENFED_ENTITY_CACHE, typeName, FIRST_ORDINAL, [
+          maxAgeNotPositiveIntegerErrorMessage(config.maxAgeSeconds),
+        ]),
+      );
+    }
+
+    if (config.notFoundCacheTtlSeconds < 0) {
+      entityCacheErrors.push(
+        invalidDirectiveError(OPENFED_ENTITY_CACHE, typeName, FIRST_ORDINAL, [
+          negativeCacheTTLNotNonNegativeIntegerErrorMessage(config.notFoundCacheTtlSeconds),
+        ]),
+      );
+    }
+
+    if (entityCacheErrors.length > 0) {
+      this.errors.push(...entityCacheErrors);
+      return;
+    }
+
+    this.entityCacheConfigByTypeName.set(typeName, config);
+    const configurationData = getValueOrDefault(this.configurationDataByTypeName, typeName, () =>
+      newConfigurationData(true, typeName),
+    );
+
+    getOrInitializeEntityCaching(configurationData).entityCacheConfigurations.push(config);
+  }
+
+  // Returns true if the directive is defined and false otherwise
+  extractCacheInvalidateConfig(fieldData: FieldData): boolean {
+    if (!fieldData.directivesByName.has(OPENFED_CACHE_INVALIDATE)) {
+      return false;
+    }
+
+    const operationType = this.getOperationTypeNodeForRootTypeName(fieldData.originalParentTypeName);
+    const fieldCoords = `${fieldData.originalParentTypeName}.${fieldData.name}`;
+    if (!operationType || operationType === OperationTypeNode.QUERY) {
+      this.errors.push(
+        invalidDirectiveError(OPENFED_CACHE_INVALIDATE, fieldCoords, FIRST_ORDINAL, [
+          invalidMutationOrSubscriptionFieldCoordsErrorMessage(fieldCoords),
+        ]),
+      );
+      return true;
+    }
+
+    const returnTypeName = getTypeNodeNamedTypeName(fieldData.node.type);
+    if (!this.entityCacheConfigByTypeName.has(returnTypeName)) {
+      this.errors.push(
+        invalidDirectiveError(OPENFED_CACHE_INVALIDATE, fieldCoords, FIRST_ORDINAL, [
+          invalidEntityReturnTypeErrorMessage({ fieldCoords, returnTypeName: returnTypeName }),
+        ]),
+      );
+      return true;
+    }
+
+    const configurationData = getValueOrDefault(this.configurationDataByTypeName, fieldData.renamedParentTypeName, () =>
+      newConfigurationData(false, fieldData.renamedParentTypeName),
+    );
+
+    const config: CacheInvalidateConfiguration = {
+      entityTypeName: returnTypeName,
+      fieldName: fieldData.name,
+      operationType: operationType,
+    };
+
+    getOrInitializeEntityCaching(configurationData).cacheInvalidateConfigurations.push(config);
+    return true;
+  }
+
+  /* Extracts @openfed__cachePopulate from Mutation/Subscription fields.
+   * The return type must be a cached entity (@key & @openfed__entityCache).
+   * Argument `maxAge` is optional; if absent, the router falls back to the entity's @openfed__entityCache TTL;
+   * if provided, must be a positive integer.
+   *
+   * Returns true if the directive is defined and false otherwise
+   */
+  extractCachePopulateConfig(fieldData: FieldData): boolean {
+    if (!fieldData.directivesByName.has(OPENFED_CACHE_POPULATE)) {
+      return false;
+    }
+
+    const fieldCoords = `${fieldData.originalParentTypeName}.${fieldData.name}`;
+    const operationType = this.getOperationTypeNodeForRootTypeName(fieldData.originalParentTypeName);
+    if (!operationType || operationType === OperationTypeNode.QUERY) {
+      this.errors.push(
+        invalidDirectiveError(OPENFED_CACHE_POPULATE, fieldCoords, FIRST_ORDINAL, [
+          invalidMutationOrSubscriptionFieldCoordsErrorMessage(fieldCoords),
+        ]),
+      );
+      return true;
+    }
+
+    const returnTypeName = getTypeNodeNamedTypeName(fieldData.node.type);
+    const entityCacheConfig = this.entityCacheConfigByTypeName.get(returnTypeName);
+    if (!entityCacheConfig) {
+      this.errors.push(
+        invalidDirectiveError(OPENFED_CACHE_POPULATE, fieldCoords, FIRST_ORDINAL, [
+          invalidEntityReturnTypeErrorMessage({ fieldCoords, returnTypeName }),
+        ]),
+      );
+      return true;
+    }
+
+    /* validateDirectives() has already guaranteed maxAge is an Int when present, so the generic
+     * ConstDirectiveNode is narrowed once to the precise typed node — mirroring the other caching
+     * directives. maxAge is the only argument and is optional.
+     */
+    const cachePopulateDirective = fieldData.directivesByName.get(
+      OPENFED_CACHE_POPULATE,
+    )![0] as CachePopulateDirectiveNode;
+
+    const config: CachePopulateConfiguration = {
+      entityTypeName: returnTypeName,
+      fieldName: fieldData.name,
+      operationType,
+      maxAgeSeconds: entityCacheConfig.maxAgeSeconds, // Set fallback immediately; overridden where appropriate.
+    };
+
+    const maxAgeArgument = cachePopulateDirective.arguments[0];
+    if (!maxAgeArgument) {
+      const configurationData = getValueOrDefault(
+        this.configurationDataByTypeName,
+        fieldData.renamedParentTypeName,
+        () => newConfigurationData(false, fieldData.renamedParentTypeName),
+      );
+
+      getOrInitializeEntityCaching(configurationData).cachePopulateConfigurations.push(config);
+      return true;
+    }
+
+    config.maxAgeSeconds = parseInt(maxAgeArgument.value.value, 10);
+    // This syntax handles possible NaN.
+    if (isNaN(config.maxAgeSeconds) || config.maxAgeSeconds <= 0) {
+      this.errors.push(
+        invalidDirectiveError(OPENFED_CACHE_POPULATE, fieldCoords, FIRST_ORDINAL, [
+          // If null is explicitly provided in GraphQL the value in JS is undefined.
+          maxAgeNotPositiveIntegerErrorMessage(maxAgeArgument.value.value ?? null),
+        ]),
+      );
+      return true;
+    }
+
+    const configurationData = getValueOrDefault(this.configurationDataByTypeName, fieldData.renamedParentTypeName, () =>
+      newConfigurationData(false, fieldData.renamedParentTypeName),
+    );
+
+    getOrInitializeEntityCaching(configurationData).cachePopulateConfigurations.push(config);
+    return true;
+  }
+
+  addFieldNamesToConfigurationData(fieldDataByFieldName: Map<string, FieldData>, configurationData: ConfigurationData) {
+    const externalFieldNames = new Set<string>();
+    for (const [fieldName, fieldData] of fieldDataByFieldName) {
+      const externalFieldData = fieldData.externalFieldDataBySubgraphName.get(this.subgraphName);
+      if (!externalFieldData || externalFieldData.isUnconditionallyProvided) {
+        configurationData.fieldNames.add(fieldName);
+        continue;
+      }
+      externalFieldNames.add(fieldName);
+      if (this.edfsDirectiveReferences.size > 0) {
+        configurationData.fieldNames.add(fieldName);
+      }
+    }
+    if (externalFieldNames.size > 0) {
+      configurationData.externalFieldNames = externalFieldNames;
+    }
+  }
+
+  validateOneOfDirective({ data, requiredFieldNames }: ValidateOneOfDirectiveParams): boolean {
+    if (!data.directivesByName.has(ONE_OF)) {
+      return true;
+    }
+    if (requiredFieldNames.size > 0) {
+      this.errors.push(
+        oneOfRequiredFieldsError({
+          requiredFieldNames: Array.from(requiredFieldNames),
+          typeName: data.name,
+        }),
+      );
+      return false;
+    }
+    if (data.inputValueDataByName.size === 1) {
+      this.warnings.push(
+        singleSubgraphInputFieldOneOfWarning({
+          fieldName: getFirstEntry(data.inputValueDataByName)?.name ?? 'unknown',
+          subgraphName: this.subgraphName,
+          typeName: data.name,
+        }),
+      );
+    }
+    return true;
+  }
+
+  #addDirectiveDefinitionsToDocument(definitions: Array<DefinitionNode>): void {
+    const dependencies = new Set<DefinitionNode>();
+    for (const directiveName of this.referencedDirectiveNames) {
+      const definition = DIRECTIVE_DEFINITION_BY_NAME.get(directiveName);
+      if (!definition) {
+        continue;
+      }
+
+      this.directiveDefinitionByName.set(directiveName, definition);
+      addOptionalIterableToSet({
+        source: DEPENDENCIES_BY_DIRECTIVE_NAME.get(directiveName),
+        target: dependencies,
+      });
+      definitions.push(definition);
+      if (UNSUPPORTED_DIRECTIVE_NAMES.has(directiveName)) {
+        this.warnings.push(
+          unsupportedDirectiveWarning({
+            directiveName,
+            subgraphName: this.subgraphName,
+          }),
+        );
+      }
+    }
+    // Always include custom directive definitions regardless of use.
+    for (const definition of this.customDirectiveDefinitionByName.values()) {
+      definitions.push(definition);
+    }
+    definitions.push(...dependencies);
+  }
+
+  // Only Object fields should be passed to this method
+  handleFieldCacheDirectives(data: FieldData): void {
+    /* A field can't both evict (@openfed__cacheInvalidate) and write (@openfed__cachePopulate)
+     * the cache for the same entity, so the two directives are mutually exclusive.
+     */
+    const definesInvalidate = this.extractCacheInvalidateConfig(data);
+    const definesPopulate = this.extractCachePopulateConfig(data);
+    if (definesInvalidate && definesPopulate) {
+      const fieldCoords = `${data.originalParentTypeName}.${data.name}`;
+      this.errors.push(invalidMutuallyExclusiveCacheDirectivesError(fieldCoords));
+    }
+  }
+
+  normalize(document: DocumentNode): NormalizationResult {
+    // Collect any renamed root types
+    upsertDirectiveSchemaAndEntityDefinitions(this, document);
+    upsertParentsAndChildren(this, document);
+    const definitions: Array<DefinitionNode> = [];
+    this.#addDirectiveDefinitionsToDocument(definitions);
+    this.validateDirectives(this.schemaData, SCHEMA);
+    const schemaNodeResult = this.schemaNodeFromData(this.schemaData);
+    if (!schemaNodeResult.success) {
+      this.errors.push(...schemaNodeResult.errors);
+      return {
+        errors: this.errors,
+        success: false,
+        warnings: this.warnings,
+      };
+    }
+    /* Schema extension orphans are not supported on old routers.
+     * Consequently, it is a breaking change that requires a new composition version, and that composition version
+     * would only be compatible with newer routers that support schema extension orphans.
+     * For now, only a valid schema definition node is pushed.
+     */
+    if (schemaNodeResult.node?.kind === Kind.SCHEMA_DEFINITION) {
+      definitions.push(schemaNodeResult.node);
+    }
+    for (const [parentTypeName, parentData] of this.parentDefinitionDataByTypeName) {
+      this.validateDirectives(parentData, parentTypeName);
+    }
+    for (const [name, data] of this.directiveDefinitionDataByName) {
+      // In-built directive arguments are pre-validated
+      if (!this.customDirectiveDefinitionByName.has(name)) {
+        continue;
+      }
+
+      this.validateArguments({ data, parentKind: Kind.DIRECTIVE_DEFINITION });
+    }
+    if (this.invalidORScopesCoords.size > 0) {
+      this.errors.push(orScopesLimitError(MAX_OR_SCOPES, [...this.invalidORScopesCoords]));
+    }
+    /*
+     * Sometimes an @openfed__configureDescription directive is defined before a description is, e.g., on an extension.
+     * If at this stage there is still no description, it is propagated as an error.
+     * */
+    for (const data of this.invalidConfigureDescriptionNodeDatas) {
+      if (!data.description) {
+        this.errors.push(configureDescriptionNoDescriptionError(kindToNodeType(data.kind), data.name));
+      }
+    }
+    // Check all key field sets for @external fields to assess whether they are conditional
+    this.evaluateExternalKeyFields();
+
+    for (const [parentTypeName, parentData] of this.parentDefinitionDataByTypeName) {
+      switch (parentData.kind) {
+        case Kind.ENUM_TYPE_DEFINITION: {
+          if (parentData.enumValueDataByName.size < 1) {
+            this.errors.push(noDefinedEnumValuesError(parentTypeName));
+            break;
+          }
+          // The definition is conditionally pushed elsewhere.
+          if (parentTypeName !== EDFS_DELIVERY_GUARANTEE_MODE) {
+            definitions.push(this.getEnumNodeByData(parentData));
+          }
+          break;
+        }
+        case Kind.INPUT_OBJECT_TYPE_DEFINITION: {
+          if (parentData.inputValueDataByName.size < 1) {
+            this.errors.push(noInputValueDefinitionsError(parentTypeName));
+            break;
+          }
+          const requiredFieldNames = new Set<FieldName>();
+          for (const valueData of parentData.inputValueDataByName.values()) {
+            if (isTypeRequired(valueData.type)) {
+              requiredFieldNames.add(valueData.name);
+            }
+            // Base Scalars have already been set
+            if (valueData.namedTypeKind !== Kind.NULL) {
+              continue;
+            }
+            const namedTypeData = this.parentDefinitionDataByTypeName.get(valueData.namedTypeName);
+            if (!namedTypeData) {
+              // Undefined types are handled elsewhere
+              continue;
+            }
+            sanitizeDefaultValue({ data: valueData, namedTypeData, node: valueData.node });
+            if (!isInputNodeKind(namedTypeData.kind)) {
+              this.errors.push(
+                invalidNamedTypeError({
+                  data: valueData,
+                  namedTypeData,
+                  nodeType: `${kindToNodeType(parentData.kind)} field`,
+                }),
+              );
+              continue;
+            }
+            valueData.namedTypeKind = namedTypeData.kind;
+          }
+          if (!this.validateOneOfDirective({ data: parentData, requiredFieldNames })) {
+            break;
+          }
+          // The definition is conditionally pushed elsewhere.
+          if (parentTypeName !== EDFS_NATS_STREAM_CONFIGURATION && parentTypeName !== EDFS_DELIVERY_GUARANTEES) {
+            definitions.push(this.getInputObjectNodeByData(parentData));
+          }
+          break;
+        }
+        case Kind.INTERFACE_TYPE_DEFINITION:
+        // intentional fallthrough
+        case Kind.OBJECT_TYPE_DEFINITION: {
+          const isEntity = this.entityDataByTypeName.has(parentTypeName);
+          const operationTypeNode = this.operationTypeNodeByTypeName.get(parentTypeName);
+          const isObject = parentData.kind === Kind.OBJECT_TYPE_DEFINITION;
+
+          if (this.isSubgraphVersionTwo && parentData.extensionType === ExtensionType.EXTENDS) {
+            // @extends is essentially ignored in V2. It was only propagated to handle @external key fields.
+            parentData.extensionType = ExtensionType.NONE;
+          }
+          if (operationTypeNode) {
+            parentData.fieldDataByName.delete(SERVICE_FIELD);
+            parentData.fieldDataByName.delete(ENTITIES_FIELD);
+          }
+
+          const externalInterfaceFieldNames: Array<string> = [];
+          for (const [fieldName, fieldData] of parentData.fieldDataByName) {
+            if (isObject) {
+              this.handleFieldCacheDirectives(fieldData);
+            } else if (fieldData.externalFieldDataBySubgraphName.get(this.subgraphName)?.isDefinedExternal) {
+              externalInterfaceFieldNames.push(fieldName);
+            }
+
+            // Arguments can only be fully validated once all parents types are known
+            this.validateArguments({ data: fieldData, parentKind: parentData.kind });
+            // Base Scalars have already been set
+            if (fieldData.namedTypeKind !== Kind.NULL) {
+              continue;
+            }
+            const namedTypeData = this.parentDefinitionDataByTypeName.get(fieldData.namedTypeName);
+            if (!namedTypeData) {
+              // undefined types are handled elsewhere
+              continue;
+            }
+            if (!isOutputNodeKind(namedTypeData.kind)) {
+              this.errors.push(
+                invalidNamedTypeError({
+                  data: fieldData,
+                  namedTypeData,
+                  nodeType: `${kindToNodeType(parentData.kind)} field`,
+                }),
+              );
+              continue;
+            }
+            fieldData.namedTypeKind = this.entityInterfaceDataByTypeName.get(namedTypeData.name)
+              ? Kind.INTERFACE_TYPE_DEFINITION
+              : namedTypeData.kind;
+          }
+          // @external interface fields fails composition in V2; only propagate as a warning for V1.
+          if (externalInterfaceFieldNames.length > 0) {
+            this.isSubgraphVersionTwo
+              ? this.errors.push(externalInterfaceFieldsError(parentTypeName, externalInterfaceFieldNames))
+              : this.warnings.push(
+                  externalInterfaceFieldsWarning(this.subgraphName, parentTypeName, [...externalInterfaceFieldNames]),
+                );
+          }
+          const newParentTypeName = getParentTypeName(parentData);
+          const configurationData = getValueOrDefault(this.configurationDataByTypeName, newParentTypeName, () =>
+            newConfigurationData(isEntity, parentTypeName),
+          );
+          const entityInterfaceData = this.entityInterfaceDataByTypeName.get(parentTypeName);
+          if (entityInterfaceData) {
+            entityInterfaceData.fieldDatas = fieldDatasToSimpleFieldDatas(parentData.fieldDataByName.values());
+            const concreteTypeNames = this.concreteTypeNamesByAbstractTypeName.get(parentTypeName);
+            if (concreteTypeNames) {
+              addIterableToSet({
+                source: concreteTypeNames,
+                target: entityInterfaceData.concreteTypeNames,
+              });
+            }
+            configurationData.isInterfaceObject = entityInterfaceData.isInterfaceObject;
+            configurationData.entityInterfaceConcreteTypeNames = entityInterfaceData.concreteTypeNames;
+          }
+          const events = this.eventsConfigurations.get(newParentTypeName);
+          if (events) {
+            configurationData.events = events;
+          }
+          this.addFieldNamesToConfigurationData(parentData.fieldDataByName, configurationData);
+          this.validateInterfaceImplementations(parentData);
+          definitions.push(this.getCompositeOutputNodeByData(parentData));
+          /* Interfaces and Objects must define at least one field.
+           * However, some servers allow a query root type to be defined without fields.
+           * This is so it can be renamed and any federation boiler plate is appended to that renamed node.
+           * */
+          if (parentData.fieldDataByName.size < 1 && !isNodeQuery(parentTypeName, operationTypeNode)) {
+            this.errors.push(noFieldDefinitionsError(kindToNodeType(parentData.kind), parentTypeName));
+          }
+          if (parentData.requireFetchReasonsFieldNames.size > 0) {
+            configurationData.requireFetchReasonsFieldNames = [...parentData.requireFetchReasonsFieldNames];
+          }
+          break;
+        }
+        case Kind.SCALAR_TYPE_DEFINITION: {
+          if (parentData.extensionType === ExtensionType.REAL) {
+            this.errors.push(noBaseScalarDefinitionError(parentTypeName));
+            break;
+          }
+          definitions.push(this.getScalarNodeByData(parentData));
+          break;
+        }
+        case Kind.UNION_TYPE_DEFINITION: {
+          definitions.push(this.getUnionNodeByData(parentData));
+          this.validateUnionMembers(parentData);
+          break;
+        }
+        default: {
+          throw unexpectedKindFatalError(parentTypeName);
+        }
+      }
+    }
+    this.isSubgraphEventDrivenGraph = this.edfsDirectiveReferences.size > 0;
+    // this is where @provides and @requires configurations are added to the ConfigurationData
+    this.addValidConditionalFieldSetConfigurations();
+    // this is where @key configurations are added to the ConfigurationData
+    this.addValidKeyFieldSetConfigurations();
+    // Check that explicitly defined operations types are valid objects and that their fields are also valid
+    for (const operationType of Object.values(OperationTypeNode)) {
+      const operationTypeNode = this.schemaData.operationTypes.get(operationType);
+      const defaultTypeName = getOrThrowError(operationTypeNodeToDefaultType, operationType, OPERATION_TO_DEFAULT);
+      // If an operation type name was not declared, use the default
+      const operationTypeName = operationTypeNode ? getTypeNodeNamedTypeName(operationTypeNode.type) : defaultTypeName;
+      // This check is so undefined type errors are not improperly propagated
+      if (BASE_SCALARS.has(operationTypeName)) {
+        this.referencedTypeNames.add(operationTypeName);
+      }
+      // If a custom type is used, the default type should not be defined
+      if (operationTypeName !== defaultTypeName && this.parentDefinitionDataByTypeName.has(defaultTypeName)) {
+        this.errors.push(invalidRootTypeDefinitionError(operationType, operationTypeName, defaultTypeName));
+        continue;
+      }
+      const objectData = this.parentDefinitionDataByTypeName.get(operationTypeName);
+      // operationTypeNode is truthy if an operation type was explicitly declared
+      if (operationTypeNode) {
+        // If the type is not defined in the schema, it will be handled when checking references
+        if (!objectData) {
+          continue;
+        }
+        // Add the explicitly defined type to the map for the federation-factory
+        this.operationTypeNodeByTypeName.set(operationTypeName, operationType);
+      }
+      if (!objectData) {
+        continue;
+      }
+      const rootNode = this.configurationDataByTypeName.get(defaultTypeName);
+      if (rootNode) {
+        rootNode.isRootNode = true;
+        rootNode.typeName = defaultTypeName;
+      }
+      if (objectData.kind !== Kind.OBJECT_TYPE_DEFINITION) {
+        this.errors.push(operationDefinitionError(operationTypeName, operationType, objectData.kind));
+      }
+    }
+    for (const referencedTypeName of this.referencedTypeNames) {
+      const parentData = this.parentDefinitionDataByTypeName.get(referencedTypeName);
+      if (!parentData) {
+        this.errors.push(undefinedTypeError(referencedTypeName));
+        continue;
+      }
+      if (parentData.kind !== Kind.INTERFACE_TYPE_DEFINITION) {
+        continue;
+      }
+      // There will be a run time error if a field can return an Interface without any Object implementations.
+      const implementationTypeNames = this.concreteTypeNamesByAbstractTypeName.get(referencedTypeName);
+      if (!implementationTypeNames || implementationTypeNames.size < 1) {
+        // Temporarily propagate as a warning until @inaccessible, entity interfaces and other such considerations are handled
+        this.warnings.push(unimplementedInterfaceOutputTypeWarning(this.subgraphName, referencedTypeName));
+      }
+    }
+    this.handleExecutableDirectives();
+    if (this.isSubgraphEventDrivenGraph) {
+      this.validateEventDrivenSubgraph();
+    }
+    for (const fieldCoords of this.unvalidatedExternalFieldCoords) {
+      if (this.isSubgraphVersionTwo) {
+        this.errors.push(invalidExternalDirectiveError(fieldCoords));
+      } else {
+        this.warnings.push(invalidExternalFieldWarning(fieldCoords, this.subgraphName));
+      }
+    }
+    if (this.errors.length > 0) {
+      return { success: false, errors: this.errors, warnings: this.warnings };
+    }
+    const newAST: DocumentNode = {
+      kind: Kind.DOCUMENT,
+      definitions,
+    };
+    return {
+      authorizationDataByParentTypeName: this.authorizationDataByParentTypeName,
+      concreteTypeNamesByAbstractTypeName: this.concreteTypeNamesByAbstractTypeName,
+      conditionalFieldDataByCoordinates: this.conditionalFieldDataByCoords,
+      /* `configurationDataByTypeName` is an intermediate object that is converted
+       * to an engine configuration in the router
+       */
+      configurationDataByTypeName: this.configurationDataByTypeName,
+      costs: this.costs,
+      directiveDefinitionByName: this.directiveDefinitionByName,
+      entityDataByTypeName: this.entityDataByTypeName,
+      entityInterfaces: this.entityInterfaceDataByTypeName,
+      federatedDirectiveDataByName: this.federatedDirectiveDataByName,
+      fieldCoordsByNamedTypeName: this.fieldCoordsByNamedTypeName,
+      importDataByDirectiveName: this.importDataByDirectiveName,
+      interfaceImplementationTypeNamesByInterfaceTypeName: this.interfaceImplementationTypeNamesByInterfaceTypeName,
+      isEventDrivenGraph: this.isSubgraphEventDrivenGraph,
+      isVersionTwo: this.isSubgraphVersionTwo,
+      keyFieldNamesByParentTypeName: this.keyFieldNamesByParentTypeName,
+      keyFieldSetsByEntityTypeNameByKeyFieldCoords: this.keyFieldSetsByEntityTypeNameByFieldCoords,
+      operationTypes: this.operationTypeNodeByTypeName,
+      originalTypeNameByRenamedTypeName: this.originalTypeNameByRenamedTypeName,
+      overriddenFieldNamesByParentTypeNameByTargetSubgraphName: this.overriddenFieldNamesByTypeNameByTargetSubgraphName,
+      parentDefinitionDataByTypeName: this.parentDefinitionDataByTypeName,
+      schema: buildASTSchema(newAST, { addInvalidExtensionOrphans: true, assumeValid: true, assumeValidSDL: true }),
+      schemaNode: schemaNodeResult.node,
+      subgraphAST: newAST,
+      subgraphString: print(newAST),
+      success: true,
+      warnings: this.warnings,
+    };
+  }
+}

@@ -1,0 +1,27 @@
+{
+  "name": "keycloak-theme",
+  "version": "1.0.0",
+  "keywords": [
+    "keycloak",
+    "theme",
+    "keycloak-theme"
+  ],
+  "description": "WunderGraph Theme for Keycloak",
+  "scripts": {
+    "build": "PARCEL_WORKER_BACKEND=process parcel build --dist-dir=./src/main/resources/theme/cosmo/login/resources/dist/ ./src/main/resources/theme/cosmo/login/resources/scss/*.scss ./src/main/resources/theme/cosmo/login/resources/js/*.js"
+  },
+  "devDependencies": {
+    "@parcel/transformer-image": "^2.16.4",
+    "@parcel/transformer-sass": "^2.16.4",
+    "@tailwindcss/forms": "^0.5.4",
+    "autoprefixer": "^10.4.14",
+    "nodemon": "^3.1.14",
+    "parcel": "^2.16.4",
+    "postcss": "^8.5.10",
+    "tailwindcss": "^3.3.3"
+  },
+  "dependencies": {},
+  "overrides": {
+    "minimatch": "10.2.4"
+  }
+}

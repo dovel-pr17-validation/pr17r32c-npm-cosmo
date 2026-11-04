@@ -1,0 +1,89 @@
+name: Studio CI
+on:
+  pull_request:
+    paths:
+      - 'pnpm-lock.yaml'
+      - 'studio/**/*'
+      - 'connect/**/*'
+      - 'shared/**/*'
+      - 'composition/**/*'
+      - '.github/workflows/studio-ci.yaml'
+
+concurrency:
+  group: ${{github.workflow}}-${{github.head_ref}}
+  cancel-in-progress: true
+
+env:
+  CI: true
+  DO_NOT_TRACK: '1'
+
+jobs:
+  build_test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: pnpm/setup@84cb39b217b10273981911c288cd62326dc7c6d2 # v2
+        with:
+          cache: true
+          install: false
+
+      - uses: actions/cache@v4
+        name: Cache Next.js build
+        with:
+          path: |
+            ${{ github.workspace }}/web/.next/cache
+          # Generate a new cache whenever packages or source files change.
+          key: ${{ runner.os }}-nextjs-${{ hashFiles('**/pnpm-lock.yaml') }}-${{ hashFiles('studio/**.[jt]s', 'studio/**.[jt]sx') }}
+          # If source files changed but packages didn't, rebuild from a prior cache.
+          restore-keys: |
+            ${{ runner.os }}-nextjs-${{ hashFiles('**/pnpm-lock.yaml') }}-
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Generate code
+        run: pnpm buf generate --template buf.ts.gen.yaml
+
+      - name: Lint
+        run: pnpm run --filter studio lint:fix
+
+      - uses: ./.github/actions/git-dirty-check
+        with:
+          package-name: studio
+
+      - name: Build
+        run: pnpm run --filter ./studio --filter ./connect --filter ./shared --filter ./composition build
+
+      - name: Test
+        run: pnpm run --filter studio test:coverage
+
+      - name: Upload integration results to Codecov
+        uses: ./.github/actions/codecov-upload-pr
+        with:
+          artifact-name: studio-tests-coverage
+          coverage-path: |
+            studio/coverage/clover.xml
+            studio/coverage/coverage-final.json
+          retention-days: 14
+          codecov-token: ${{ secrets.CODECOV_TOKEN }}
+
+  build_push_image:
+    # This is a limitation of GitHub. Only organization members can push to GitHub Container Registry
+    # For now, we will disable the push to the GitHub Container Registry for external contributors
+    if: github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: ./.github/actions/build-push-image
+        with:
+          docker_username: ${{secrets.DOCKER_USERNAME}}
+          docker_password: ${{secrets.DOCKER_PASSWORD}}
+          docker_context: .
+          dockerfile: studio/Dockerfile
+          token: ${{secrets.GITHUB_TOKEN}}
+          image_name: studio
+          image_description: 'Cosmo Studio'

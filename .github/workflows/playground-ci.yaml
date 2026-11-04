@@ -1,0 +1,40 @@
+name: Playground CI
+on:
+  pull_request:
+    paths:
+      - 'pnpm-lock.yaml'
+      - 'playground/**/*'
+      - '.github/workflows/playground-ci.yaml'
+
+concurrency:
+  group: ${{github.workflow}}-${{github.head_ref}}
+  cancel-in-progress: true
+
+env:
+  CI: true
+  DO_NOT_TRACK: '1'
+
+jobs:
+  build_test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: pnpm/setup@84cb39b217b10273981911c288cd62326dc7c6d2 # v2
+        with:
+          cache: true
+          install: false
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Build for router
+        run: pnpm run --filter ./playground build:router
+
+      - uses: ./.github/actions/git-dirty-check
+        with:
+          package-name: playground
+
+      - name: Build as plugin
+        run: pnpm run --filter ./playground build

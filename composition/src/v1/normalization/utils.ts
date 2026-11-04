@@ -1,0 +1,862 @@
+import {
+  BREAK,
+  type ConstArgumentNode,
+  type ConstDirectiveNode,
+  type ConstObjectValueNode,
+  type ConstValueNode,
+  type DocumentNode,
+  Kind,
+  OperationTypeNode,
+  print,
+  visit,
+} from 'graphql';
+import { isKindAbstract, lexicographicallySortDocumentNode } from '../../ast/utils';
+import { type NormalizationFactory } from './normalization-factory';
+import {
+  abstractTypeInKeyFieldSetErrorMessage,
+  argumentsInKeyFieldSetErrorMessage,
+  duplicateFieldInFieldSetErrorMessage,
+  inlineFragmentInFieldSetErrorMessage,
+  invalidDirectiveError,
+  invalidEventSubjectsArgumentErrorMessage,
+  invalidFieldLinkDirectiveImportObjectError,
+  invalidLinkDirectiveImportObjectError,
+  invalidLinkDirectiveUrlError,
+  invalidSelectionSetDefinitionErrorMessage,
+  invalidSelectionSetErrorMessage,
+  invalidSubValueLinkDirectiveImportError,
+  invalidVersionLinkDirectiveUrlError,
+  noFeatureNameLinkDirectiveUrlError,
+  noLinkDirectiveUrlError,
+  noNameFieldLinkDirectiveImportObjectError,
+  nonIterableLinkDirectiveImportError,
+  noPathLinkDirectiveUrlError,
+  noVersionLinkDirectiveUrlError,
+  undefinedEventSubjectsArgumentErrorMessage,
+  undefinedFieldInFieldSetErrorMessage,
+  unexpectedArgumentErrorMessage,
+  unknownFieldLinkDirectiveImportObjectError,
+  unknownTypeInFieldSetErrorMessage,
+  unparsableFieldSetSelectionErrorMessage,
+} from '../../errors/errors';
+import { BASE_SCALARS, EDFS_ARGS_REGEXP } from '../constants/constants';
+import { type RequiredFieldConfiguration } from '../../router-configuration/types';
+import { type CompositeOutputData, type InputValueData } from '../../schema-building/types/types';
+import { getTypeNodeNamedTypeName } from '../../schema-building/ast';
+import {
+  AUTHENTICATED_DEFINITION_DATA,
+  CACHE_INVALIDATE_DEFINITION_DATA,
+  COMPOSE_DIRECTIVE_DEFINITION_DATA,
+  CONFIGURE_CHILD_DESCRIPTIONS_DEFINITION_DATA,
+  CONFIGURE_DESCRIPTION_DEFINITION_DATA,
+  CONNECT_FIELD_RESOLVER_DEFINITION_DATA,
+  COST_DEFINITION_DATA,
+  DEPRECATED_DEFINITION_DATA,
+  ENTITY_CACHE_DEFINITION_DATA,
+  EXTENDS_DEFINITION_DATA,
+  EXTERNAL_DEFINITION_DATA,
+  INACCESSIBLE_DEFINITION_DATA,
+  INTERFACE_OBJECT_DEFINITION_DATA,
+  KAFKA_PUBLISH_DEFINITION_DATA,
+  KAFKA_SUBSCRIBE_DEFINITION_DATA,
+  KEY_DEFINITION_DATA,
+  LINK_DEFINITION_DATA,
+  LIST_SIZE_DEFINITION_DATA,
+  NATS_PUBLISH_DEFINITION_DATA,
+  NATS_REQUEST_DEFINITION_DATA,
+  NATS_SUBSCRIBE_DEFINITION_DATA,
+  ONE_OF_DEFINITION_DATA,
+  OVERRIDE_DEFINITION_DATA,
+  PROVIDES_DEFINITION_DATA,
+  REDIS_PUBLISH_DEFINITION_DATA,
+  REDIS_SUBSCRIBE_DEFINITION_DATA,
+  REQUIRE_FETCH_REASONS_DEFINITION_DATA,
+  REQUIRES_DEFINITION_DATA,
+  REQUIRES_SCOPES_DEFINITION_DATA,
+  SEMANTIC_NON_NULL_DEFINITION_DATA,
+  SHAREABLE_DEFINITION_DATA,
+  SPECIFIED_BY_DEFINITION_DATA,
+  SUBSCRIPTION_FILTER_DEFINITION_DATA,
+  TAG_DEFINITION_DATA,
+  CACHE_POPULATE_DEFINITION_DATA,
+  POLICY_DEFINITION_DATA,
+  CONTEXT_DEFINITION_DATA,
+  FROM_CONTEXT_DEFINITION_DATA,
+  CACHE_TAG_DEFINITION_DATA,
+} from '../../directive-definition-data/directive-definition-data';
+import {
+  AS,
+  AUTHENTICATED,
+  COMPOSE_DIRECTIVE,
+  CONFIGURE_CHILD_DESCRIPTIONS,
+  CONFIGURE_DESCRIPTION,
+  CONNECT_FIELD_RESOLVER,
+  OPENFED_CACHE_POPULATE,
+  COST,
+  DEPRECATED,
+  EDFS_KAFKA_PUBLISH,
+  EDFS_KAFKA_SUBSCRIBE,
+  EDFS_NATS_PUBLISH,
+  EDFS_NATS_REQUEST,
+  EDFS_NATS_SUBSCRIBE,
+  EDFS_REDIS_PUBLISH,
+  EDFS_REDIS_SUBSCRIBE,
+  EXTENDS,
+  EXTERNAL,
+  FIELDS,
+  IMPORT,
+  INACCESSIBLE,
+  INTERFACE_OBJECT,
+  KEY,
+  LINK,
+  LIST_SIZE,
+  LITERAL_AT,
+  LITERAL_PERIOD,
+  NAME,
+  ONE_OF,
+  OPENFED_CACHE_INVALIDATE,
+  OPENFED_ENTITY_CACHE,
+  OVERRIDE,
+  PROVIDES,
+  QUERY,
+  REQUIRE_FETCH_REASONS,
+  REQUIRES,
+  REQUIRES_SCOPES,
+  SEMANTIC_NON_NULL,
+  SHAREABLE,
+  SPECIFIED_BY,
+  STRING_SCALAR,
+  SUBSCRIPTION_FILTER,
+  TAG,
+  TYPENAME,
+  URL_LOWER,
+  CONTEXT,
+  FROM_CONTEXT,
+  POLICY,
+  CACHE_TAG,
+} from '../../utils/string-constants';
+import { getValueOrDefault, kindToNodeType, numberToOrdinal } from '../../utils/utils';
+import { type FieldSetData, type KeyFieldSetData, type LinkImportData } from './types/types';
+import { type DirectiveName } from '../../types/types';
+import {
+  type ExtractImportUrlSegmentsResult,
+  type ExtractLinkArgsResult,
+  type ExtractLinkImportObjectResult,
+  type ExtractLinkImportsResult,
+} from './types/results';
+import { IMPORT_VERSION_REGEX } from '../constants/strings';
+import { type UpsertFederatedDirectiveDataParams } from '../../directive-definition-data/types/params';
+import { type DirectiveDefinitionData } from '../../directive-definition-data/types/types';
+import { copyDirectiveDefinitionData } from '../../directive-definition-data/utils';
+
+export function newFieldSetData(): FieldSetData {
+  return {
+    provides: new Map<string, string>(),
+    requires: new Map<string, string>(),
+  };
+}
+
+export function extractFieldSetValue(name: string, map: Map<string, string>, directives?: ConstDirectiveNode[]) {
+  // ALl directive validation errors are accounted for later
+  // Requires and provides should not be repeatable, so the length should be no more than 1
+  if (!directives || directives.length > 1) {
+    return;
+  }
+  // There should be exactly one argument
+  const args = directives[0].arguments;
+  if (!args || args.length !== 1) {
+    return;
+  }
+  // The argument should be a string type named "fields"
+  const fieldsArgument = args[0];
+  if (fieldsArgument.name.value !== FIELDS || fieldsArgument.value.kind !== Kind.STRING) {
+    return;
+  }
+  map.set(name, fieldsArgument.value.value);
+}
+
+export function getNormalizedFieldSet(documentNode: DocumentNode): string {
+  /*
+    1. Lexicographically sort the DocumentNode
+    2. Convert to a string
+    3. Replace consecutive whitespace with a single space
+    4. Remove the leading and trailing "{ " and " }", respectively
+  */
+  return print(lexicographicallySortDocumentNode(documentNode)).replaceAll(/\s+/g, ' ').slice(2, -2);
+}
+
+export function getInitialFieldCoordsPath(isProvides: boolean, directiveCoords: string): Array<string> {
+  if (isProvides) {
+    return [directiveCoords];
+  }
+  return [];
+}
+
+export function validateKeyFieldSets(
+  nf: NormalizationFactory,
+  entityParentData: CompositeOutputData,
+  keyFieldSetDataByFieldSet: Map<string, KeyFieldSetData>,
+): RequiredFieldConfiguration[] | undefined {
+  const entityInterfaceData = nf.entityInterfaceDataByTypeName.get(entityParentData.name);
+  const entityTypeName = entityParentData.name;
+  const configurations: Array<RequiredFieldConfiguration> = [];
+  // If the key is on an entity interface/interface object, an entity data node should not be propagated
+  const entityDataNode = entityInterfaceData ? undefined : nf.internalGraph.addEntityDataNode(entityParentData.name);
+  const graphNode = nf.internalGraph.addOrUpdateNode(entityParentData.name);
+  let keyNumber = 0;
+  for (const [fieldSet, { documentNode, isUnresolvable, rawFieldSet }] of keyFieldSetDataByFieldSet) {
+    if (entityInterfaceData) {
+      entityInterfaceData.resolvable ||= !isUnresolvable;
+    }
+    keyNumber += 1;
+    const errorMessages: Array<string> = [];
+    const parentDatas: CompositeOutputData[] = [entityParentData];
+    const definedFields: Array<Set<string>> = [];
+    const currentPath: Array<string> = [];
+    const keyFieldSetPaths = new Set<string>();
+    let currentDepth = -1;
+    let shouldDefineSelectionSet = true;
+    let lastFieldName = '';
+    let isUnconditionallyExternalKey = false;
+    visit(documentNode, {
+      Argument: {
+        enter(node) {
+          // Fields that define arguments are never allowed in a key FieldSet
+          // However, at this stage, it actually means the argument is undefined on the field
+          errorMessages.push(
+            unexpectedArgumentErrorMessage(
+              rawFieldSet,
+              `${parentDatas[currentDepth].name}.${lastFieldName}`,
+              node.name.value,
+            ),
+          );
+          return BREAK;
+        },
+      },
+      Field: {
+        enter(node) {
+          const parentData = parentDatas[currentDepth];
+          const parentTypeName = parentData.name;
+          // If a composite type was just visited, a selection set should have been entered
+          if (shouldDefineSelectionSet) {
+            const lastFieldCoords = `${parentTypeName}.${lastFieldName}`;
+            const lastFieldData = parentData.fieldDataByName.get(lastFieldName);
+            if (!lastFieldData) {
+              errorMessages.push(undefinedFieldInFieldSetErrorMessage(rawFieldSet, lastFieldCoords, lastFieldName));
+              return BREAK;
+            }
+            const lastFieldNamedTypeName = getTypeNodeNamedTypeName(lastFieldData.node.type);
+            // If the child is not found, it's a base scalar. Undefined types would have already been handled.
+            const namedTypeData = nf.parentDefinitionDataByTypeName.get(lastFieldNamedTypeName);
+            const namedTypeKind = namedTypeData ? namedTypeData.kind : Kind.SCALAR_TYPE_DEFINITION;
+            errorMessages.push(
+              invalidSelectionSetErrorMessage(
+                rawFieldSet,
+                [lastFieldCoords],
+                lastFieldNamedTypeName,
+                kindToNodeType(namedTypeKind),
+              ),
+            );
+            return BREAK;
+          }
+          const fieldName = node.name.value;
+          const fieldCoords = `${parentTypeName}.${fieldName}`;
+          lastFieldName = fieldName;
+          if (fieldName === TYPENAME) {
+            return;
+          }
+          const fieldData = parentData.fieldDataByName.get(fieldName);
+          // undefined if the field does not exist on the parent
+          if (!fieldData) {
+            errorMessages.push(undefinedFieldInFieldSetErrorMessage(rawFieldSet, parentTypeName, fieldName));
+            return BREAK;
+          }
+          // TODO navigate already provided keys
+          if (fieldData.argumentDataByName.size) {
+            errorMessages.push(argumentsInKeyFieldSetErrorMessage(rawFieldSet, fieldCoords));
+            return BREAK;
+          }
+          if (definedFields[currentDepth].has(fieldName)) {
+            errorMessages.push(duplicateFieldInFieldSetErrorMessage(rawFieldSet, fieldCoords));
+            return BREAK;
+          }
+          const externalFieldData = fieldData.externalFieldDataBySubgraphName.get(nf.subgraphName);
+          if (
+            !nf.isSubgraphEventDrivenGraph &&
+            externalFieldData?.isDefinedExternal &&
+            !externalFieldData.isUnconditionallyProvided
+          ) {
+            const conditionalData = nf.conditionalFieldDataByCoords.get(fieldCoords);
+            if (!conditionalData && !nf.options.ignoreExternalKeys) {
+              isUnconditionallyExternalKey = true;
+              const edge = graphNode.headToTailEdges.get(fieldName);
+              if (edge) {
+                edge.isExternal = true;
+              }
+            }
+          }
+          // Add the field set for which the field coordinates contribute a key field
+          getValueOrDefault(
+            getValueOrDefault(
+              nf.keyFieldSetsByEntityTypeNameByFieldCoords,
+              fieldCoords,
+              () => new Map<string, Set<string>>(),
+            ),
+            entityTypeName,
+            () => new Set<string>(),
+          ).add(fieldSet);
+          currentPath.push(fieldName);
+          // Fields that form part of an entity key are intrinsically shareable
+          fieldData.isShareableBySubgraphName.set(nf.subgraphName, true);
+          definedFields[currentDepth].add(fieldName);
+          getValueOrDefault(nf.keyFieldNamesByParentTypeName, parentTypeName, () => new Set<string>()).add(fieldName);
+          const namedTypeName = getTypeNodeNamedTypeName(fieldData.node.type);
+          // The base scalars are not in the parents map
+          if (BASE_SCALARS.has(namedTypeName)) {
+            keyFieldSetPaths.add(currentPath.join(LITERAL_PERIOD));
+            currentPath.pop();
+            return;
+          }
+          // The child could itself be a parent
+          const namedTypeData = nf.parentDefinitionDataByTypeName.get(namedTypeName);
+          if (!namedTypeData) {
+            // Should not be possible to receive this error
+            errorMessages.push(unknownTypeInFieldSetErrorMessage(rawFieldSet, fieldCoords, namedTypeName));
+            return BREAK;
+          }
+          if (namedTypeData.kind === Kind.OBJECT_TYPE_DEFINITION) {
+            shouldDefineSelectionSet = true;
+            parentDatas.push(namedTypeData);
+            return;
+          }
+          // interfaces and unions are invalid in a key directive
+          if (isKindAbstract(namedTypeData.kind)) {
+            errorMessages.push(
+              abstractTypeInKeyFieldSetErrorMessage(
+                rawFieldSet,
+                fieldCoords,
+                namedTypeName,
+                kindToNodeType(namedTypeData.kind),
+              ),
+            );
+            return BREAK;
+          }
+          keyFieldSetPaths.add(currentPath.join(LITERAL_PERIOD));
+          currentPath.pop();
+        },
+      },
+      InlineFragment: {
+        enter() {
+          errorMessages.push(inlineFragmentInFieldSetErrorMessage);
+          return BREAK;
+        },
+      },
+      SelectionSet: {
+        enter() {
+          if (!shouldDefineSelectionSet) {
+            const parentData = parentDatas[currentDepth];
+            const parentTypeName = parentData.name;
+            const fieldCoordinates = `${parentTypeName}.${lastFieldName}`;
+            if (lastFieldName === TYPENAME) {
+              errorMessages.push(
+                invalidSelectionSetDefinitionErrorMessage(
+                  rawFieldSet,
+                  [fieldCoordinates],
+                  STRING_SCALAR,
+                  kindToNodeType(Kind.SCALAR_TYPE_DEFINITION),
+                ),
+              );
+              return BREAK;
+            }
+            // If the last field is not an object-like
+            const fieldData = parentData.fieldDataByName.get(lastFieldName);
+            if (!fieldData) {
+              errorMessages.push(undefinedFieldInFieldSetErrorMessage(rawFieldSet, fieldCoordinates, lastFieldName));
+              return BREAK;
+            }
+            const fieldNamedTypeName = getTypeNodeNamedTypeName(fieldData.node.type);
+            // If the child is not found, it's a base scalar. Undefined types would have already been handled.
+            const namedTypeData = nf.parentDefinitionDataByTypeName.get(fieldNamedTypeName);
+            const namedTypeKind = namedTypeData ? namedTypeData.kind : Kind.SCALAR_TYPE_DEFINITION;
+            errorMessages.push(
+              invalidSelectionSetDefinitionErrorMessage(
+                rawFieldSet,
+                [fieldCoordinates],
+                fieldNamedTypeName,
+                kindToNodeType(namedTypeKind),
+              ),
+            );
+            return BREAK;
+          }
+          currentDepth += 1;
+          shouldDefineSelectionSet = false;
+          if (currentDepth < 0 || currentDepth >= parentDatas.length) {
+            errorMessages.push(unparsableFieldSetSelectionErrorMessage(rawFieldSet, lastFieldName));
+            return BREAK;
+          }
+          definedFields.push(new Set<string>());
+        },
+        leave() {
+          if (shouldDefineSelectionSet) {
+            const grandparentData = parentDatas[currentDepth];
+            const grandparentTypeName = grandparentData.name;
+            const parentData = parentDatas[currentDepth + 1];
+            const fieldCoordinates = `${grandparentTypeName}.${lastFieldName}`;
+            errorMessages.push(
+              invalidSelectionSetErrorMessage(
+                rawFieldSet,
+                [fieldCoordinates],
+                parentData.name,
+                kindToNodeType(parentData.kind),
+              ),
+            );
+            shouldDefineSelectionSet = false;
+          }
+          // Empty selection sets would be a parse error, so it is unnecessary to handle them
+          currentDepth -= 1;
+          parentDatas.pop();
+          definedFields.pop();
+        },
+      },
+    });
+    if (errorMessages.length > 0) {
+      nf.errors.push(invalidDirectiveError(KEY, entityTypeName, numberToOrdinal(keyNumber), errorMessages));
+      continue;
+    }
+
+    configurations.push({
+      fieldName: '',
+      selectionSet: fieldSet,
+      ...(isUnresolvable ? { disableEntityResolver: true } : {}),
+    });
+    graphNode.satisfiedFieldSets.add(fieldSet);
+    if (isUnconditionallyExternalKey) {
+      graphNode.externalFieldSets.add(fieldSet);
+    }
+    if (isUnresolvable) {
+      continue;
+    }
+    entityDataNode?.addTargetSubgraphByFieldSet(fieldSet, nf.subgraphName);
+  }
+  if (configurations.length > 0) {
+    return configurations;
+  }
+}
+
+export function getConditionalFieldSetDirectiveName(isProvides: boolean): string {
+  if (isProvides) {
+    return PROVIDES;
+  }
+  return REQUIRES;
+}
+
+export function isNodeQuery(typeName: string, operationTypeNode?: OperationTypeNode): boolean {
+  return typeName === QUERY || operationTypeNode === OperationTypeNode.QUERY;
+}
+
+export function validateArgumentTemplateReferences(
+  value: string,
+  argumentDataByArgumentName: Map<string, InputValueData>,
+  errorMessages: string[],
+) {
+  const matches = value.matchAll(EDFS_ARGS_REGEXP);
+  const undefinedArgs = new Set<string>();
+  const invalidArgs = new Set<string>();
+  for (const match of matches) {
+    if (match.length < 2) {
+      invalidArgs.add(match[0]);
+      continue;
+    }
+    if (!argumentDataByArgumentName.has(match[1])) {
+      undefinedArgs.add(match[1]);
+    }
+  }
+  for (const undefinedArg of undefinedArgs) {
+    errorMessages.push(undefinedEventSubjectsArgumentErrorMessage(undefinedArg));
+  }
+  for (const invalidArg of invalidArgs) {
+    errorMessages.push(invalidEventSubjectsArgumentErrorMessage(invalidArg));
+  }
+}
+
+export function initializeDirectiveDefinitionDatas(): Map<string, DirectiveDefinitionData> {
+  return new Map<string, DirectiveDefinitionData>([
+    [AUTHENTICATED, AUTHENTICATED_DEFINITION_DATA],
+    [CACHE_TAG, CACHE_TAG_DEFINITION_DATA],
+    [COMPOSE_DIRECTIVE, COMPOSE_DIRECTIVE_DEFINITION_DATA],
+    [CONFIGURE_DESCRIPTION, CONFIGURE_DESCRIPTION_DEFINITION_DATA],
+    [CONFIGURE_CHILD_DESCRIPTIONS, CONFIGURE_CHILD_DESCRIPTIONS_DEFINITION_DATA],
+    [CONNECT_FIELD_RESOLVER, CONNECT_FIELD_RESOLVER_DEFINITION_DATA],
+    [CONTEXT, CONTEXT_DEFINITION_DATA],
+    [COST, COST_DEFINITION_DATA],
+    [OPENFED_ENTITY_CACHE, ENTITY_CACHE_DEFINITION_DATA],
+    [OPENFED_CACHE_INVALIDATE, CACHE_INVALIDATE_DEFINITION_DATA],
+    [OPENFED_CACHE_POPULATE, CACHE_POPULATE_DEFINITION_DATA],
+    [DEPRECATED, DEPRECATED_DEFINITION_DATA],
+    [EDFS_KAFKA_PUBLISH, KAFKA_PUBLISH_DEFINITION_DATA],
+    [EDFS_KAFKA_SUBSCRIBE, KAFKA_SUBSCRIBE_DEFINITION_DATA],
+    [EDFS_NATS_PUBLISH, NATS_PUBLISH_DEFINITION_DATA],
+    [EDFS_NATS_REQUEST, NATS_REQUEST_DEFINITION_DATA],
+    [EDFS_NATS_SUBSCRIBE, NATS_SUBSCRIBE_DEFINITION_DATA],
+    [EDFS_REDIS_PUBLISH, REDIS_PUBLISH_DEFINITION_DATA],
+    [EDFS_REDIS_SUBSCRIBE, REDIS_SUBSCRIBE_DEFINITION_DATA],
+    [EXTENDS, EXTENDS_DEFINITION_DATA],
+    [EXTERNAL, EXTERNAL_DEFINITION_DATA],
+    [FROM_CONTEXT, FROM_CONTEXT_DEFINITION_DATA],
+    [INACCESSIBLE, INACCESSIBLE_DEFINITION_DATA],
+    [INTERFACE_OBJECT, INTERFACE_OBJECT_DEFINITION_DATA],
+    [KEY, KEY_DEFINITION_DATA],
+    [LINK, LINK_DEFINITION_DATA],
+    [LIST_SIZE, LIST_SIZE_DEFINITION_DATA],
+    [ONE_OF, ONE_OF_DEFINITION_DATA],
+    [OVERRIDE, OVERRIDE_DEFINITION_DATA],
+    [POLICY, POLICY_DEFINITION_DATA],
+    [PROVIDES, PROVIDES_DEFINITION_DATA],
+    [REQUIRE_FETCH_REASONS, REQUIRE_FETCH_REASONS_DEFINITION_DATA],
+    [REQUIRES, REQUIRES_DEFINITION_DATA],
+    [REQUIRES_SCOPES, REQUIRES_SCOPES_DEFINITION_DATA],
+    [SEMANTIC_NON_NULL, SEMANTIC_NON_NULL_DEFINITION_DATA],
+    [SHAREABLE, SHAREABLE_DEFINITION_DATA],
+    [SPECIFIED_BY, SPECIFIED_BY_DEFINITION_DATA],
+    [SUBSCRIPTION_FILTER, SUBSCRIPTION_FILTER_DEFINITION_DATA],
+    [TAG, TAG_DEFINITION_DATA],
+  ]);
+}
+
+export const FEDERATED_DIRECTIVE_DATAS: ReadonlyArray<DirectiveDefinitionData> = [
+  AUTHENTICATED_DEFINITION_DATA,
+  DEPRECATED_DEFINITION_DATA,
+  INACCESSIBLE_DEFINITION_DATA,
+  ONE_OF_DEFINITION_DATA,
+  REQUIRES_SCOPES_DEFINITION_DATA,
+  SEMANTIC_NON_NULL_DEFINITION_DATA,
+  TAG_DEFINITION_DATA,
+];
+
+export function upsertFederatedDirectiveData({
+  executableDirectiveDatasByName,
+  existingDataByName,
+  incomingDataByName,
+}: UpsertFederatedDirectiveDataParams): void {
+  for (const [directiveName, directiveData] of incomingDataByName) {
+    const existingData = existingDataByName.get(directiveName);
+    const copiedData = copyDirectiveDefinitionData(directiveData);
+    if (!existingData) {
+      if (!directiveData.isComposed) {
+        getValueOrDefault(executableDirectiveDatasByName, directiveName, () => []).push(copiedData);
+        continue;
+      }
+      existingDataByName.set(directiveName, copiedData);
+      executableDirectiveDatasByName.delete(directiveName);
+      continue;
+    }
+
+    // If a directive is not composed in a subgraph, it is effectively ignored.
+    if (!directiveData.isComposed) {
+      continue;
+    }
+
+    /* If at least one subgraph includes the directive name in a `@composeDirective` directive, the definition of
+     * the custom directive should be propagated in the federated graph.
+     * The directive itself must be referenced in at least once in one of those subgraphs to propagate also the usages
+     * of the custom directive to the federated graph (in addition to the definition).
+     *
+     * Moreover, only the highest version of the directive is propagated; this means a directive definition description
+     *  could be set in one one subgraph and removed in another subgraph with a imported higher version.
+     */
+    if (existingData.minorVersion < directiveData.minorVersion) {
+      const copiedData = copyDirectiveDefinitionData(directiveData);
+      copiedData.isReferenced ||= existingData.isReferenced;
+      existingDataByName.set(directiveName, copiedData);
+    } else {
+      existingData.isReferenced ||= directiveData.isReferenced;
+    }
+  }
+}
+
+// This function aims to mirror Apollo functionality
+function extractLinkUrlSegments(argNode: ConstArgumentNode): ExtractImportUrlSegmentsResult {
+  if (argNode.value.kind !== Kind.STRING) {
+    return {
+      error: invalidLinkDirectiveUrlError(''),
+      success: false,
+    };
+  }
+
+  const urlString = argNode.value.value;
+  const url = URL.parse(urlString);
+
+  if (!url) {
+    return {
+      error: invalidLinkDirectiveUrlError(urlString),
+      success: false,
+    };
+  }
+
+  const segments = url.pathname.split('/');
+  const versionString = segments.at(-1);
+  if (segments.length < 3 && !versionString) {
+    return {
+      error: noPathLinkDirectiveUrlError(urlString),
+      success: false,
+    };
+  }
+
+  if (!versionString) {
+    return {
+      error: noVersionLinkDirectiveUrlError(urlString),
+      success: false,
+    };
+  }
+
+  if (!IMPORT_VERSION_REGEX.test(versionString)) {
+    return {
+      error: invalidVersionLinkDirectiveUrlError({ url: urlString, versionString }),
+      success: false,
+    };
+  }
+
+  if (segments.length < 3) {
+    return {
+      error: noFeatureNameLinkDirectiveUrlError(urlString),
+      success: false,
+    };
+  }
+
+  try {
+    const versionSegments = versionString.substring(1).split(LITERAL_PERIOD);
+    if (versionSegments.length !== 2) {
+      return {
+        error: invalidVersionLinkDirectiveUrlError({ url: urlString, versionString }),
+        success: false,
+      };
+    }
+    const majorVersion = parseInt(versionSegments[0]);
+    const minorVersion = parseInt(versionSegments[1]);
+
+    const featureName = segments.at(-2);
+    if (!featureName) {
+      return {
+        error: noFeatureNameLinkDirectiveUrlError(urlString),
+        success: false,
+      };
+    }
+
+    return {
+      coreUrl: urlString.substring(0, urlString.length - versionString.length),
+      success: true,
+      majorVersion,
+      minorVersion,
+    };
+  } catch {
+    // Should never happen
+    return {
+      error: invalidVersionLinkDirectiveUrlError({ url: urlString, versionString: versionString }),
+      success: false,
+    };
+  }
+}
+
+function extractLinkImportObject(value: ConstObjectValueNode): ExtractLinkImportObjectResult {
+  const data: LinkImportData = {
+    name: '',
+    coreUrl: '',
+    majorVersion: -1,
+    minorVersion: -1,
+  };
+  const errors: Array<Error> = [];
+  const valueString = print(value);
+  for (const field of value.fields) {
+    const fieldName = field.name.value;
+    switch (fieldName) {
+      case AS: {
+        if (field.value.kind !== Kind.STRING) {
+          errors.push(invalidFieldLinkDirectiveImportObjectError({ fieldName, value: valueString }));
+          break;
+        }
+        data.rename = field.value.value;
+        break;
+      }
+      case NAME: {
+        if (field.value.kind !== Kind.STRING) {
+          errors.push(invalidFieldLinkDirectiveImportObjectError({ fieldName, value: valueString }));
+          break;
+        }
+        data.name = field.value.value;
+        break;
+      }
+      default: {
+        errors.push(unknownFieldLinkDirectiveImportObjectError({ fieldName, value: valueString }));
+        break;
+      }
+    }
+  }
+
+  if (!data.name) {
+    errors.push(noNameFieldLinkDirectiveImportObjectError(valueString));
+  } else if (data.rename) {
+    const nameIsDirective = data.name.startsWith(LITERAL_AT);
+    const renamedIsDirective = data.rename.startsWith(LITERAL_AT);
+    if (nameIsDirective !== renamedIsDirective) {
+      errors.push(
+        invalidLinkDirectiveImportObjectError({
+          name: data.name,
+          rename: data.rename,
+        }),
+      );
+    }
+  }
+
+  if (errors.length > 0) {
+    return {
+      errors,
+      success: false,
+    };
+  }
+
+  return {
+    import: data,
+    success: true,
+  };
+}
+
+function extractLinkImports(values: ReadonlyArray<ConstValueNode>): ExtractLinkImportsResult {
+  const imports: Array<LinkImportData> = [];
+  const errors: Array<Error> = [];
+  for (let i = 0; i < values.length; i++) {
+    const value = values[i];
+    switch (value.kind) {
+      case Kind.STRING: {
+        imports.push({
+          name: value.value,
+          coreUrl: '',
+          majorVersion: -1,
+          minorVersion: -1,
+        });
+        break;
+      }
+      case Kind.OBJECT: {
+        const objectResult = extractLinkImportObject(value);
+        if (!objectResult.success) {
+          errors.push(...objectResult.errors);
+          break;
+        }
+        imports.push(objectResult.import);
+        break;
+      }
+      default: {
+        errors.push(invalidSubValueLinkDirectiveImportError(i));
+        break;
+      }
+    }
+  }
+
+  if (errors.length > 0) {
+    return {
+      errors,
+      success: false,
+    };
+  }
+
+  return {
+    imports,
+    success: true,
+  };
+}
+
+export function extractLinkArgs(
+  directivesByName: Map<DirectiveName, Array<ConstDirectiveNode>>,
+): ExtractLinkArgsResult {
+  const errors: Array<Error> = [];
+  const importDataByDirectiveName = new Map<DirectiveName, LinkImportData>();
+  const linkDirectives = directivesByName.get(LINK);
+  if (!linkDirectives) {
+    return {
+      success: true,
+      importDataByDirectiveName,
+    };
+  }
+
+  for (const directive of linkDirectives) {
+    if (!directive.arguments) {
+      continue;
+    }
+
+    let imports: Array<LinkImportData> = [];
+    let majorVersion = -1;
+    let minorVersion = -1;
+    let coreUrl = '';
+    for (const arg of directive.arguments) {
+      const argName = arg.name.value;
+      switch (argName) {
+        case URL_LOWER: {
+          const urlResult = extractLinkUrlSegments(arg);
+          if (!urlResult.success) {
+            return {
+              errors: [urlResult.error],
+              success: false,
+            };
+          }
+          coreUrl = urlResult.coreUrl;
+          majorVersion = urlResult.majorVersion;
+          minorVersion = urlResult.minorVersion;
+          break;
+        }
+        case IMPORT: {
+          switch (arg.value.kind) {
+            case Kind.STRING: {
+              imports.push({
+                name: arg.value.value,
+                coreUrl: '',
+                majorVersion: -1,
+                minorVersion: -1,
+              });
+              break;
+            }
+            case Kind.LIST: {
+              const importsResult = extractLinkImports(arg.value.values);
+              if (!importsResult.success) {
+                return importsResult;
+              }
+              imports = importsResult.imports;
+              break;
+            }
+            default: {
+              return {
+                errors: [nonIterableLinkDirectiveImportError(arg.value.kind)],
+                success: false,
+              };
+            }
+          }
+          break;
+        }
+      }
+    }
+    // Should be caught in earlier validation
+    if (!coreUrl) {
+      return {
+        errors: [noLinkDirectiveUrlError],
+        success: false,
+      };
+    }
+
+    for (const value of imports) {
+      value.coreUrl = coreUrl;
+      value.majorVersion = majorVersion;
+      value.minorVersion = minorVersion;
+      importDataByDirectiveName.set(value.rename ?? value.name, value);
+    }
+  }
+
+  if (errors.length > 0) {
+    return {
+      errors,
+      success: false,
+    };
+  }
+
+  return {
+    importDataByDirectiveName,
+    success: true,
+  };
+}

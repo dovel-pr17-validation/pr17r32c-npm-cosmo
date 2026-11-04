@@ -1,0 +1,14 @@
+{
+  "extends": "../tsconfig.base.json",
+  "compilerOptions": {
+    "target": "ES2019",
+    "module": "esnext",
+    "moduleResolution": "Bundler",
+    "declarationDir": "./dist",
+    "outDir": "./dist",
+    "typeRoots": ["./node_modules/@types", "./src/typedefinitions"],
+    "rootDir": "."
+  },
+  "include": ["src/**/*", "test/**/*", "e2e/**/*"],
+  "exclude": ["node_modules", "dist", "test/fixtures/**", "test/testdata/**", "coverage/**/*"]
+}

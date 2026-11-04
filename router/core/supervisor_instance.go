@@ -1,0 +1,427 @@
+package core
+
+import (
+	"context"
+	"fmt"
+	"net/http"
+	"os"
+	"strings"
+
+	"github.com/KimMachineGun/automemlimit/memlimit"
+	"github.com/dustin/go-humanize"
+	"github.com/wundergraph/cosmo/router/internal/controlplane"
+	rjwt "github.com/wundergraph/cosmo/router/internal/jwt"
+	"github.com/wundergraph/cosmo/router/internal/prompttoquery"
+	"github.com/wundergraph/cosmo/router/pkg/authentication"
+	"github.com/wundergraph/cosmo/router/pkg/config"
+	"github.com/wundergraph/cosmo/router/pkg/controlplane/selfregister"
+	"github.com/wundergraph/cosmo/router/pkg/cors"
+	"github.com/wundergraph/cosmo/router/pkg/logging"
+	"go.uber.org/automaxprocs/maxprocs"
+	"go.uber.org/zap"
+	"go.uber.org/zap/zapcore"
+)
+
+// newRouter creates a new router instance.
+//
+// additionalOptions can be used to override default options or options provided in the config.
+func newRouter(ctx context.Context, params RouterResources, additionalOptions ...Option) (*Router, error) {
+	cfg := params.Config
+	logger := params.Logger
+
+	// Automatically set GOMAXPROCS to avoid CPU throttling on containerized environments
+	_, err := maxprocs.Set(maxprocs.Logger(params.Logger.Sugar().Debugf))
+	if err != nil {
+		return nil, fmt.Errorf("could not set max GOMAXPROCS: %w", err)
+	}
+
+	if os.Getenv("GOMEMLIMIT") != "" {
+		params.Logger.Info("GOMEMLIMIT set by user", zap.String("limit", os.Getenv("GOMEMLIMIT")))
+	} else {
+		// Automatically set GOMEMLIMIT to 90% of the available memory.
+		// This is an effort to prevent the router from being killed by OOM (Out Of Memory)
+		// when the system is under memory pressure e.g. when GC is not able to free memory fast enough.
+		// More details: https://tip.golang.org/doc/gc-guide#Memory_limit
+		mLimit, err := memlimit.SetGoMemLimitWithOpts(
+			memlimit.WithRatio(0.9),
+			memlimit.WithProvider(memlimit.FromCgroup),
+		)
+		if err == nil {
+			params.Logger.Info("GOMEMLIMIT set automatically", zap.String("limit", humanize.Bytes(uint64(mLimit))))
+		} else if !params.Config.DevelopmentMode {
+			params.Logger.Warn("GOMEMLIMIT was not set. Please set it manually to around 90% of the available memory to prevent OOM kills", zap.Error(err))
+		}
+	}
+
+	options := optionsFromResources(logger, cfg, params.ReloadPersistentState)
+	options = append(options, additionalOptions...)
+
+	authenticators, err := setupAuthenticators(ctx, logger, cfg)
+	if err != nil {
+		return nil, fmt.Errorf("could not setup authenticators: %w", err)
+	}
+
+	if len(authenticators) > 0 {
+		accessController, err := NewAccessController(AccessControllerOptions{
+			Authenticators:           authenticators,
+			AuthenticationRequired:   cfg.Authorization.RequireAuthentication,
+			SkipIntrospectionQueries: cfg.Authentication.IgnoreIntrospection,
+			IntrospectionSkipSecret:  cfg.IntrospectionConfig.Secret,
+			ScopeClaim:               cfg.Authentication.JWT.ScopeClaim,
+		})
+		if err != nil {
+			return nil, fmt.Errorf("could not create access controller: %w", err)
+		}
+
+		options = append(options, WithAccessController(accessController))
+	}
+
+	if cfg.Authentication.IgnoreIntrospection && cfg.IntrospectionConfig.Secret == "" {
+		params.Logger.Warn("introspection operations are not authenticated. " +
+			"Consider setting introspection.secret configuration parameter or set authentication.ignore_introspection to false. Do not use this in production.")
+	}
+
+	if !cfg.Authentication.IgnoreIntrospection && cfg.IntrospectionConfig.Secret != "" {
+		params.Logger.Warn("introspection.secret configuration parameter is ignored because authentication.ignore_introspection is false.")
+	}
+
+	// HTTP_PROXY, HTTPS_PROXY and NO_PROXY
+	if hasProxyConfigured() {
+		options = append(options, WithProxy(http.ProxyFromEnvironment))
+	}
+
+	if cfg.AccessLogs.Enabled {
+		c := &AccessLogsConfig{
+			Filter:                cfg.AccessLogs.Router.Filter,
+			SubgraphFilter:        cfg.AccessLogs.Subgraphs.Filter,
+			Attributes:            cfg.AccessLogs.Router.Fields,
+			IgnoreQueryParamsList: cfg.AccessLogs.Router.IgnoreQueryParamsList,
+			SubgraphEnabled:       cfg.AccessLogs.Subgraphs.Enabled,
+			SubgraphAttributes:    cfg.AccessLogs.Subgraphs.Fields,
+		}
+
+		var level zapcore.Level
+		if cfg.AccessLogs.Level == "" {
+			level = zapcore.InfoLevel
+		} else {
+			if err := level.Set(strings.ToUpper(cfg.AccessLogs.Level)); err != nil {
+				return nil, fmt.Errorf("could not parse log level: %w for access logs", err)
+			}
+		}
+
+		if cfg.AccessLogs.Output.File.Enabled {
+			f, err := logging.NewLogFile(cfg.AccessLogs.Output.File.Path, os.FileMode(cfg.AccessLogs.Output.File.Mode))
+			if err != nil {
+				return nil, fmt.Errorf("could not create log file: %w", err)
+			}
+			if cfg.AccessLogs.Buffer.Enabled {
+				bl, err := logging.NewJSONZapBufferedLogger(logging.BufferedLoggerOptions{
+					WS:            f,
+					BufferSize:    int(cfg.AccessLogs.Buffer.Size.Uint64()),
+					FlushInterval: cfg.AccessLogs.Buffer.FlushInterval,
+					Development:   cfg.DevelopmentMode,
+					Level:         level,
+					StackTrace:    cfg.AccessLogs.AddStacktrace,
+					Pretty:        !cfg.JSONLog,
+				})
+
+				if err != nil {
+					return nil, fmt.Errorf("could not create buffered logger: %w", err)
+				}
+				c.Logger = bl.Logger
+			} else {
+				c.Logger = logging.NewZapAccessLogger(f, level, cfg.DevelopmentMode, !cfg.JSONLog, cfg.AccessLogs.AddStacktrace)
+			}
+		} else if cfg.AccessLogs.Output.Stdout.Enabled {
+			if cfg.AccessLogs.Buffer.Enabled {
+				bl, err := logging.NewJSONZapBufferedLogger(logging.BufferedLoggerOptions{
+					WS:            os.Stdout,
+					BufferSize:    int(cfg.AccessLogs.Buffer.Size.Uint64()),
+					FlushInterval: cfg.AccessLogs.Buffer.FlushInterval,
+					Development:   cfg.DevelopmentMode,
+					Level:         level,
+					StackTrace:    cfg.AccessLogs.AddStacktrace,
+					Pretty:        !cfg.JSONLog,
+				})
+				if err != nil {
+					return nil, fmt.Errorf("could not create buffered logger: %w", err)
+				}
+				c.Logger = bl.Logger
+			} else {
+				c.Logger = logging.NewZapAccessLogger(os.Stdout, level, cfg.DevelopmentMode, !cfg.JSONLog, cfg.AccessLogs.AddStacktrace)
+			}
+		}
+
+		options = append(options, WithAccessLogs(c))
+	}
+
+	if cfg.RouterRegistration && cfg.Graph.Token != "" {
+		selfRegister, err := selfregister.New(cfg.ControlplaneURL, cfg.Graph.Token,
+			selfregister.WithLogger(logger),
+		)
+		if err != nil {
+			return nil, fmt.Errorf("could not create self register: %w", err)
+		}
+		options = append(options, WithSelfRegistration(selfRegister))
+	}
+
+	if cfg.MCP.Enabled && cfg.Graph.Token != "" {
+		claims, err := rjwt.ExtractFederatedGraphTokenClaims(cfg.Graph.Token)
+		if err != nil {
+			return nil, fmt.Errorf("could not inspect graph token features: %w", err)
+		}
+
+		if claims.HasFeature(rjwt.FeaturePromptToQuery) {
+			controlplaneTransport, err := controlplane.NewTransport(cfg.Graph.Token, logger)
+			if err != nil {
+				return nil, fmt.Errorf("could not create controlplane transport: %w", err)
+			}
+
+			promptToQueryClient, err := prompttoquery.New(cfg.ControlplaneURL, controlplaneTransport)
+			if err != nil {
+				return nil, fmt.Errorf("could not create prompt-to-query client: %w", err)
+			}
+			options = append(options, WithPromptToQueryClient(promptToQueryClient))
+		}
+	}
+
+	if opt := optionFromExecutionConfig(&cfg.ExecutionConfig, cfg.RouterConfigPath); opt != nil {
+		options = append(options, opt)
+	} else {
+		options = append(options, WithConfigPollerConfig(&RouterConfigPollerConfig{
+			GraphSignKey:      cfg.Graph.SignKey,
+			PollInterval:      cfg.PollInterval,
+			PollJitter:        cfg.PollJitter,
+			ExecutionConfig:   cfg.ExecutionConfig,
+			SplitConfigPoller: cfg.SplitConfigPoller,
+		}))
+	}
+
+	return NewRouter(ctx, options...)
+}
+
+// optionFromExecutionConfig returns an Option that configures the router with the execution config.
+// It checks for both the static execution config and the manifest execution config
+// and returns the appropriate Option.
+func optionFromExecutionConfig(cfg *config.ExecutionConfig, routerConfigPath string) Option {
+	executionConfigPath := cfg.File.Path
+	if executionConfigPath == "" {
+		executionConfigPath = routerConfigPath
+	}
+
+	if executionConfigPath != "" {
+		return WithExecutionConfig(&ExecutionConfig{
+			Watch:         cfg.File.Watch,
+			WatchInterval: cfg.File.WatchInterval,
+			Path:          executionConfigPath,
+		})
+	}
+
+	if cfg.Manifest.Path != "" {
+		return WithManifestConfig(&ManifestConfig{
+			Path:                    cfg.Manifest.Path,
+			SkipMissingFeatureFlags: cfg.Manifest.SkipMissingFeatureFlags,
+			IgnoredFeatureFlags:     cfg.Manifest.IgnoredFeatureFlags,
+			Watch:                   cfg.Manifest.Watch,
+			WatchInterval:           cfg.Manifest.WatchInterval,
+		})
+	}
+
+	return nil
+}
+
+func optionsFromResources(logger *zap.Logger, config *config.Config, reloadPersistentState *ReloadPersistentState) []Option {
+	options := []Option{
+		WithListenerAddr(config.ListenAddr),
+		WithOverrideRoutingURL(config.OverrideRoutingURL),
+		WithOverrides(config.Overrides),
+		WithLogger(logger),
+		WithIntrospection(config.IntrospectionEnabled, config.IntrospectionConfig),
+		WithQueryPlans(config.QueryPlansEnabled),
+		WithPlayground(config.PlaygroundEnabled),
+		WithGraphApiToken(config.Graph.Token),
+		WithPersistedOperationsConfig(config.PersistedOperationsConfig),
+		WithAutomatedPersistedQueriesConfig(config.AutomaticPersistedQueries),
+		WithApolloCompatibilityFlagsConfig(config.ApolloCompatibilityFlags),
+		WithApolloRouterCompatibilityFlags(config.ApolloRouterCompatibilityFlags),
+		WithStorageProviders(config.StorageProviders),
+		WithGraphQLPath(config.GraphQLPath),
+		WithModulesConfig(config.Modules),
+		WithGracePeriod(config.GracePeriod),
+		WithPlaygroundConfig(config.PlaygroundConfig),
+		WithPlaygroundPath(config.PlaygroundPath),
+		WithHealthCheckPath(config.HealthCheckPath),
+		WithLivenessCheckPath(config.LivenessCheckPath),
+		WithGraphQLMetrics(&GraphQLMetricsConfig{
+			Enabled:           config.GraphqlMetrics.Enabled,
+			CollectorEndpoint: config.GraphqlMetrics.CollectorEndpoint,
+		}),
+		WithAnonymization(&IPAnonymizationConfig{
+			Enabled: config.Compliance.AnonymizeIP.Enabled,
+			Method:  IPAnonymizationMethod(config.Compliance.AnonymizeIP.Method),
+		}),
+		WithBatching(&BatchingConfig{
+			Enabled:               config.Batching.Enabled,
+			MaxConcurrentRoutines: config.Batching.MaxConcurrency,
+			MaxEntriesPerBatch:    config.Batching.MaxEntriesPerBatch,
+			OmitExtensions:        config.Batching.OmitExtensions,
+		}),
+		WithClusterName(config.Cluster.Name),
+		WithInstanceID(config.InstanceID),
+		WithReadinessCheckPath(config.ReadinessCheckPath),
+		WithHeaderRules(config.Headers),
+		WithRouterTrafficConfig(&config.TrafficShaping.Router),
+		WithFileUploadConfig(&config.FileUpload),
+		WithSubgraphTransportOptions(NewSubgraphTransportOptions(config.TrafficShaping)),
+		WithSubgraphCircuitBreakerOptions(NewSubgraphCircuitBreakerOptions(config.TrafficShaping)),
+		WithSubgraphRetryOptions(
+			config.TrafficShaping.All.BackoffJitterRetry.Enabled,
+			config.TrafficShaping.All.BackoffJitterRetry.Algorithm,
+			config.TrafficShaping.All.BackoffJitterRetry.MaxAttempts,
+			config.TrafficShaping.All.BackoffJitterRetry.MaxDuration,
+			config.TrafficShaping.All.BackoffJitterRetry.Interval,
+			config.TrafficShaping.All.BackoffJitterRetry.Expression,
+			nil,
+		),
+		WithCors(&cors.Config{
+			Enabled:          config.CORS.Enabled,
+			AllowOrigins:     config.CORS.AllowOrigins,
+			MatchOrigins:     config.CORS.MatchOrigins,
+			AllowMethods:     config.CORS.AllowMethods,
+			AllowCredentials: config.CORS.AllowCredentials,
+			AllowHeaders:     config.CORS.AllowHeaders,
+			ExposeHeaders:    config.CORS.ExposeHeaders,
+			MaxAge:           config.CORS.MaxAge,
+		}),
+		WithTLSConfig(config.TLS),
+		WithDevelopmentMode(config.DevelopmentMode),
+		WithTracing(TraceConfigFromTelemetry(&config.Telemetry)),
+		WithMetrics(MetricConfigFromTelemetry(&config.Telemetry)),
+		WithPyroscope(config.Pyroscope),
+		WithTelemetryAttributes(config.Telemetry.Attributes),
+		WithTracingAttributes(config.Telemetry.Tracing.Attributes),
+		WithEngineExecutionConfig(config.EngineExecutionConfiguration),
+		WithCacheControlPolicy(config.CacheControl),
+		WithSecurityConfig(config.SecurityConfiguration),
+		WithAuthorizationConfig(&config.Authorization),
+		WithWebSocketConfiguration(&config.WebSocket),
+		WithSubgraphErrorPropagation(config.SubgraphErrorPropagation),
+		WithSubgraphExtensionPropagation(config.SubgraphExtensionPropagation),
+		WithLocalhostFallbackInsideDocker(config.LocalhostFallbackInsideDocker),
+		WithCDN(config.CDN),
+		WithEvents(config.Events),
+		WithRateLimitConfig(&config.RateLimit),
+		WithClientHeader(config.ClientHeader),
+		WithCacheWarmupConfig(&config.CacheWarmup),
+		WithResponseCache(&config.ResponseCache),
+		WithMCP(config.MCP),
+		WithConnectRPC(config.ConnectRPC),
+		WithPlugins(config.Plugins),
+		WithDemoMode(config.DemoMode),
+		WithStreamsHandlerConfiguration(config.Events.Handlers),
+		WithReloadPersistentState(reloadPersistentState),
+	}
+
+	return options
+}
+
+func setupAuthenticators(ctx context.Context, logger *zap.Logger, cfg *config.Config) ([]authentication.Authenticator, error) {
+	jwtConf := cfg.Authentication.JWT
+	if len(jwtConf.JWKS) == 0 {
+		// No JWT authenticators configured
+		return nil, nil
+	}
+
+	var authenticators []authentication.Authenticator
+	configs := make([]authentication.JWKSConfig, 0, len(jwtConf.JWKS))
+
+	for _, jwks := range cfg.Authentication.JWT.JWKS {
+		configs = append(configs, authentication.JWKSConfig{
+			URL:               jwks.URL,
+			RefreshInterval:   jwks.RefreshInterval,
+			AllowedAlgorithms: jwks.Algorithms,
+			AllowedUse:        jwks.AllowedUse,
+
+			Secret:    jwks.Secret,
+			Algorithm: jwks.Algorithm,
+			KeyId:     jwks.KeyId,
+
+			Audiences: jwks.Audiences,
+			RefreshUnknownKID: authentication.RefreshUnknownKIDConfig{
+				Enabled:  jwks.RefreshUnknownKID.Enabled,
+				MaxWait:  jwks.RefreshUnknownKID.MaxWait,
+				Interval: jwks.RefreshUnknownKID.Interval,
+				Burst:    jwks.RefreshUnknownKID.Burst,
+			},
+		})
+	}
+
+	tokenDecoder, err := authentication.NewJwksTokenDecoder(ctx, logger, configs)
+	if err != nil {
+		return nil, err
+	}
+
+	// create a map for the `httpHeaderAuthenticator`
+	headerSourceMap := map[string][]string{
+		jwtConf.HeaderName: {jwtConf.HeaderValuePrefix},
+	}
+
+	// The `websocketInitialPayloadAuthenticator` has one key and uses a flat list of prefixes
+	prefixSet := make(map[string]struct{})
+
+	for _, s := range jwtConf.HeaderSources {
+		if s.Type != "header" {
+			continue
+		}
+
+		for _, prefix := range s.ValuePrefixes {
+			headerSourceMap[s.Name] = append(headerSourceMap[s.Name], prefix)
+			prefixSet[prefix] = struct{}{}
+		}
+
+	}
+
+	opts := authentication.HttpHeaderAuthenticatorOptions{
+		Name:                     "jwks",
+		HeaderSourcePrefixes:     headerSourceMap,
+		TokenDecoder:             tokenDecoder,
+		IgnoreInvalidCredentials: jwtConf.OnError == config.JWTOnErrorContinue,
+	}
+
+	authenticator, err := authentication.NewHttpHeaderAuthenticator(opts)
+	if err != nil {
+		logger.Error("Could not create HttpHeader authenticator", zap.Error(err))
+		return nil, err
+	}
+
+	authenticators = append(authenticators, authenticator)
+
+	if cfg.WebSocket.Authentication.FromInitialPayload.Enabled {
+		headerPrefixes := make([]string, 0, len(prefixSet))
+		for prefix := range prefixSet {
+			headerPrefixes = append(headerPrefixes, prefix)
+		}
+
+		opts := authentication.WebsocketInitialPayloadAuthenticatorOptions{
+			TokenDecoder:             tokenDecoder,
+			Key:                      cfg.WebSocket.Authentication.FromInitialPayload.Key,
+			HeaderValuePrefixes:      headerPrefixes,
+			IgnoreInvalidCredentials: jwtConf.OnError == config.JWTOnErrorContinue,
+		}
+		authenticator, err = authentication.NewWebsocketInitialPayloadAuthenticator(opts)
+		if err != nil {
+			logger.Error("Could not create WebsocketInitialPayload authenticator", zap.Error(err))
+			return nil, err
+		}
+		authenticators = append(authenticators, authenticator)
+	}
+
+	return authenticators, nil
+}
+
+func hasProxyConfigured() bool {
+	_, httpProxy := os.LookupEnv("HTTP_PROXY")
+	_, httpsProxy := os.LookupEnv("HTTPS_PROXY")
+	_, noProxy := os.LookupEnv("NO_PROXY")
+	return httpProxy || httpsProxy || noProxy
+}

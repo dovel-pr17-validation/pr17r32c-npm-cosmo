@@ -1,0 +1,504 @@
+package subgraph
+
+import (
+	"slices"
+
+	"github.com/wundergraph/cosmo/demo/pkg/subgraphs/employees/subgraph/model"
+)
+
+var Employees = []*model.Employee{
+	{
+		Details: &model.Details{
+			Forename: "Jens",
+			Location: &model.Country{
+				Key: &model.CountryKey{
+					Name: "Germany",
+				},
+			},
+			PastLocations: []*model.City{
+				&model.City{
+					Type: "city",
+					Name: "Ohio",
+					Country: &model.Country{
+						Key: &model.CountryKey{
+							Name: "America",
+						},
+					},
+				},
+				&model.City{
+					Type: "city",
+					Name: "London",
+					Country: &model.Country{
+						Key: &model.CountryKey{
+							Name: "England",
+						},
+					},
+				},
+			},
+			Surname: "Neuse",
+		},
+		ID:        1,
+		Expertise: "Backend Architecture",
+		Role: model.Engineer{
+			Departments:  []model.Department{model.DepartmentEngineering, model.DepartmentMarketing},
+			EngineerType: model.EngineerTypeBackend,
+			Title:        []string{"Founder", "CEO"},
+		},
+		Notes:     new("Jens notes resolved by employees"),
+		StartDate: "January 2020",
+		UpdatedAt: "2021-09-01T00:00:00Z",
+		PrimaryWorkItem: model.TechnicalWorkItem{
+			Name:      "API Development",
+			Priority:  1,
+			CodeCount: 15000,
+			Handler: &model.WorkItemHandler{
+				Name: "Alice Manager",
+				AssignedItem: model.ManagementWorkItem{
+					Name:     "Team Planning",
+					Priority: 2,
+					TeamSize: "large",
+				},
+			},
+			Specs: &model.TechnicalSpecs{
+				Name:       "Backend Specs",
+				Complexity: 8.5,
+				Metrics:    &model.WorkMetrics{Score: 95.5, Efficiency: 0.9},
+			},
+		},
+		LastWorkReview: model.WorkApproval{
+			Comment:    "Excellent work on the API",
+			ApprovedAt: "2024-01-15",
+		},
+		WorkSetup: &model.WorkSetup{
+			Priority: "high",
+			PrimaryItem: model.TechnicalWorkItem{
+				Name:      "API Development",
+				Priority:  1,
+				CodeCount: 15000,
+			},
+		},
+	},
+	{
+		Details: &model.Details{
+			Forename: "Dustin",
+			Location: &model.Country{
+				Key: &model.CountryKey{
+					Name: "Germany",
+				},
+			},
+			PastLocations: []*model.City{
+				&model.City{
+					Type: "city",
+					Name: "Ohio",
+					Country: &model.Country{
+						Key: &model.CountryKey{
+							Name: "America",
+						},
+					},
+				},
+				&model.City{
+					Type: "city",
+					Name: "London",
+					Country: &model.Country{
+						Key: &model.CountryKey{
+							Name: "England",
+						},
+					},
+				},
+			},
+			Surname: "Deus",
+		},
+		ID:        2,
+		Expertise: "Fullstack Development",
+		Role: model.Engineer{
+			Departments:  []model.Department{model.DepartmentEngineering},
+			EngineerType: model.EngineerTypeFullstack,
+			Title:        []string{"Co-founder", "Tech Lead"},
+		},
+		Notes:     new("Dustin notes resolved by employees"),
+		StartDate: "July 2022",
+		UpdatedAt: "2021-09-01T00:00:00Z",
+		PrimaryWorkItem: model.ManagementWorkItem{
+			Name:     "Sprint Planning",
+			Priority: 2,
+			TeamSize: "medium",
+			Handler: &model.WorkItemHandler{
+				Name: "Bob Lead",
+				AssignedItem: model.TechnicalWorkItem{
+					Name:      "Code Review",
+					Priority:  3,
+					CodeCount: 5000,
+				},
+			},
+			Specs: &model.ManagementSpecs{
+				Name:    "Leadership Specs",
+				Scope:   7.0,
+				Metrics: &model.WorkMetrics{Score: 88.0, Efficiency: 0.9},
+			},
+		},
+		LastWorkReview: model.WorkRejection{
+			Reason:        "Needs more documentation",
+			RejectionCode: "DOC_001",
+		},
+		WorkSetup: &model.WorkSetup{
+			Priority: "medium",
+			PrimaryItem: model.ManagementWorkItem{
+				Name:     "Sprint Planning",
+				Priority: 2,
+				TeamSize: "medium",
+			},
+		},
+	},
+	{
+		Details: &model.Details{
+			Forename: "Stefan",
+			Location: &model.Country{
+				Key: &model.CountryKey{
+					Name: "America",
+				},
+			},
+			PastLocations: []*model.City{
+				&model.City{
+					Type: "city",
+					Name: "Ohio",
+					Country: &model.Country{
+						Key: &model.CountryKey{
+							Name: "America",
+						},
+					},
+				},
+				&model.City{
+					Type: "city",
+					Name: "London",
+					Country: &model.Country{
+						Key: &model.CountryKey{
+							Name: "England",
+						},
+					},
+				},
+			},
+			Surname: "Avram",
+		},
+		ID:        3,
+		Expertise: "Growth Marketing",
+		Role: model.Marketer{
+			Departments: []model.Department{model.DepartmentMarketing},
+			Title:       []string{"Co-founder", "Head of Growth"},
+		},
+		Notes:     new("Stefan notes resolved by employees"),
+		StartDate: "June 2021",
+		UpdatedAt: "2021-09-01T00:00:00Z",
+	},
+	{
+		Details: &model.Details{
+			Forename: "Björn",
+			Location: &model.Country{
+				Key: &model.CountryKey{
+					Name: "Germany",
+				},
+			},
+			PastLocations: []*model.City{
+				&model.City{
+					Type: "city",
+					Name: "Ohio",
+					Country: &model.Country{
+						Key: &model.CountryKey{
+							Name: "America",
+						},
+					},
+				},
+				&model.City{
+					Type: "city",
+					Name: "London",
+					Country: &model.Country{
+						Key: &model.CountryKey{
+							Name: "England",
+						},
+					},
+				},
+			},
+			Surname: "Schwenzer",
+		},
+		ID:        4,
+		Expertise: "Operations Management",
+		Role: model.Operator{
+			Departments: []model.Department{model.DepartmentOperations, model.DepartmentMarketing},
+			OperatorType: []model.OperationType{
+				model.OperationTypeHumanResources, model.OperationTypeFinance,
+			},
+			Title: []string{"Co-founder", "COO"},
+		},
+		Notes:     new("Björn notes resolved by employees"),
+		StartDate: "July 2022",
+		UpdatedAt: "2021-09-01T00:00:00Z",
+	},
+	{
+		ID: 5,
+		Details: &model.Details{
+			Forename: "Sergiy",
+			Location: &model.Country{
+				Key: &model.CountryKey{
+					Name: "Ukraine",
+				},
+			},
+			PastLocations: []*model.City{
+				&model.City{
+					Type: "city",
+					Name: "Ohio",
+					Country: &model.Country{
+						Key: &model.CountryKey{
+							Name: "America",
+						},
+					},
+				},
+				&model.City{
+					Type: "city",
+					Name: "London",
+					Country: &model.Country{
+						Key: &model.CountryKey{
+							Name: "England",
+						},
+					},
+				},
+			},
+			Surname: "Petrunin",
+		},
+		Expertise: "Backend Systems",
+		Role: model.Engineer{
+			Departments:  []model.Department{model.DepartmentEngineering},
+			EngineerType: model.EngineerTypeBackend,
+			Title:        []string{"Senior GO Engineer"},
+		},
+		Notes:     new("Serigy notes resolved by employees"),
+		StartDate: "July 2022",
+		UpdatedAt: "2021-09-01T00:00:00Z",
+	},
+	{
+		Details: &model.Details{
+			Forename: "Suvij",
+			Location: &model.Country{
+				Key: &model.CountryKey{
+					Name: "India",
+				},
+			},
+			PastLocations: []*model.City{
+				&model.City{
+					Type: "city",
+					Name: "Ohio",
+					Country: &model.Country{
+						Key: &model.CountryKey{
+							Name: "America",
+						},
+					},
+				},
+				&model.City{
+					Type: "city",
+					Name: "London",
+					Country: &model.Country{
+						Key: &model.CountryKey{
+							Name: "England",
+						},
+					},
+				},
+			},
+			Surname: "Surya",
+		},
+		ID:        7,
+		Expertise: "Fullstack Development",
+		Role: model.Engineer{
+			Departments:  []model.Department{model.DepartmentEngineering},
+			EngineerType: model.EngineerTypeFullstack,
+			Title:        []string{"Software Engineer"},
+		},
+		Notes:     new("Suvij notes resolved by employees"),
+		StartDate: "September 2022",
+		UpdatedAt: "2021-09-01T00:00:00Z",
+	},
+	{
+		Details: &model.Details{
+			Forename: "Nithin",
+			Location: &model.Country{
+				Key: &model.CountryKey{
+					Name: "India",
+				},
+			},
+			PastLocations: []*model.City{
+				&model.City{
+					Type: "city",
+					Name: "Ohio",
+					Country: &model.Country{
+						Key: &model.CountryKey{
+							Name: "America",
+						},
+					},
+				},
+				&model.City{
+					Type: "city",
+					Name: "London",
+					Country: &model.Country{
+						Key: &model.CountryKey{
+							Name: "England",
+						},
+					},
+				},
+			},
+			Surname: "Kumar",
+		},
+		ID:        8,
+		Expertise: "Fullstack Development",
+		Role: model.Engineer{
+			Departments:  []model.Department{model.DepartmentEngineering},
+			EngineerType: model.EngineerTypeFullstack,
+			Title:        []string{"Software Engineer"},
+		},
+		Notes:     new("Nithin notes resolved by employees"),
+		StartDate: "September 2022",
+		UpdatedAt: "2021-09-01T00:00:00Z",
+	},
+	{
+		Details: &model.Details{
+			Forename: "Eelco",
+			Location: &model.Country{
+				Key: &model.CountryKey{
+					Name: "Netherlands",
+				},
+			},
+			PastLocations: []*model.City{
+				&model.City{
+					Type: "city",
+					Name: "Ohio",
+					Country: &model.Country{
+						Key: &model.CountryKey{
+							Name: "America",
+						},
+					},
+				},
+				&model.City{
+					Type: "city",
+					Name: "London",
+					Country: &model.Country{
+						Key: &model.CountryKey{
+							Name: "England",
+						},
+					},
+				},
+			},
+			Surname: "Wiersma",
+		},
+		ID:        10,
+		Expertise: "Frontend Engineering",
+		Role: model.Engineer{
+			Departments:  []model.Department{model.DepartmentEngineering},
+			EngineerType: model.EngineerTypeFrontend,
+			Title:        []string{"Senior Frontend Engineer"},
+		},
+		Notes:     new("Eelco notes resolved by employees"),
+		StartDate: "November 2022",
+		UpdatedAt: "2021-09-01T00:00:00Z",
+	},
+	{
+		Details: &model.Details{
+			Forename: "Alexandra",
+			Location: &model.Country{
+				Key: &model.CountryKey{
+					Name: "Germany",
+				},
+			},
+			PastLocations: []*model.City{
+				&model.City{
+					Type: "city",
+					Name: "Ohio",
+					Country: &model.Country{
+						Key: &model.CountryKey{
+							Name: "America",
+						},
+					},
+				},
+				&model.City{
+					Type: "city",
+					Name: "London",
+					Country: &model.Country{
+						Key: &model.CountryKey{
+							Name: "England",
+						},
+					},
+				},
+			},
+			Surname: "Neuse",
+		},
+		ID:        11,
+		Expertise: "Finance & Accounting",
+		Role: model.Operator{
+			Departments: []model.Department{model.DepartmentOperations},
+			OperatorType: []model.OperationType{
+				model.OperationTypeFinance,
+			},
+			Title: []string{"Accounting & Finance"},
+		},
+		Notes:     new("Alexandra notes resolved by employees"),
+		StartDate: "November 2022",
+		UpdatedAt: "2021-09-01T00:00:00Z",
+	},
+	{
+		Details: &model.Details{
+			Forename: "David",
+			Location: &model.Country{
+				Key: &model.CountryKey{
+					Name: "England",
+				},
+			},
+			PastLocations: []*model.City{
+				&model.City{
+					Type: "city",
+					Name: "Ohio",
+					Country: &model.Country{
+						Key: &model.CountryKey{
+							Name: "America",
+						},
+					},
+				},
+				&model.City{
+					Type: "city",
+					Name: "London",
+					Country: &model.Country{
+						Key: &model.CountryKey{
+							Name: "England",
+						},
+					},
+				},
+			},
+			Surname: "Stutt",
+		},
+		ID:        12,
+		Expertise: "Fullstack Development",
+		Role: model.Engineer{
+			Departments:  []model.Department{model.DepartmentEngineering},
+			EngineerType: model.EngineerTypeFullstack,
+			Title:        []string{"Software Engineer"},
+		},
+		Notes:     new("David notes resolved by employees"),
+		StartDate: "December 2022",
+		UpdatedAt: "2021-09-01T00:00:00Z",
+	},
+}
+
+func filterEmployees(predicate func(employee *model.Employee) bool) (filtered []*model.Employee) {
+	for _, employee := range Employees {
+		if predicate(employee) {
+			filtered = append(filtered, employee)
+		}
+	}
+	return
+}
+
+var engineers = filterEmployees(func(e *model.Employee) bool {
+	return slices.Contains(e.Role.GetDepartments(), model.DepartmentEngineering)
+})
+
+var marketers = filterEmployees(func(e *model.Employee) bool {
+	return slices.Contains(e.Role.GetDepartments(), model.DepartmentMarketing)
+})
+
+var operators = filterEmployees(func(e *model.Employee) bool {
+	return slices.Contains(e.Role.GetDepartments(), model.DepartmentOperations)
+})

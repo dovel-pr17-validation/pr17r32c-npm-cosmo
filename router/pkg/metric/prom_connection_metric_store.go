@@ -1,0 +1,143 @@
+package metric
+
+import (
+	"context"
+	"errors"
+	"fmt"
+
+	"github.com/wundergraph/cosmo/router/pkg/otel"
+	"go.opentelemetry.io/otel/attribute"
+
+	otelmetric "go.opentelemetry.io/otel/metric"
+	"go.opentelemetry.io/otel/sdk/metric"
+	"go.uber.org/zap"
+)
+
+const (
+	cosmoRouterConnectionPrometheusMeterName    = "cosmo.router.connections.prometheus"
+	cosmoRouterConnectionPrometheusMeterVersion = "0.0.1"
+)
+
+type promConnectionMetrics struct {
+	instruments             *connectionInstruments
+	meterProvider           *metric.MeterProvider
+	logger                  *zap.Logger
+	meter                   otelmetric.Meter
+	instrumentRegistrations []otelmetric.Registration
+}
+
+func newPromConnectionMetrics(logger *zap.Logger, meterProvider *metric.MeterProvider, stats *ConnectionPoolStats, attributes []attribute.KeyValue, enhancedConnectionStats bool) (*promConnectionMetrics, error) {
+	meter := meterProvider.Meter(
+		cosmoRouterConnectionPrometheusMeterName,
+		otelmetric.WithInstrumentationVersion(cosmoRouterConnectionPrometheusMeterVersion),
+	)
+
+	instruments, err := newConnectionInstruments(meter, enhancedConnectionStats)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create prometheus connection instruments: %w", err)
+	}
+
+	metrics := &promConnectionMetrics{
+		instruments:   instruments,
+		meterProvider: meterProvider,
+		meter:         meter,
+		logger:        logger,
+	}
+
+	err = metrics.startInitMetrics(stats, attributes)
+	if err != nil {
+		return nil, err
+	}
+
+	return metrics, nil
+}
+
+func (h *promConnectionMetrics) startInitMetrics(connStats *ConnectionPoolStats, attributes []attribute.KeyValue) error {
+	rc, err := h.meter.RegisterCallback(func(_ context.Context, o otelmetric.Observer) error {
+		stats := connStats.GetStats()
+		for key, activeConnections := range stats {
+			attrs := otel.GetServerAttributes(key.Host)
+			if key.Subgraph != "" {
+				attrs = append(attrs, otel.WgSubgraphName.String(key.Subgraph))
+			}
+			o.ObserveInt64(h.instruments.connectionsActive, activeConnections,
+				otelmetric.WithAttributes(attributes...),
+				otelmetric.WithAttributes(attrs...),
+			)
+		}
+
+		return nil
+	}, h.instruments.connectionsActive)
+	if err != nil {
+		return err
+	}
+
+	h.instrumentRegistrations = append(h.instrumentRegistrations, rc)
+	return nil
+}
+
+func (m *promConnectionMetrics) MeasureConnectionAcquireDuration(ctx context.Context, duration float64, opts ...otelmetric.RecordOption) {
+	m.instruments.connectionAcquireDuration.Record(ctx, duration, opts...)
+}
+
+func (m *promConnectionMetrics) MeasureMaxConnections(ctx context.Context, count int64, opts ...otelmetric.RecordOption) {
+	m.instruments.maxConnections.Record(ctx, count, opts...)
+}
+
+func (m *promConnectionMetrics) MeasureDNSLookupDuration(ctx context.Context, duration float64, opts ...otelmetric.RecordOption) {
+	if m.instruments.dnsLookupDuration != nil {
+		m.instruments.dnsLookupDuration.Record(ctx, duration, opts...)
+	}
+}
+
+func (m *promConnectionMetrics) MeasureTCPConnectDuration(ctx context.Context, duration float64, opts ...otelmetric.RecordOption) {
+	if m.instruments.tcpConnectDuration != nil {
+		m.instruments.tcpConnectDuration.Record(ctx, duration, opts...)
+	}
+}
+
+func (m *promConnectionMetrics) MeasureTLSHandshakeDuration(ctx context.Context, duration float64, opts ...otelmetric.RecordOption) {
+	if m.instruments.tlsHandshakeDuration != nil {
+		m.instruments.tlsHandshakeDuration.Record(ctx, duration, opts...)
+	}
+}
+
+func (m *promConnectionMetrics) MeasureTimeToFirstRequestByte(ctx context.Context, duration float64, opts ...otelmetric.RecordOption) {
+	if m.instruments.timeToFirstRequestByte != nil {
+		m.instruments.timeToFirstRequestByte.Record(ctx, duration, opts...)
+	}
+}
+
+func (m *promConnectionMetrics) MeasureTimeToLastRequestByte(ctx context.Context, duration float64, opts ...otelmetric.RecordOption) {
+	if m.instruments.timeToLastRequestByte != nil {
+		m.instruments.timeToLastRequestByte.Record(ctx, duration, opts...)
+	}
+}
+
+func (m *promConnectionMetrics) MeasureTimeToFirstByte(ctx context.Context, duration float64, opts ...otelmetric.RecordOption) {
+	if m.instruments.timeToFirstByte != nil {
+		m.instruments.timeToFirstByte.Record(ctx, duration, opts...)
+	}
+}
+
+func (m *promConnectionMetrics) MeasureTimeToLastByte(ctx context.Context, duration float64, opts ...otelmetric.RecordOption) {
+	if m.instruments.timeToLastByte != nil {
+		m.instruments.timeToLastByte.Record(ctx, duration, opts...)
+	}
+}
+
+func (m *promConnectionMetrics) Flush(ctx context.Context) error {
+	return m.meterProvider.ForceFlush(ctx)
+}
+
+func (h *promConnectionMetrics) Shutdown() error {
+	var err error
+
+	for _, reg := range h.instrumentRegistrations {
+		if regErr := reg.Unregister(); regErr != nil {
+			err = errors.Join(err, regErr)
+		}
+	}
+
+	return err
+}

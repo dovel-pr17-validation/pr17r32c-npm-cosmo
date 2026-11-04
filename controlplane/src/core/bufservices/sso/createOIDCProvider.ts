@@ -1,0 +1,81 @@
+import { HandlerContext } from '@connectrpc/connect';
+import { EnumStatusCode } from '@wundergraph/cosmo-connect/dist/common/common_pb';
+import {
+  CreateOIDCProviderRequest,
+  CreateOIDCProviderResponse,
+} from '@wundergraph/cosmo-connect/dist/platform/v1/platform_pb';
+import { uid } from 'uid';
+import type { RouterOptions } from '../../routes.js';
+import OidcProvider from '../../services/OidcProvider.js';
+import { enrichLogger, getLogger, handleError, isValidLocalhostOrSecureEndpoint } from '../../util.js';
+import { UnauthorizedError } from '../../errors/errors.js';
+import { OrganizationRepository } from '../../repositories/OrganizationRepository.js';
+import type { PlainMessage } from '../../../types/index.js';
+
+export function createOIDCProvider(
+  opts: RouterOptions,
+  req: CreateOIDCProviderRequest,
+  ctx: HandlerContext,
+): Promise<PlainMessage<CreateOIDCProviderResponse>> {
+  let logger = getLogger(ctx, opts.logger);
+
+  return handleError<PlainMessage<CreateOIDCProviderResponse>>(ctx, logger, async () => {
+    const authContext = await opts.authenticator.authenticate(ctx.requestHeader);
+    logger = enrichLogger(ctx, logger, authContext);
+
+    if (authContext.organizationDeactivated || !authContext.rbac.isOrganizationAdmin) {
+      throw new UnauthorizedError();
+    }
+
+    const orgRepo = new OrganizationRepository(logger, opts.db);
+    const oidc = await orgRepo.getFeature({ organizationId: authContext.organizationId, featureId: 'oidc' });
+    if (!oidc?.enabled) {
+      return {
+        response: {
+          code: EnumStatusCode.ERR_UPGRADE_PLAN,
+          details: `OIDC feature is not enabled for this organization.`,
+        },
+        signInURL: '',
+        signOutURL: '',
+        loginURL: '',
+      };
+    }
+
+    if (!isValidLocalhostOrSecureEndpoint(req.discoveryEndpoint)) {
+      return {
+        response: {
+          code: EnumStatusCode.ERR_BAD_REQUEST,
+          details: 'The discovery endpoint must be a valid absolute URL starting with https://',
+        },
+        signInURL: '',
+        signOutURL: '',
+        loginURL: '',
+      };
+    }
+
+    await opts.keycloakClient.authenticateClient();
+
+    const alias = `${authContext.organizationSlug}_${uid(3)}`;
+
+    const oidcProvider = new OidcProvider();
+    await oidcProvider.createOidcProvider({
+      kcClient: opts.keycloakClient,
+      kcRealm: opts.keycloakRealm,
+      organizationId: authContext.organizationId,
+      organizationSlug: authContext.organizationSlug,
+      alias,
+      db: opts.db,
+      input: req,
+      abortSignal: ctx.signal,
+    });
+
+    return {
+      response: {
+        code: EnumStatusCode.OK,
+      },
+      signInURL: `${opts.keycloakApiUrl}/realms/${opts.keycloakRealm}/broker/${alias}/endpoint`,
+      signOutURL: `${opts.keycloakApiUrl}/realms/${opts.keycloakRealm}/broker/${alias}/endpoint/logout_response`,
+      loginURL: `${opts.webBaseUrl}/login?sso=${alias}`,
+    };
+  });
+}

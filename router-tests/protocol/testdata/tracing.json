@@ -1,0 +1,2074 @@
+{
+  "data": {
+    "employees": [
+      {
+        "id": 1,
+        "details": {
+          "forename": "Jens",
+          "surname": "Neuse",
+          "hasChildren": true
+        },
+        "role": {
+          "title": [
+            "Founder",
+            "CEO"
+          ],
+          "departments": [
+            "ENGINEERING",
+            "MARKETING"
+          ]
+        },
+        "hobbies": [
+          {
+            "category": "SPORT"
+          },
+          {
+            "name": "Counter Strike",
+            "genres": [
+              "FPS"
+            ],
+            "yearsOfExperience": 20
+          },
+          {
+            "name": "WunderGraph"
+          },
+          {
+            "languages": [
+              "GO",
+              "TYPESCRIPT"
+            ]
+          },
+          {
+            "countriesLived": [
+              {
+                "language": "English"
+              },
+              {
+                "language": "German"
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "id": 2,
+        "details": {
+          "forename": "Dustin",
+          "surname": "Deus",
+          "hasChildren": false
+        },
+        "role": {
+          "title": [
+            "Co-founder",
+            "Tech Lead"
+          ],
+          "departments": [
+            "ENGINEERING"
+          ]
+        },
+        "hobbies": [
+          {
+            "category": "STRENGTH_TRAINING"
+          },
+          {
+            "name": "Counter Strike",
+            "genres": [
+              "FPS"
+            ],
+            "yearsOfExperience": 0.5
+          },
+          {
+            "languages": [
+              "GO",
+              "RUST"
+            ]
+          }
+        ]
+      },
+      {
+        "id": 3,
+        "details": {
+          "forename": "Stefan",
+          "surname": "Avram",
+          "hasChildren": false
+        },
+        "role": {
+          "title": [
+            "Co-founder",
+            "Head of Growth"
+          ],
+          "departments": [
+            "MARKETING"
+          ]
+        },
+        "hobbies": [
+          {
+            "category": "HIKING"
+          },
+          {
+            "category": "SPORT"
+          },
+          {
+            "name": "Reading"
+          },
+          {
+            "countriesLived": [
+              {
+                "language": "English"
+              },
+              {
+                "language": "Serbian"
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "id": 4,
+        "details": {
+          "forename": "Björn",
+          "surname": "Schwenzer",
+          "hasChildren": true
+        },
+        "role": {
+          "title": [
+            "Co-founder",
+            "COO"
+          ],
+          "departments": [
+            "OPERATIONS",
+            "MARKETING"
+          ]
+        },
+        "hobbies": [
+          {
+            "category": "HIKING"
+          },
+          {
+            "planeModels": [
+              "Aquila AT01",
+              "Cessna C172",
+              "Cessna C206",
+              "Cirrus SR20",
+              "Cirrus SR22",
+              "Diamond DA40",
+              "Diamond HK36",
+              "Diamond DA20",
+              "Piper Cub",
+              "Pitts Special",
+              "Robin DR400"
+            ],
+            "yearsOfExperience": 20
+          },
+          {
+            "countriesLived": [
+              {
+                "language": "English"
+              },
+              {
+                "language": "German"
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "id": 5,
+        "details": {
+          "forename": "Sergiy",
+          "surname": "Petrunin",
+          "hasChildren": false
+        },
+        "role": {
+          "title": [
+            "Senior GO Engineer"
+          ],
+          "departments": [
+            "ENGINEERING"
+          ]
+        },
+        "hobbies": [
+          {
+            "name": "Building a house"
+          },
+          {
+            "name": "Forumla 1"
+          },
+          {
+            "name": "Raising cats"
+          }
+        ]
+      },
+      {
+        "id": 7,
+        "details": {
+          "forename": "Suvij",
+          "surname": "Surya",
+          "hasChildren": false
+        },
+        "role": {
+          "title": [
+            "Software Engineer"
+          ],
+          "departments": [
+            "ENGINEERING"
+          ]
+        },
+        "hobbies": [
+          {
+            "name": "Chess",
+            "genres": [
+              "BOARD"
+            ],
+            "yearsOfExperience": 9.5
+          },
+          {
+            "name": "Watching anime"
+          }
+        ]
+      },
+      {
+        "id": 8,
+        "details": {
+          "forename": "Nithin",
+          "surname": "Kumar",
+          "hasChildren": false
+        },
+        "role": {
+          "title": [
+            "Software Engineer"
+          ],
+          "departments": [
+            "ENGINEERING"
+          ]
+        },
+        "hobbies": [
+          {
+            "category": "STRENGTH_TRAINING"
+          },
+          {
+            "name": "Miscellaneous",
+            "genres": [
+              "ADVENTURE",
+              "RPG",
+              "SIMULATION",
+              "STRATEGY"
+            ],
+            "yearsOfExperience": 17
+          },
+          {
+            "name": "Watching anime"
+          }
+        ]
+      },
+      {
+        "id": 10,
+        "details": {
+          "forename": "Eelco",
+          "surname": "Wiersma",
+          "hasChildren": false
+        },
+        "role": {
+          "title": [
+            "Senior Frontend Engineer"
+          ],
+          "departments": [
+            "ENGINEERING"
+          ]
+        },
+        "hobbies": [
+          {
+            "languages": [
+              "TYPESCRIPT"
+            ]
+          },
+          {
+            "category": "CALISTHENICS"
+          },
+          {
+            "category": "HIKING"
+          },
+          {
+            "category": "STRENGTH_TRAINING"
+          },
+          {
+            "name": "saas-ui"
+          },
+          {
+            "countriesLived": [
+              {
+                "language": "German"
+              },
+              {
+                "language": "Indonesian"
+              },
+              {
+                "language": "Dutch"
+              },
+              {
+                "language": "Portuguese"
+              },
+              {
+                "language": "Spanish"
+              },
+              {
+                "language": "Thai"
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "id": 11,
+        "details": {
+          "forename": "Alexandra",
+          "surname": "Neuse",
+          "hasChildren": true
+        },
+        "role": {
+          "title": [
+            "Accounting & Finance"
+          ],
+          "departments": [
+            "OPERATIONS"
+          ]
+        },
+        "hobbies": [
+          {
+            "name": "Spending time with the family"
+          }
+        ]
+      },
+      {
+        "id": 12,
+        "details": {
+          "forename": "David",
+          "surname": "Stutt",
+          "hasChildren": false
+        },
+        "role": {
+          "title": [
+            "Software Engineer"
+          ],
+          "departments": [
+            "ENGINEERING"
+          ]
+        },
+        "hobbies": [
+          {
+            "languages": [
+              "CSHARP",
+              "GO",
+              "RUST",
+              "TYPESCRIPT"
+            ]
+          },
+          {
+            "category": "STRENGTH_TRAINING"
+          },
+          {
+            "name": "Miscellaneous",
+            "genres": [
+              "ADVENTURE",
+              "BOARD",
+              "CARD",
+              "ROGUELITE",
+              "RPG",
+              "SIMULATION",
+              "STRATEGY"
+            ],
+            "yearsOfExperience": 25.5
+          },
+          {
+            "countriesLived": [
+              {
+                "language": "English"
+              },
+              {
+                "language": "Korean"
+              },
+              {
+                "language": "Taiwanese"
+              }
+            ]
+          }
+        ]
+      }
+    ]
+  },
+  "extensions": {
+    "trace": {
+      "version": "1",
+      "info": {
+        "trace_start_time": "",
+        "trace_start_unix": 0,
+        "parse_stats": {
+          "duration_nanoseconds": 5,
+          "duration_pretty": "5ns",
+          "duration_since_start_nanoseconds": 5,
+          "duration_since_start_pretty": "5ns"
+        },
+        "normalize_stats": {
+          "duration_nanoseconds": 5,
+          "duration_pretty": "5ns",
+          "duration_since_start_nanoseconds": 10,
+          "duration_since_start_pretty": "10ns"
+        },
+        "validate_stats": {
+          "duration_nanoseconds": 5,
+          "duration_pretty": "5ns",
+          "duration_since_start_nanoseconds": 15,
+          "duration_since_start_pretty": "15ns"
+        },
+        "planner_stats": {
+          "duration_nanoseconds": 5,
+          "duration_pretty": "5ns",
+          "duration_since_start_nanoseconds": 20,
+          "duration_since_start_pretty": "20ns"
+        }
+      },
+      "fetches": {
+        "kind": "Sequence",
+        "children": [
+          {
+            "kind": "Single",
+            "fetch": {
+              "kind": "Single",
+              "path": "",
+              "source_id": "0",
+              "source_name": "employees",
+              "trace": {
+                "raw_input_data": {},
+                "input": {
+                  "body": {
+                    "query": "{employees {id role {__typename title departments} __typename}}"
+                  },
+                  "header": {},
+                  "method": "POST",
+                  "url": "http://localhost/graphql"
+                },
+                "output": {
+                  "data": {
+                    "employees": [
+                      {
+                        "id": 1,
+                        "role": {
+                          "__typename": "Engineer",
+                          "title": [
+                            "Founder",
+                            "CEO"
+                          ],
+                          "departments": [
+                            "ENGINEERING",
+                            "MARKETING"
+                          ]
+                        },
+                        "__typename": "Employee"
+                      },
+                      {
+                        "id": 2,
+                        "role": {
+                          "__typename": "Engineer",
+                          "title": [
+                            "Co-founder",
+                            "Tech Lead"
+                          ],
+                          "departments": [
+                            "ENGINEERING"
+                          ]
+                        },
+                        "__typename": "Employee"
+                      },
+                      {
+                        "id": 3,
+                        "role": {
+                          "__typename": "Marketer",
+                          "title": [
+                            "Co-founder",
+                            "Head of Growth"
+                          ],
+                          "departments": [
+                            "MARKETING"
+                          ]
+                        },
+                        "__typename": "Employee"
+                      },
+                      {
+                        "id": 4,
+                        "role": {
+                          "__typename": "Operator",
+                          "title": [
+                            "Co-founder",
+                            "COO"
+                          ],
+                          "departments": [
+                            "OPERATIONS",
+                            "MARKETING"
+                          ]
+                        },
+                        "__typename": "Employee"
+                      },
+                      {
+                        "id": 5,
+                        "role": {
+                          "__typename": "Engineer",
+                          "title": [
+                            "Senior GO Engineer"
+                          ],
+                          "departments": [
+                            "ENGINEERING"
+                          ]
+                        },
+                        "__typename": "Employee"
+                      },
+                      {
+                        "id": 7,
+                        "role": {
+                          "__typename": "Engineer",
+                          "title": [
+                            "Software Engineer"
+                          ],
+                          "departments": [
+                            "ENGINEERING"
+                          ]
+                        },
+                        "__typename": "Employee"
+                      },
+                      {
+                        "id": 8,
+                        "role": {
+                          "__typename": "Engineer",
+                          "title": [
+                            "Software Engineer"
+                          ],
+                          "departments": [
+                            "ENGINEERING"
+                          ]
+                        },
+                        "__typename": "Employee"
+                      },
+                      {
+                        "id": 10,
+                        "role": {
+                          "__typename": "Engineer",
+                          "title": [
+                            "Senior Frontend Engineer"
+                          ],
+                          "departments": [
+                            "ENGINEERING"
+                          ]
+                        },
+                        "__typename": "Employee"
+                      },
+                      {
+                        "id": 11,
+                        "role": {
+                          "__typename": "Operator",
+                          "title": [
+                            "Accounting \u0026 Finance"
+                          ],
+                          "departments": [
+                            "OPERATIONS"
+                          ]
+                        },
+                        "__typename": "Employee"
+                      },
+                      {
+                        "id": 12,
+                        "role": {
+                          "__typename": "Engineer",
+                          "title": [
+                            "Software Engineer"
+                          ],
+                          "departments": [
+                            "ENGINEERING"
+                          ]
+                        },
+                        "__typename": "Employee"
+                      }
+                    ]
+                  },
+                  "extensions": {
+                    "trace": {
+                      "request": {
+                        "method": "POST",
+                        "url": "http://localhost/graphql",
+                        "headers": {
+                          "Accept": [
+                            "application/json"
+                          ],
+                          "Accept-Encoding": [
+                            "gzip",
+                            "deflate"
+                          ],
+                          "Content-Type": [
+                            "application/json"
+                          ]
+                        }
+                      },
+                      "response": {
+                        "status_code": 200,
+                        "status": "200 OK",
+                        "headers": {
+                          "Content-Length": [
+                            "1333"
+                          ],
+                          "Content-Type": [
+                            "application/json"
+                          ]
+                        },
+                        "body_size": 1333
+                      }
+                    }
+                  }
+                },
+                "duration_since_start_nanoseconds": 1,
+                "duration_since_start_pretty": "1ns",
+                "duration_load_nanoseconds": 1,
+                "duration_load_pretty": "1ns",
+                "single_flight_used": true,
+                "single_flight_shared_response": false,
+                "load_skipped": false,
+                "load_stats": {
+                  "get_conn": {
+                    "duration_since_start_nanoseconds": 1,
+                    "duration_since_start_pretty": "1ns",
+                    "host_port": ""
+                  },
+                  "got_conn": {
+                    "duration_since_start_nanoseconds": 1,
+                    "duration_since_start_pretty": "1ns",
+                    "reused": false,
+                    "was_idle": false,
+                    "idle_time_nanoseconds": 0,
+                    "idle_time_pretty": ""
+                  },
+                  "got_first_response_byte": {
+                    "duration_since_start_nanoseconds": 1,
+                    "duration_since_start_pretty": "1ns"
+                  },
+                  "dns_start": {
+                    "duration_since_start_nanoseconds": 0,
+                    "duration_since_start_pretty": "",
+                    "host": ""
+                  },
+                  "dns_done": {
+                    "duration_since_start_nanoseconds": 0,
+                    "duration_since_start_pretty": ""
+                  },
+                  "connect_start": {
+                    "duration_since_start_nanoseconds": 1,
+                    "duration_since_start_pretty": "1ns",
+                    "network": "",
+                    "addr": ""
+                  },
+                  "connect_done": {
+                    "duration_since_start_nanoseconds": 1,
+                    "duration_since_start_pretty": "1ns",
+                    "network": "",
+                    "addr": ""
+                  },
+                  "tls_handshake_start": {
+                    "duration_since_start_nanoseconds": 0,
+                    "duration_since_start_pretty": ""
+                  },
+                  "tls_handshake_done": {
+                    "duration_since_start_nanoseconds": 0,
+                    "duration_since_start_pretty": ""
+                  },
+                  "wrote_headers": {
+                    "duration_since_start_nanoseconds": 1,
+                    "duration_since_start_pretty": "1ns"
+                  },
+                  "wrote_request": {
+                    "duration_since_start_nanoseconds": 1,
+                    "duration_since_start_pretty": "1ns"
+                  }
+                }
+              }
+            }
+          },
+          {
+            "kind": "Parallel",
+            "children": [
+              {
+                "kind": "Single",
+                "fetch": {
+                  "kind": "BatchEntity",
+                  "path": "employees",
+                  "source_id": "1",
+                  "source_name": "family",
+                  "trace": {
+                    "raw_input_data": [
+                      {
+                        "id": 1,
+                        "role": {
+                          "__typename": "Engineer",
+                          "title": [
+                            "Founder",
+                            "CEO"
+                          ],
+                          "departments": [
+                            "ENGINEERING",
+                            "MARKETING"
+                          ]
+                        },
+                        "__typename": "Employee"
+                      },
+                      {
+                        "id": 2,
+                        "role": {
+                          "__typename": "Engineer",
+                          "title": [
+                            "Co-founder",
+                            "Tech Lead"
+                          ],
+                          "departments": [
+                            "ENGINEERING"
+                          ]
+                        },
+                        "__typename": "Employee"
+                      },
+                      {
+                        "id": 3,
+                        "role": {
+                          "__typename": "Marketer",
+                          "title": [
+                            "Co-founder",
+                            "Head of Growth"
+                          ],
+                          "departments": [
+                            "MARKETING"
+                          ]
+                        },
+                        "__typename": "Employee"
+                      },
+                      {
+                        "id": 4,
+                        "role": {
+                          "__typename": "Operator",
+                          "title": [
+                            "Co-founder",
+                            "COO"
+                          ],
+                          "departments": [
+                            "OPERATIONS",
+                            "MARKETING"
+                          ]
+                        },
+                        "__typename": "Employee"
+                      },
+                      {
+                        "id": 5,
+                        "role": {
+                          "__typename": "Engineer",
+                          "title": [
+                            "Senior GO Engineer"
+                          ],
+                          "departments": [
+                            "ENGINEERING"
+                          ]
+                        },
+                        "__typename": "Employee"
+                      },
+                      {
+                        "id": 7,
+                        "role": {
+                          "__typename": "Engineer",
+                          "title": [
+                            "Software Engineer"
+                          ],
+                          "departments": [
+                            "ENGINEERING"
+                          ]
+                        },
+                        "__typename": "Employee"
+                      },
+                      {
+                        "id": 8,
+                        "role": {
+                          "__typename": "Engineer",
+                          "title": [
+                            "Software Engineer"
+                          ],
+                          "departments": [
+                            "ENGINEERING"
+                          ]
+                        },
+                        "__typename": "Employee"
+                      },
+                      {
+                        "id": 10,
+                        "role": {
+                          "__typename": "Engineer",
+                          "title": [
+                            "Senior Frontend Engineer"
+                          ],
+                          "departments": [
+                            "ENGINEERING"
+                          ]
+                        },
+                        "__typename": "Employee"
+                      },
+                      {
+                        "id": 11,
+                        "role": {
+                          "__typename": "Operator",
+                          "title": [
+                            "Accounting \u0026 Finance"
+                          ],
+                          "departments": [
+                            "OPERATIONS"
+                          ]
+                        },
+                        "__typename": "Employee"
+                      },
+                      {
+                        "id": 12,
+                        "role": {
+                          "__typename": "Engineer",
+                          "title": [
+                            "Software Engineer"
+                          ],
+                          "departments": [
+                            "ENGINEERING"
+                          ]
+                        },
+                        "__typename": "Employee"
+                      }
+                    ],
+                    "input": {
+                      "body": {
+                        "query": "query($representations: [_Any!]!){_entities(representations: $representations){... on Employee {__typename details {forename surname hasChildren}}}}",
+                        "variables": {
+                          "representations": [
+                            {
+                              "__typename": "Employee",
+                              "id": 1
+                            },
+                            {
+                              "__typename": "Employee",
+                              "id": 2
+                            },
+                            {
+                              "__typename": "Employee",
+                              "id": 3
+                            },
+                            {
+                              "__typename": "Employee",
+                              "id": 4
+                            },
+                            {
+                              "__typename": "Employee",
+                              "id": 5
+                            },
+                            {
+                              "__typename": "Employee",
+                              "id": 7
+                            },
+                            {
+                              "__typename": "Employee",
+                              "id": 8
+                            },
+                            {
+                              "__typename": "Employee",
+                              "id": 10
+                            },
+                            {
+                              "__typename": "Employee",
+                              "id": 11
+                            },
+                            {
+                              "__typename": "Employee",
+                              "id": 12
+                            }
+                          ]
+                        }
+                      },
+                      "header": {},
+                      "method": "POST",
+                      "url": "http://localhost/graphql"
+                    },
+                    "output": {
+                      "data": {
+                        "_entities": [
+                          {
+                            "__typename": "Employee",
+                            "details": {
+                              "forename": "Jens",
+                              "surname": "Neuse",
+                              "hasChildren": true
+                            }
+                          },
+                          {
+                            "__typename": "Employee",
+                            "details": {
+                              "forename": "Dustin",
+                              "surname": "Deus",
+                              "hasChildren": false
+                            }
+                          },
+                          {
+                            "__typename": "Employee",
+                            "details": {
+                              "forename": "Stefan",
+                              "surname": "Avram",
+                              "hasChildren": false
+                            }
+                          },
+                          {
+                            "__typename": "Employee",
+                            "details": {
+                              "forename": "Björn",
+                              "surname": "Schwenzer",
+                              "hasChildren": true
+                            }
+                          },
+                          {
+                            "__typename": "Employee",
+                            "details": {
+                              "forename": "Sergiy",
+                              "surname": "Petrunin",
+                              "hasChildren": false
+                            }
+                          },
+                          {
+                            "__typename": "Employee",
+                            "details": {
+                              "forename": "Suvij",
+                              "surname": "Surya",
+                              "hasChildren": false
+                            }
+                          },
+                          {
+                            "__typename": "Employee",
+                            "details": {
+                              "forename": "Nithin",
+                              "surname": "Kumar",
+                              "hasChildren": false
+                            }
+                          },
+                          {
+                            "__typename": "Employee",
+                            "details": {
+                              "forename": "Eelco",
+                              "surname": "Wiersma",
+                              "hasChildren": false
+                            }
+                          },
+                          {
+                            "__typename": "Employee",
+                            "details": {
+                              "forename": "Alexandra",
+                              "surname": "Neuse",
+                              "hasChildren": true
+                            }
+                          },
+                          {
+                            "__typename": "Employee",
+                            "details": {
+                              "forename": "David",
+                              "surname": "Stutt",
+                              "hasChildren": false
+                            }
+                          }
+                        ]
+                      },
+                      "extensions": {
+                        "trace": {
+                          "request": {
+                            "method": "POST",
+                            "url": "http://localhost/graphql",
+                            "headers": {
+                              "Accept": [
+                                "application/json"
+                              ],
+                              "Accept-Encoding": [
+                                "gzip",
+                                "deflate"
+                              ],
+                              "Content-Type": [
+                                "application/json"
+                              ]
+                            }
+                          },
+                          "response": {
+                            "status_code": 200,
+                            "status": "200 OK",
+                            "headers": {
+                              "Content-Length": [
+                                "987"
+                              ],
+                              "Content-Type": [
+                                "application/json"
+                              ]
+                            },
+                            "body_size": 987
+                          }
+                        }
+                      }
+                    },
+                    "duration_since_start_nanoseconds": 1,
+                    "duration_since_start_pretty": "1ns",
+                    "duration_load_nanoseconds": 1,
+                    "duration_load_pretty": "1ns",
+                    "single_flight_used": true,
+                    "single_flight_shared_response": false,
+                    "load_skipped": false,
+                    "load_stats": {
+                      "get_conn": {
+                        "duration_since_start_nanoseconds": 1,
+                        "duration_since_start_pretty": "1ns",
+                        "host_port": ""
+                      },
+                      "got_conn": {
+                        "duration_since_start_nanoseconds": 1,
+                        "duration_since_start_pretty": "1ns",
+                        "reused": false,
+                        "was_idle": false,
+                        "idle_time_nanoseconds": 0,
+                        "idle_time_pretty": ""
+                      },
+                      "got_first_response_byte": {
+                        "duration_since_start_nanoseconds": 1,
+                        "duration_since_start_pretty": "1ns"
+                      },
+                      "dns_start": {
+                        "duration_since_start_nanoseconds": 0,
+                        "duration_since_start_pretty": "",
+                        "host": ""
+                      },
+                      "dns_done": {
+                        "duration_since_start_nanoseconds": 0,
+                        "duration_since_start_pretty": ""
+                      },
+                      "connect_start": {
+                        "duration_since_start_nanoseconds": 1,
+                        "duration_since_start_pretty": "1ns",
+                        "network": "",
+                        "addr": ""
+                      },
+                      "connect_done": {
+                        "duration_since_start_nanoseconds": 1,
+                        "duration_since_start_pretty": "1ns",
+                        "network": "",
+                        "addr": ""
+                      },
+                      "tls_handshake_start": {
+                        "duration_since_start_nanoseconds": 0,
+                        "duration_since_start_pretty": ""
+                      },
+                      "tls_handshake_done": {
+                        "duration_since_start_nanoseconds": 0,
+                        "duration_since_start_pretty": ""
+                      },
+                      "wrote_headers": {
+                        "duration_since_start_nanoseconds": 1,
+                        "duration_since_start_pretty": "1ns"
+                      },
+                      "wrote_request": {
+                        "duration_since_start_nanoseconds": 1,
+                        "duration_since_start_pretty": "1ns"
+                      }
+                    }
+                  }
+                }
+              },
+              {
+                "kind": "Sequence",
+                "children": [
+                  {
+                    "kind": "Single",
+                    "fetch": {
+                      "kind": "BatchEntity",
+                      "path": "employees",
+                      "source_id": "2",
+                      "source_name": "hobbies",
+                      "trace": {
+                        "raw_input_data": [
+                          {
+                            "id": 1,
+                            "role": {
+                              "__typename": "Engineer",
+                              "title": [
+                                "Founder",
+                                "CEO"
+                              ],
+                              "departments": [
+                                "ENGINEERING",
+                                "MARKETING"
+                              ]
+                            },
+                            "__typename": "Employee"
+                          },
+                          {
+                            "id": 2,
+                            "role": {
+                              "__typename": "Engineer",
+                              "title": [
+                                "Co-founder",
+                                "Tech Lead"
+                              ],
+                              "departments": [
+                                "ENGINEERING"
+                              ]
+                            },
+                            "__typename": "Employee"
+                          },
+                          {
+                            "id": 3,
+                            "role": {
+                              "__typename": "Marketer",
+                              "title": [
+                                "Co-founder",
+                                "Head of Growth"
+                              ],
+                              "departments": [
+                                "MARKETING"
+                              ]
+                            },
+                            "__typename": "Employee"
+                          },
+                          {
+                            "id": 4,
+                            "role": {
+                              "__typename": "Operator",
+                              "title": [
+                                "Co-founder",
+                                "COO"
+                              ],
+                              "departments": [
+                                "OPERATIONS",
+                                "MARKETING"
+                              ]
+                            },
+                            "__typename": "Employee"
+                          },
+                          {
+                            "id": 5,
+                            "role": {
+                              "__typename": "Engineer",
+                              "title": [
+                                "Senior GO Engineer"
+                              ],
+                              "departments": [
+                                "ENGINEERING"
+                              ]
+                            },
+                            "__typename": "Employee"
+                          },
+                          {
+                            "id": 7,
+                            "role": {
+                              "__typename": "Engineer",
+                              "title": [
+                                "Software Engineer"
+                              ],
+                              "departments": [
+                                "ENGINEERING"
+                              ]
+                            },
+                            "__typename": "Employee"
+                          },
+                          {
+                            "id": 8,
+                            "role": {
+                              "__typename": "Engineer",
+                              "title": [
+                                "Software Engineer"
+                              ],
+                              "departments": [
+                                "ENGINEERING"
+                              ]
+                            },
+                            "__typename": "Employee"
+                          },
+                          {
+                            "id": 10,
+                            "role": {
+                              "__typename": "Engineer",
+                              "title": [
+                                "Senior Frontend Engineer"
+                              ],
+                              "departments": [
+                                "ENGINEERING"
+                              ]
+                            },
+                            "__typename": "Employee"
+                          },
+                          {
+                            "id": 11,
+                            "role": {
+                              "__typename": "Operator",
+                              "title": [
+                                "Accounting \u0026 Finance"
+                              ],
+                              "departments": [
+                                "OPERATIONS"
+                              ]
+                            },
+                            "__typename": "Employee"
+                          },
+                          {
+                            "id": 12,
+                            "role": {
+                              "__typename": "Engineer",
+                              "title": [
+                                "Software Engineer"
+                              ],
+                              "departments": [
+                                "ENGINEERING"
+                              ]
+                            },
+                            "__typename": "Employee"
+                          }
+                        ],
+                        "input": {
+                          "body": {
+                            "query": "query($representations: [_Any!]!){_entities(representations: $representations){... on Employee {__typename hobbies {__typename ... on Exercise {category} ... on Flying {planeModels yearsOfExperience} ... on Gaming {name genres yearsOfExperience} ... on Programming {languages} ... on Travelling {countriesLived {__typename key {name}}} ... on Other {name}}}}}",
+                            "variables": {
+                              "representations": [
+                                {
+                                  "__typename": "Employee",
+                                  "id": 1
+                                },
+                                {
+                                  "__typename": "Employee",
+                                  "id": 2
+                                },
+                                {
+                                  "__typename": "Employee",
+                                  "id": 3
+                                },
+                                {
+                                  "__typename": "Employee",
+                                  "id": 4
+                                },
+                                {
+                                  "__typename": "Employee",
+                                  "id": 5
+                                },
+                                {
+                                  "__typename": "Employee",
+                                  "id": 7
+                                },
+                                {
+                                  "__typename": "Employee",
+                                  "id": 8
+                                },
+                                {
+                                  "__typename": "Employee",
+                                  "id": 10
+                                },
+                                {
+                                  "__typename": "Employee",
+                                  "id": 11
+                                },
+                                {
+                                  "__typename": "Employee",
+                                  "id": 12
+                                }
+                              ]
+                            }
+                          },
+                          "header": {},
+                          "method": "POST",
+                          "url": "http://localhost/graphql"
+                        },
+                        "output": {
+                          "data": {
+                            "_entities": [
+                              {
+                                "__typename": "Employee",
+                                "hobbies": [
+                                  {
+                                    "__typename": "Exercise",
+                                    "category": "SPORT"
+                                  },
+                                  {
+                                    "__typename": "Gaming",
+                                    "name": "Counter Strike",
+                                    "genres": [
+                                      "FPS"
+                                    ],
+                                    "yearsOfExperience": 20
+                                  },
+                                  {
+                                    "__typename": "Other",
+                                    "name": "WunderGraph"
+                                  },
+                                  {
+                                    "__typename": "Programming",
+                                    "languages": [
+                                      "GO",
+                                      "TYPESCRIPT"
+                                    ]
+                                  },
+                                  {
+                                    "__typename": "Travelling",
+                                    "countriesLived": [
+                                      {
+                                        "__typename": "Country",
+                                        "key": {
+                                          "name": "England"
+                                        }
+                                      },
+                                      {
+                                        "__typename": "Country",
+                                        "key": {
+                                          "name": "Germany"
+                                        }
+                                      }
+                                    ]
+                                  }
+                                ]
+                              },
+                              {
+                                "__typename": "Employee",
+                                "hobbies": [
+                                  {
+                                    "__typename": "Exercise",
+                                    "category": "STRENGTH_TRAINING"
+                                  },
+                                  {
+                                    "__typename": "Gaming",
+                                    "name": "Counter Strike",
+                                    "genres": [
+                                      "FPS"
+                                    ],
+                                    "yearsOfExperience": 0.5
+                                  },
+                                  {
+                                    "__typename": "Programming",
+                                    "languages": [
+                                      "GO",
+                                      "RUST"
+                                    ]
+                                  }
+                                ]
+                              },
+                              {
+                                "__typename": "Employee",
+                                "hobbies": [
+                                  {
+                                    "__typename": "Exercise",
+                                    "category": "HIKING"
+                                  },
+                                  {
+                                    "__typename": "Exercise",
+                                    "category": "SPORT"
+                                  },
+                                  {
+                                    "__typename": "Other",
+                                    "name": "Reading"
+                                  },
+                                  {
+                                    "__typename": "Travelling",
+                                    "countriesLived": [
+                                      {
+                                        "__typename": "Country",
+                                        "key": {
+                                          "name": "America"
+                                        }
+                                      },
+                                      {
+                                        "__typename": "Country",
+                                        "key": {
+                                          "name": "Serbia"
+                                        }
+                                      }
+                                    ]
+                                  }
+                                ]
+                              },
+                              {
+                                "__typename": "Employee",
+                                "hobbies": [
+                                  {
+                                    "__typename": "Exercise",
+                                    "category": "HIKING"
+                                  },
+                                  {
+                                    "__typename": "Flying",
+                                    "planeModels": [
+                                      "Aquila AT01",
+                                      "Cessna C172",
+                                      "Cessna C206",
+                                      "Cirrus SR20",
+                                      "Cirrus SR22",
+                                      "Diamond DA40",
+                                      "Diamond HK36",
+                                      "Diamond DA20",
+                                      "Piper Cub",
+                                      "Pitts Special",
+                                      "Robin DR400"
+                                    ],
+                                    "yearsOfExperience": 20
+                                  },
+                                  {
+                                    "__typename": "Travelling",
+                                    "countriesLived": [
+                                      {
+                                        "__typename": "Country",
+                                        "key": {
+                                          "name": "America"
+                                        }
+                                      },
+                                      {
+                                        "__typename": "Country",
+                                        "key": {
+                                          "name": "Germany"
+                                        }
+                                      }
+                                    ]
+                                  }
+                                ]
+                              },
+                              {
+                                "__typename": "Employee",
+                                "hobbies": [
+                                  {
+                                    "__typename": "Other",
+                                    "name": "Building a house"
+                                  },
+                                  {
+                                    "__typename": "Other",
+                                    "name": "Forumla 1"
+                                  },
+                                  {
+                                    "__typename": "Other",
+                                    "name": "Raising cats"
+                                  }
+                                ]
+                              },
+                              {
+                                "__typename": "Employee",
+                                "hobbies": [
+                                  {
+                                    "__typename": "Gaming",
+                                    "name": "Chess",
+                                    "genres": [
+                                      "BOARD"
+                                    ],
+                                    "yearsOfExperience": 9.5
+                                  },
+                                  {
+                                    "__typename": "Other",
+                                    "name": "Watching anime"
+                                  }
+                                ]
+                              },
+                              {
+                                "__typename": "Employee",
+                                "hobbies": [
+                                  {
+                                    "__typename": "Exercise",
+                                    "category": "STRENGTH_TRAINING"
+                                  },
+                                  {
+                                    "__typename": "Gaming",
+                                    "name": "Miscellaneous",
+                                    "genres": [
+                                      "ADVENTURE",
+                                      "RPG",
+                                      "SIMULATION",
+                                      "STRATEGY"
+                                    ],
+                                    "yearsOfExperience": 17
+                                  },
+                                  {
+                                    "__typename": "Other",
+                                    "name": "Watching anime"
+                                  }
+                                ]
+                              },
+                              {
+                                "__typename": "Employee",
+                                "hobbies": [
+                                  {
+                                    "__typename": "Programming",
+                                    "languages": [
+                                      "TYPESCRIPT"
+                                    ]
+                                  },
+                                  {
+                                    "__typename": "Exercise",
+                                    "category": "CALISTHENICS"
+                                  },
+                                  {
+                                    "__typename": "Exercise",
+                                    "category": "HIKING"
+                                  },
+                                  {
+                                    "__typename": "Exercise",
+                                    "category": "STRENGTH_TRAINING"
+                                  },
+                                  {
+                                    "__typename": "Other",
+                                    "name": "saas-ui"
+                                  },
+                                  {
+                                    "__typename": "Travelling",
+                                    "countriesLived": [
+                                      {
+                                        "__typename": "Country",
+                                        "key": {
+                                          "name": "Germany"
+                                        }
+                                      },
+                                      {
+                                        "__typename": "Country",
+                                        "key": {
+                                          "name": "Indonesia"
+                                        }
+                                      },
+                                      {
+                                        "__typename": "Country",
+                                        "key": {
+                                          "name": "Netherlands"
+                                        }
+                                      },
+                                      {
+                                        "__typename": "Country",
+                                        "key": {
+                                          "name": "Portugal"
+                                        }
+                                      },
+                                      {
+                                        "__typename": "Country",
+                                        "key": {
+                                          "name": "Spain"
+                                        }
+                                      },
+                                      {
+                                        "__typename": "Country",
+                                        "key": {
+                                          "name": "Thailand"
+                                        }
+                                      }
+                                    ]
+                                  }
+                                ]
+                              },
+                              {
+                                "__typename": "Employee",
+                                "hobbies": [
+                                  {
+                                    "__typename": "Other",
+                                    "name": "Spending time with the family"
+                                  }
+                                ]
+                              },
+                              {
+                                "__typename": "Employee",
+                                "hobbies": [
+                                  {
+                                    "__typename": "Programming",
+                                    "languages": [
+                                      "CSHARP",
+                                      "GO",
+                                      "RUST",
+                                      "TYPESCRIPT"
+                                    ]
+                                  },
+                                  {
+                                    "__typename": "Exercise",
+                                    "category": "STRENGTH_TRAINING"
+                                  },
+                                  {
+                                    "__typename": "Gaming",
+                                    "name": "Miscellaneous",
+                                    "genres": [
+                                      "ADVENTURE",
+                                      "BOARD",
+                                      "CARD",
+                                      "ROGUELITE",
+                                      "RPG",
+                                      "SIMULATION",
+                                      "STRATEGY"
+                                    ],
+                                    "yearsOfExperience": 25.5
+                                  },
+                                  {
+                                    "__typename": "Travelling",
+                                    "countriesLived": [
+                                      {
+                                        "__typename": "Country",
+                                        "key": {
+                                          "name": "England"
+                                        }
+                                      },
+                                      {
+                                        "__typename": "Country",
+                                        "key": {
+                                          "name": "Korea"
+                                        }
+                                      },
+                                      {
+                                        "__typename": "Country",
+                                        "key": {
+                                          "name": "Taiwan"
+                                        }
+                                      }
+                                    ]
+                                  }
+                                ]
+                              }
+                            ]
+                          },
+                          "extensions": {
+                            "trace": {
+                              "request": {
+                                "method": "POST",
+                                "url": "http://localhost/graphql",
+                                "headers": {
+                                  "Accept": [
+                                    "application/json"
+                                  ],
+                                  "Accept-Encoding": [
+                                    "gzip",
+                                    "deflate"
+                                  ],
+                                  "Content-Type": [
+                                    "application/json"
+                                  ]
+                                }
+                              },
+                              "response": {
+                                "status_code": 200,
+                                "status": "200 OK",
+                                "headers": {
+                                  "Content-Type": [
+                                    "application/json"
+                                  ]
+                                },
+                                "body_size": 3318
+                              }
+                            }
+                          }
+                        },
+                        "duration_since_start_nanoseconds": 1,
+                        "duration_since_start_pretty": "1ns",
+                        "duration_load_nanoseconds": 1,
+                        "duration_load_pretty": "1ns",
+                        "single_flight_used": true,
+                        "single_flight_shared_response": false,
+                        "load_skipped": false,
+                        "load_stats": {
+                          "get_conn": {
+                            "duration_since_start_nanoseconds": 1,
+                            "duration_since_start_pretty": "1ns",
+                            "host_port": ""
+                          },
+                          "got_conn": {
+                            "duration_since_start_nanoseconds": 1,
+                            "duration_since_start_pretty": "1ns",
+                            "reused": false,
+                            "was_idle": false,
+                            "idle_time_nanoseconds": 0,
+                            "idle_time_pretty": ""
+                          },
+                          "got_first_response_byte": {
+                            "duration_since_start_nanoseconds": 1,
+                            "duration_since_start_pretty": "1ns"
+                          },
+                          "dns_start": {
+                            "duration_since_start_nanoseconds": 0,
+                            "duration_since_start_pretty": "",
+                            "host": ""
+                          },
+                          "dns_done": {
+                            "duration_since_start_nanoseconds": 0,
+                            "duration_since_start_pretty": ""
+                          },
+                          "connect_start": {
+                            "duration_since_start_nanoseconds": 1,
+                            "duration_since_start_pretty": "1ns",
+                            "network": "",
+                            "addr": ""
+                          },
+                          "connect_done": {
+                            "duration_since_start_nanoseconds": 1,
+                            "duration_since_start_pretty": "1ns",
+                            "network": "",
+                            "addr": ""
+                          },
+                          "tls_handshake_start": {
+                            "duration_since_start_nanoseconds": 0,
+                            "duration_since_start_pretty": ""
+                          },
+                          "tls_handshake_done": {
+                            "duration_since_start_nanoseconds": 0,
+                            "duration_since_start_pretty": ""
+                          },
+                          "wrote_headers": {
+                            "duration_since_start_nanoseconds": 1,
+                            "duration_since_start_pretty": "1ns"
+                          },
+                          "wrote_request": {
+                            "duration_since_start_nanoseconds": 1,
+                            "duration_since_start_pretty": "1ns"
+                          }
+                        }
+                      }
+                    }
+                  },
+                  {
+                    "kind": "Single",
+                    "fetch": {
+                      "kind": "BatchEntity",
+                      "path": "employees.@.hobbies.@.countriesLived",
+                      "source_id": "7",
+                      "source_name": "countries",
+                      "trace": {
+                        "raw_input_data": [
+                          {
+                            "__typename": "Country",
+                            "key": {
+                              "name": "England"
+                            }
+                          },
+                          {
+                            "__typename": "Country",
+                            "key": {
+                              "name": "Germany"
+                            }
+                          },
+                          {
+                            "__typename": "Country",
+                            "key": {
+                              "name": "America"
+                            }
+                          },
+                          {
+                            "__typename": "Country",
+                            "key": {
+                              "name": "Serbia"
+                            }
+                          },
+                          {
+                            "__typename": "Country",
+                            "key": {
+                              "name": "America"
+                            }
+                          },
+                          {
+                            "__typename": "Country",
+                            "key": {
+                              "name": "Germany"
+                            }
+                          },
+                          {
+                            "__typename": "Country",
+                            "key": {
+                              "name": "Germany"
+                            }
+                          },
+                          {
+                            "__typename": "Country",
+                            "key": {
+                              "name": "Indonesia"
+                            }
+                          },
+                          {
+                            "__typename": "Country",
+                            "key": {
+                              "name": "Netherlands"
+                            }
+                          },
+                          {
+                            "__typename": "Country",
+                            "key": {
+                              "name": "Portugal"
+                            }
+                          },
+                          {
+                            "__typename": "Country",
+                            "key": {
+                              "name": "Spain"
+                            }
+                          },
+                          {
+                            "__typename": "Country",
+                            "key": {
+                              "name": "Thailand"
+                            }
+                          },
+                          {
+                            "__typename": "Country",
+                            "key": {
+                              "name": "England"
+                            }
+                          },
+                          {
+                            "__typename": "Country",
+                            "key": {
+                              "name": "Korea"
+                            }
+                          },
+                          {
+                            "__typename": "Country",
+                            "key": {
+                              "name": "Taiwan"
+                            }
+                          }
+                        ],
+                        "input": {
+                          "body": {
+                            "query": "query($representations: [_Any!]!){_entities(representations: $representations){... on Country {__typename language}}}",
+                            "variables": {
+                              "representations": [
+                                {
+                                  "__typename": "Country",
+                                  "key": {
+                                    "name": "England"
+                                  }
+                                },
+                                {
+                                  "__typename": "Country",
+                                  "key": {
+                                    "name": "Germany"
+                                  }
+                                },
+                                {
+                                  "__typename": "Country",
+                                  "key": {
+                                    "name": "America"
+                                  }
+                                },
+                                {
+                                  "__typename": "Country",
+                                  "key": {
+                                    "name": "Serbia"
+                                  }
+                                },
+                                {
+                                  "__typename": "Country",
+                                  "key": {
+                                    "name": "Indonesia"
+                                  }
+                                },
+                                {
+                                  "__typename": "Country",
+                                  "key": {
+                                    "name": "Netherlands"
+                                  }
+                                },
+                                {
+                                  "__typename": "Country",
+                                  "key": {
+                                    "name": "Portugal"
+                                  }
+                                },
+                                {
+                                  "__typename": "Country",
+                                  "key": {
+                                    "name": "Spain"
+                                  }
+                                },
+                                {
+                                  "__typename": "Country",
+                                  "key": {
+                                    "name": "Thailand"
+                                  }
+                                },
+                                {
+                                  "__typename": "Country",
+                                  "key": {
+                                    "name": "Korea"
+                                  }
+                                },
+                                {
+                                  "__typename": "Country",
+                                  "key": {
+                                    "name": "Taiwan"
+                                  }
+                                }
+                              ]
+                            }
+                          },
+                          "header": {},
+                          "method": "POST",
+                          "url": "http://localhost/graphql"
+                        },
+                        "output": {
+                          "data": {
+                            "_entities": [
+                              {
+                                "__typename": "Country",
+                                "language": "English"
+                              },
+                              {
+                                "__typename": "Country",
+                                "language": "German"
+                              },
+                              {
+                                "__typename": "Country",
+                                "language": "English"
+                              },
+                              {
+                                "__typename": "Country",
+                                "language": "Serbian"
+                              },
+                              {
+                                "__typename": "Country",
+                                "language": "Indonesian"
+                              },
+                              {
+                                "__typename": "Country",
+                                "language": "Dutch"
+                              },
+                              {
+                                "__typename": "Country",
+                                "language": "Portuguese"
+                              },
+                              {
+                                "__typename": "Country",
+                                "language": "Spanish"
+                              },
+                              {
+                                "__typename": "Country",
+                                "language": "Thai"
+                              },
+                              {
+                                "__typename": "Country",
+                                "language": "Korean"
+                              },
+                              {
+                                "__typename": "Country",
+                                "language": "Taiwanese"
+                              }
+                            ]
+                          },
+                          "extensions": {
+                            "trace": {
+                              "request": {
+                                "method": "POST",
+                                "url": "http://localhost/graphql",
+                                "headers": {
+                                  "Accept": [
+                                    "application/json"
+                                  ],
+                                  "Accept-Encoding": [
+                                    "gzip",
+                                    "deflate"
+                                  ],
+                                  "Content-Type": [
+                                    "application/json"
+                                  ]
+                                }
+                              },
+                              "response": {
+                                "status_code": 200,
+                                "status": "200 OK",
+                                "headers": {
+                                  "Content-Length": [
+                                    "531"
+                                  ],
+                                  "Content-Type": [
+                                    "application/json"
+                                  ]
+                                },
+                                "body_size": 531
+                              }
+                            }
+                          }
+                        },
+                        "duration_since_start_nanoseconds": 1,
+                        "duration_since_start_pretty": "1ns",
+                        "duration_load_nanoseconds": 1,
+                        "duration_load_pretty": "1ns",
+                        "single_flight_used": true,
+                        "single_flight_shared_response": false,
+                        "load_skipped": false,
+                        "load_stats": {
+                          "get_conn": {
+                            "duration_since_start_nanoseconds": 1,
+                            "duration_since_start_pretty": "1ns",
+                            "host_port": ""
+                          },
+                          "got_conn": {
+                            "duration_since_start_nanoseconds": 1,
+                            "duration_since_start_pretty": "1ns",
+                            "reused": false,
+                            "was_idle": false,
+                            "idle_time_nanoseconds": 0,
+                            "idle_time_pretty": ""
+                          },
+                          "got_first_response_byte": {
+                            "duration_since_start_nanoseconds": 1,
+                            "duration_since_start_pretty": "1ns"
+                          },
+                          "dns_start": {
+                            "duration_since_start_nanoseconds": 0,
+                            "duration_since_start_pretty": "",
+                            "host": ""
+                          },
+                          "dns_done": {
+                            "duration_since_start_nanoseconds": 0,
+                            "duration_since_start_pretty": ""
+                          },
+                          "connect_start": {
+                            "duration_since_start_nanoseconds": 1,
+                            "duration_since_start_pretty": "1ns",
+                            "network": "",
+                            "addr": ""
+                          },
+                          "connect_done": {
+                            "duration_since_start_nanoseconds": 1,
+                            "duration_since_start_pretty": "1ns",
+                            "network": "",
+                            "addr": ""
+                          },
+                          "tls_handshake_start": {
+                            "duration_since_start_nanoseconds": 0,
+                            "duration_since_start_pretty": ""
+                          },
+                          "tls_handshake_done": {
+                            "duration_since_start_nanoseconds": 0,
+                            "duration_since_start_pretty": ""
+                          },
+                          "wrote_headers": {
+                            "duration_since_start_nanoseconds": 1,
+                            "duration_since_start_pretty": "1ns"
+                          },
+                          "wrote_request": {
+                            "duration_since_start_nanoseconds": 1,
+                            "duration_since_start_pretty": "1ns"
+                          }
+                        }
+                      }
+                    }
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      },
+      "request": {
+        "method": "POST",
+        "url": "/graphql",
+        "headers": {
+          "Accept-Encoding": [
+            "identity"
+          ],
+          "Content-Length": [
+            "596"
+          ],
+          "User-Agent": [
+            "Go-http-client/1.1"
+          ],
+          "X-Wg-Trace": [
+            "true",
+            "enable_predictable_debug_timings"
+          ]
+        },
+        "body": {
+          "query": "{\n  employees {\n    id\n    details {\n      forename\n      surname\n      hasChildren\n    }\n    role {\n      title\n      departments\n    }\n    hobbies {\n      ... on Exercise {\n        category\n      }\n      ... on Flying {\n        planeModels\n        yearsOfExperience\n      }\n      ... on Gaming {\n        name\n        genres\n        yearsOfExperience\n      }\n      ... on Programming {\n        languages\n      }\n      ... on Travelling {\n        countriesLived {\n\t\t  language\n\t\t}\n      }\n      ... on Other {\n        name\n      }\n    }\n  }\n}",
+          "variables": {}
+        }
+      }
+    }
+  }
+}

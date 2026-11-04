@@ -1,0 +1,154 @@
+{{- $enabledRoutes := dict -}}
+{{- range $name := list "controlplane" "keycloak" "otelcollector" "graphqlmetrics" "studio" "router" "cdn" -}}
+  {{- $component := index $.Values.global $name -}}
+  {{/* Older releases upgraded with --reuse-values do not have ingress settings. */}}
+  {{- $ingress := $component.ingress | default dict -}}
+  {{- if and $component.enabled (or (not (hasKey $ingress "enabled")) $ingress.enabled) -}}
+    {{- $_ := set $enabledRoutes $name true -}}
+  {{- end -}}
+{{- end -}}
+{{- if and .Values.ingress.enabled (or $enabledRoutes .Values.ingress.defaultBackend) -}}
+{{- $fullName := include "cosmo.fullname" . -}}
+{{- if and .Values.ingress.className (not (semverCompare ">=1.18-0" .Capabilities.KubeVersion.GitVersion)) }}
+  {{- if not (hasKey .Values.ingress.annotations "kubernetes.io/ingress.class") }}
+  {{- $_ := set .Values.ingress.annotations "kubernetes.io/ingress.class" .Values.ingress.className}}
+  {{- end }}
+{{- end }}
+{{- if semverCompare ">=1.19-0" .Capabilities.KubeVersion.GitVersion -}}
+apiVersion: networking.k8s.io/v1
+{{- else if semverCompare ">=1.14-0" .Capabilities.KubeVersion.GitVersion -}}
+apiVersion: networking.k8s.io/v1beta1
+{{- else -}}
+apiVersion: extensions/v1beta1
+{{- end }}
+kind: Ingress
+metadata:
+  name: {{ $fullName }}
+  labels:
+    {{- include "cosmo.labels" . | nindent 4 }}
+  {{- with .Values.ingress.annotations }}
+  annotations:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+spec:
+  {{- if and .Values.ingress.className (semverCompare ">=1.18-0" .Capabilities.KubeVersion.GitVersion) }}
+  ingressClassName: {{ .Values.ingress.className }}
+  {{- end }}
+  {{- if .Values.ingress.tls }}
+  tls:
+    {{- range .Values.ingress.tls }}
+    - hosts:
+        {{- range .hosts }}
+        - {{ . | quote }}
+        {{- end }}
+      secretName: {{ .secretName }}
+    {{- end }}
+  {{- end }}
+  {{- if .Values.ingress.defaultBackend }}
+  {{- if semverCompare ">=1.19-0" .Capabilities.KubeVersion.GitVersion }}
+  defaultBackend:
+    service:
+      name: {{ .Values.ingress.defaultBackend.name }}
+      port:
+        number: {{ .Values.ingress.defaultBackend.port }}
+  {{- else }}
+  backend:
+    serviceName: {{ .Values.ingress.defaultBackend.name }}
+    servicePort: {{ .Values.ingress.defaultBackend.port }}
+  {{- end }}
+  {{- end }}
+  {{- if $enabledRoutes }}
+  rules:
+    {{- if hasKey $enabledRoutes "controlplane" }}
+    - host: {{ (urlParse .Values.global.controlplane.webUrl).host | quote }}
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: {{ include "controlplane.fullname" . }}
+                port:
+                  number: {{ .Values.global.controlplane.port }}
+    {{- end }}
+
+    {{- if hasKey $enabledRoutes "keycloak" }}
+    - host: {{ (urlParse .Values.global.keycloak.webUrl).host | quote }}
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: {{ include "keycloak.fullname" . }}-http
+                port:
+                  number: {{ .Values.global.keycloak.port }}
+    {{- end }}
+
+    {{- if hasKey $enabledRoutes "otelcollector" }}
+    - host: {{ (urlParse .Values.global.otelcollector.webUrl).host | quote }}
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: {{ include "otelcollector.fullname" . }}
+                port:
+                  number: {{ .Values.global.otelcollector.port }}
+    {{- end }}
+
+    {{- if hasKey $enabledRoutes "graphqlmetrics" }}
+    - host: {{ (urlParse .Values.global.graphqlmetrics.webUrl).host | quote }}
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: {{ include "graphqlmetrics.fullname" . }}
+                port:
+                  number: {{ .Values.global.graphqlmetrics.port }}
+    {{- end }}
+
+    {{- if hasKey $enabledRoutes "studio" }}
+    - host: {{ (urlParse .Values.global.studio.webUrl).host | quote }}
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: {{ include "studio.fullname" . }}
+                port:
+                  number: {{ .Values.global.studio.port }}
+    {{- end }}
+
+    {{- if hasKey $enabledRoutes "router" }}
+    - host: {{ (urlParse .Values.global.router.webUrl).host | quote }}
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: {{ include "router.fullname" . }}
+                port:
+                  number: {{ .Values.global.router.port }}
+    {{- end }}
+
+    {{- if hasKey $enabledRoutes "cdn" }}
+    - host: {{ (urlParse .Values.global.cdn.webUrl).host | quote }}
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: {{ include "cdn.fullname" . }}
+                port:
+                  number: {{ .Values.global.cdn.port }}
+    {{- end }}
+
+{{- end }}
+{{- end }}

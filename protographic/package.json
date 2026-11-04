@@ -1,0 +1,49 @@
+{
+  "name": "@wundergraph/protographic",
+  "version": "0.24.23",
+  "type": "module",
+  "main": "dist/src/index.js",
+  "types": "dist/src/index.d.ts",
+  "author": {
+    "name": "WunderGraph Maintainers",
+    "email": "info@wundergraph.com"
+  },
+  "files": [
+    "dist"
+  ],
+  "license": "Apache-2.0",
+  "publishConfig": {
+    "access": "public"
+  },
+  "repository": {
+    "url": "https://github.com/wundergraph/cosmo"
+  },
+  "scripts": {
+    "test": "vitest run",
+    "test:coverage": "vitest run --coverage",
+    "test:update": "vitest run -u",
+    "build": "tsc",
+    "bench": "vitest bench --run",
+    "lint": "eslint --cache --ext .ts,.mjs,.cjs . && prettier -c src",
+    "lint:fix": "eslint --cache --fix --ext .ts,.mjs,.cjs . && pnpm format",
+    "format": "prettier -w ."
+  },
+  "devDependencies": {
+    "@types/lodash-es": "catalog:",
+    "@types/node": "catalog:",
+    "@vitest/coverage-v8": "catalog:",
+    "eslint": "catalog:",
+    "eslint-config-unjs": "catalog:",
+    "eslint-plugin-require-extensions": "catalog:",
+    "typescript": "catalog:",
+    "vitest": "catalog:"
+  },
+  "dependencies": {
+    "@bufbuild/protobuf": "catalog:",
+    "@wundergraph/composition": "workspace:*",
+    "@wundergraph/cosmo-connect": "workspace:*",
+    "graphql": "catalog:",
+    "lodash-es": "catalog:",
+    "protobufjs": "^7.6.0"
+  }
+}

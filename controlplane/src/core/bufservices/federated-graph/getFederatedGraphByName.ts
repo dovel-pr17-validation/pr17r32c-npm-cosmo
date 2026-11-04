@@ -1,0 +1,119 @@
+import { HandlerContext } from '@connectrpc/connect';
+import { EnumStatusCode } from '@wundergraph/cosmo-connect/dist/common/common_pb';
+import {
+  GetFederatedGraphByNameRequest,
+  GetFederatedGraphByNameResponse,
+  RequestSeriesItem,
+} from '@wundergraph/cosmo-connect/dist/platform/v1/platform_pb';
+import { PlainMessage } from '../../../types/index.js';
+import { UnauthorizedError } from '../../errors/errors.js';
+import { FeatureFlagRepository } from '../../repositories/FeatureFlagRepository.js';
+import { FederatedGraphRepository } from '../../repositories/FederatedGraphRepository.js';
+import { DefaultNamespace } from '../../repositories/NamespaceRepository.js';
+import { SubgraphRepository } from '../../repositories/SubgraphRepository.js';
+import { AnalyticsDashboardViewRepository } from '../../repositories/analytics/AnalyticsDashboardViewRepository.js';
+import type { RouterOptions } from '../../routes.js';
+import { convertToSubgraphProto, enrichLogger, getLogger, handleError } from '../../util.js';
+
+export function getFederatedGraphByName(
+  opts: RouterOptions,
+  req: GetFederatedGraphByNameRequest,
+  ctx: HandlerContext,
+): Promise<PlainMessage<GetFederatedGraphByNameResponse>> {
+  let logger = getLogger(ctx, opts.logger);
+
+  return handleError<PlainMessage<GetFederatedGraphByNameResponse>>(ctx, logger, async () => {
+    const authContext = await opts.authenticator.authenticate(ctx.requestHeader);
+    logger = enrichLogger(ctx, logger, authContext);
+
+    const fedRepo = new FederatedGraphRepository(logger, opts.db, authContext.organizationId);
+    const subgraphRepo = new SubgraphRepository(logger, opts.db, authContext.organizationId);
+    const featureFlagRepo = new FeatureFlagRepository(logger, opts.db, authContext.organizationId);
+
+    req.namespace = req.namespace || DefaultNamespace;
+
+    const federatedGraph = await fedRepo.byName(req.name, req.namespace);
+    if (!federatedGraph) {
+      return {
+        subgraphs: [],
+        featureSubgraphs: [],
+        graphRequestToken: '',
+        response: {
+          code: EnumStatusCode.ERR_NOT_FOUND,
+          details: `Graph '${req.name}' not found`,
+        },
+      };
+    }
+
+    if (!authContext.rbac.hasFederatedGraphReadAccess(federatedGraph)) {
+      throw new UnauthorizedError();
+    }
+
+    let requestSeries: PlainMessage<RequestSeriesItem>[] = [];
+    if (req.includeMetrics && opts.chClient) {
+      const analyticsDashRepo = new AnalyticsDashboardViewRepository(opts.chClient);
+      requestSeries = await analyticsDashRepo.getWeeklyRequestSeries(federatedGraph.id, authContext.organizationId);
+    }
+
+    const list = await subgraphRepo.listByFederatedGraph({
+      federatedGraphTargetId: federatedGraph.targetId,
+      published: false,
+      rbac: authContext.rbac,
+    });
+
+    // Feature subgraphs of the feature flags that match this federated graph
+    const { featureSubgraphs } = await featureFlagRepo.getFeatureSubgraphsByFederatedGraph({
+      federatedGraphId: federatedGraph.id,
+      namespaceId: federatedGraph.namespaceId,
+      fedGraphLabelMatchers: federatedGraph.labelMatchers,
+      limit: 0,
+      offset: 0,
+      rbac: authContext.rbac,
+    });
+
+    const routerRequestToken = await fedRepo.getGraphSignedToken({
+      federatedGraphId: federatedGraph.id,
+      organizationId: authContext.organizationId,
+    });
+
+    if (!routerRequestToken) {
+      return {
+        subgraphs: [],
+        featureSubgraphs: [],
+        graphRequestToken: '',
+        response: {
+          code: EnumStatusCode.ERR,
+          details: 'Router Request token not found',
+        },
+      };
+    }
+
+    return {
+      graph: {
+        id: federatedGraph.id,
+        targetId: federatedGraph.targetId,
+        name: federatedGraph.name,
+        namespace: federatedGraph.namespace,
+        routingURL: federatedGraph.routingUrl,
+        labelMatchers: federatedGraph.labelMatchers,
+        lastUpdatedAt: federatedGraph.lastUpdatedAt,
+        connectedSubgraphs: federatedGraph.subgraphsCount,
+        compositionErrors: federatedGraph.compositionErrors ?? '',
+        compositionId: federatedGraph.compositionId,
+        isComposable: federatedGraph.isComposable,
+        requestSeries,
+        readme: federatedGraph.readme,
+        supportsFederation: federatedGraph.supportsFederation,
+        contract: federatedGraph.contract,
+        admissionWebhookUrl: federatedGraph.admissionWebhookURL,
+        routerCompatibilityVersion: federatedGraph.routerCompatibilityVersion,
+      },
+      subgraphs: list.map((g) => convertToSubgraphProto(g)),
+      featureSubgraphs: featureSubgraphs.map((g) => convertToSubgraphProto(g)),
+      graphRequestToken: routerRequestToken,
+      response: {
+        code: EnumStatusCode.OK,
+      },
+    };
+  });
+}

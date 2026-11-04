@@ -1,0 +1,164 @@
+import { create } from '@bufbuild/protobuf';
+import { HandlerContext } from '@connectrpc/connect';
+import { EnumStatusCode } from '@wundergraph/cosmo-connect/dist/common/common_pb';
+import {
+  GetProposalsByFederatedGraphRequest,
+  GetProposalsByFederatedGraphResponse,
+  ProposalSchema,
+} from '@wundergraph/cosmo-connect/dist/platform/v1/platform_pb';
+import { FederatedGraphRepository } from '../../repositories/FederatedGraphRepository.js';
+import { ProposalRepository } from '../../repositories/ProposalRepository.js';
+import type { RouterOptions } from '../../routes.js';
+import { clamp, enrichLogger, fromProposalOriginEnum, getLogger, handleError, validateDateRanges } from '../../util.js';
+import { OrganizationRepository } from '../../repositories/OrganizationRepository.js';
+import { DefaultNamespace, NamespaceRepository } from '../../repositories/NamespaceRepository.js';
+import { UnauthorizedError } from '../../errors/errors.js';
+import type { PlainMessage } from '../../../types/index.js';
+
+export function getProposalsByFederatedGraph(
+  opts: RouterOptions,
+  req: GetProposalsByFederatedGraphRequest,
+  ctx: HandlerContext,
+): Promise<PlainMessage<GetProposalsByFederatedGraphResponse>> {
+  let logger = getLogger(ctx, opts.logger);
+
+  return handleError<PlainMessage<GetProposalsByFederatedGraphResponse>>(ctx, logger, async () => {
+    const authContext = await opts.authenticator.authenticate(ctx.requestHeader);
+    logger = enrichLogger(ctx, logger, authContext);
+
+    const federatedGraphRepo = new FederatedGraphRepository(logger, opts.db, authContext.organizationId);
+    const proposalRepo = new ProposalRepository(opts.db, authContext.organizationId);
+    const orgRepo = new OrganizationRepository(logger, opts.db, opts.billingDefaultPlanId);
+    const namespaceRepo = new NamespaceRepository(opts.db, authContext.organizationId);
+
+    req.namespace = req.namespace || DefaultNamespace;
+
+    const namespace = await namespaceRepo.byName(req.namespace);
+    if (!namespace) {
+      return {
+        response: {
+          code: EnumStatusCode.ERR_NOT_FOUND,
+          details: `Namespace ${req.namespace} not found`,
+        },
+        proposals: [],
+        isProposalsEnabled: false,
+        totalCount: 0,
+      };
+    }
+
+    if (!namespace.enableProposals) {
+      return {
+        response: {
+          code: EnumStatusCode.ERR,
+          details: `Proposals are not enabled for namespace ${req.namespace}`,
+        },
+        proposals: [],
+        isProposalsEnabled: false,
+        totalCount: 0,
+      };
+    }
+
+    const federatedGraph = await federatedGraphRepo.byName(req.federatedGraphName, req.namespace);
+    if (!federatedGraph) {
+      return {
+        response: {
+          code: EnumStatusCode.ERR_NOT_FOUND,
+          details: `Federated graph ${req.federatedGraphName} not found`,
+        },
+        proposals: [],
+        isProposalsEnabled: namespace.enableProposals,
+        totalCount: 0,
+      };
+    }
+
+    if (!authContext.rbac.hasFederatedGraphReadAccess(federatedGraph)) {
+      throw new UnauthorizedError();
+    }
+
+    const breakingChangeRetention = await orgRepo.getFeature({
+      organizationId: authContext.organizationId,
+      featureId: 'breaking-change-retention',
+    });
+
+    const { dateRange } = validateDateRanges({
+      limit: breakingChangeRetention?.limit ?? 7,
+      dateRange: {
+        start: req.startDate,
+        end: req.endDate,
+      },
+    });
+
+    if (!dateRange) {
+      return {
+        response: {
+          code: EnumStatusCode.ERR,
+          details: 'Invalid date range',
+        },
+        proposals: [],
+        isProposalsEnabled: namespace.enableProposals,
+        totalCount: 0,
+      };
+    }
+
+    // default to 10 if no limit is provided
+    req.limit = clamp(req.limit || 10, 1, 50);
+    req.offset = clamp(req.offset || 0, 0, 500_000);
+
+    const { proposals } = await proposalRepo.ByFederatedGraphId({
+      federatedGraphId: federatedGraph.id,
+      proposalName: req.proposalName,
+      startDate: dateRange.start,
+      endDate: dateRange.end,
+      limit: req.limit,
+      offset: req.offset,
+    });
+
+    const totalCount = await proposalRepo.countByFederatedGraphId({
+      federatedGraphId: federatedGraph.id,
+      proposalName: req.proposalName,
+      startDate: dateRange.start,
+      endDate: dateRange.end,
+    });
+
+    // Get the latest check success for each proposal
+    const proposalsWithChecks = await Promise.all(
+      proposals.map(async (proposal) => {
+        const latestCheck = await proposalRepo.getLatestCheckForProposal(proposal.proposal.id);
+        return {
+          ...proposal,
+          latestCheckSuccess: latestCheck?.isSuccessful || false,
+          latestCheckId: latestCheck?.checkId || '',
+        };
+      }),
+    );
+
+    return {
+      response: {
+        code: EnumStatusCode.OK,
+      },
+      proposals: proposalsWithChecks.map((proposal) =>
+        create(ProposalSchema, {
+          id: proposal.proposal.id,
+          name: proposal.proposal.name,
+          createdAt: proposal.proposal.createdAt,
+          createdByEmail: proposal.proposal.createdByEmail || '',
+          state: proposal.proposal.state,
+          federatedGraphId: proposal.proposal.federatedGraphId,
+          federatedGraphName: req.federatedGraphName,
+          subgraphs: proposal.proposalSubgraphs.map((subgraph) => ({
+            name: subgraph.subgraphName,
+            schemaSDL: subgraph.schemaSDL,
+            isDeleted: subgraph.isDeleted,
+            isNew: subgraph.isNew,
+            labels: subgraph.labels || [],
+          })),
+          latestCheckSuccess: proposal.latestCheckSuccess,
+          latestCheckId: proposal.latestCheckId,
+          origin: fromProposalOriginEnum(proposal.proposal.origin),
+        }),
+      ),
+      isProposalsEnabled: true,
+      totalCount,
+    };
+  });
+}

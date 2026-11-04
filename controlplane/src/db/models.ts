@@ -1,0 +1,200 @@
+import {
+  billingPlans,
+  billingSubscriptions,
+  federatedGraphs,
+  memberRoleEnum,
+  organizationRoleEnum,
+  organizationFeatures,
+  schemaCheckChangeAction,
+  schemaCheckChangeActionOperationUsage,
+  subgraphs,
+  targets,
+  websocketSubprotocolEnum,
+  webhookDeliveries,
+  graphPruningRulesEnum,
+  cacheWarmerOperations,
+  proposalStateEnum,
+  proposalOriginEnum,
+  proposalMatchEnum,
+  schemaChangeTypeEnum,
+  subgraphTypeEnum,
+  batchPublishJobStatusEnum,
+  batchPublishJobDetails,
+} from './schema.js';
+
+export type FederatedGraph = typeof federatedGraphs.$inferSelect;
+export type Subgraph = typeof subgraphs.$inferSelect;
+export type Target = typeof targets.$inferSelect;
+export type SchemaCheckChangeAction = typeof schemaCheckChangeAction.$inferSelect;
+export type NewSchemaChangeOperationUsage = typeof schemaCheckChangeActionOperationUsage.$inferInsert;
+export type NewOrganizationFeature = typeof organizationFeatures.$inferInsert;
+export type NewBillingSubscription = typeof billingSubscriptions.$inferInsert;
+export type NewBillingPlan = typeof billingPlans.$inferInsert;
+export type MemberRole = (typeof memberRoleEnum.enumValues)[number];
+export type OrganizationRole = (typeof organizationRoleEnum.enumValues)[number];
+export type GraphPruningRuleEnum = (typeof graphPruningRulesEnum.enumValues)[number];
+export type WebsocketSubprotocol = (typeof websocketSubprotocolEnum.enumValues)[number];
+export type CacheWarmupOperation = typeof cacheWarmerOperations.$inferInsert;
+export type ProposalState = (typeof proposalStateEnum.enumValues)[number];
+export type ProposalOrigin = (typeof proposalOriginEnum.enumValues)[number];
+export type ProposalMatch = (typeof proposalMatchEnum.enumValues)[number];
+export type WebhookDeliveryInfo = typeof webhookDeliveries.$inferInsert;
+export type DBSchemaChangeType = (typeof schemaChangeTypeEnum.enumValues)[number];
+export type DBSubgraphType = (typeof subgraphTypeEnum.enumValues)[number];
+export type BatchPublishJobStatus = (typeof batchPublishJobStatusEnum.enumValues)[number];
+export type NewBatchPublishJobDetails = typeof batchPublishJobDetails.$inferInsert;
+
+export type AuditableType =
+  | 'organization'
+  | 'group'
+  | 'subgraph'
+  | 'federated_graph'
+  | 'monograph'
+  | 'feature_subgraph'
+  | 'feature_flag'
+  | 'graph_token'
+  | 'api_key'
+  | 'api_key_group'
+  | 'webhook_config'
+  | 'integration'
+  | 'member_group'
+  | 'user'
+  | 'subscription'
+  | 'namespace'
+  | 'router_config'
+  | 'operation_change_override'
+  | 'operation_ignore_all_override'
+  | 'proposal'
+  | 'namespace_sso_mapping'
+  | 'organization_login_methods'
+  | 'graph_collection'
+  | 'graph_collection_operation';
+
+export type AuditTargetType =
+  | 'organization'
+  | 'graph_collection'
+  | 'subgraph'
+  | 'federated_graph'
+  | 'monograph'
+  | 'user'
+  | 'group'
+  | 'api_key';
+
+export type AuditActorType = 'user' | 'system' | 'api_key';
+
+export type AuditLogAction =
+  | 'created'
+  | 'updated'
+  | 'renamed'
+  | 'shared'
+  | 'deleted'
+  | 'queued_deletion'
+  | 'restore'
+  | 'moved'
+  | 'accepted'
+  | 'declined'
+  | 'joined'
+  | 'canceled'
+  | 'activated'
+  | 'upgraded'
+  | 'left'
+  | 'fetched'
+  | 'disabled'
+  | 'enabled'
+  | 'added'
+  | 'removed'
+  | 'linked'
+  | 'unlinked'
+  | 'recomposed';
+
+export type AuditLogFullAction =
+  | 'namespace.created'
+  | 'namespace.deleted'
+  | 'organization.created'
+  | 'organization.updated'
+  | 'organization.deletion_queued'
+  | 'organization.restored'
+  | 'group.created'
+  | 'group.deleted'
+  | 'group.members_moved'
+  | 'graph_token.created'
+  | 'graph_token.deleted'
+  | 'monograph.created'
+  | 'monograph.deleted'
+  | 'monograph.moved'
+  | 'monograph.recomposed'
+  | 'monograph.updated'
+  | 'federated_graph.created'
+  | 'federated_graph.deleted'
+  | 'federated_graph.moved'
+  | 'federated_graph.recomposed'
+  | 'federated_graph.updated'
+  | 'subgraph.created'
+  | 'subgraph.deleted'
+  | 'subgraph.updated'
+  | 'subgraph.moved'
+  | 'subgraph.linked'
+  | 'subgraph.unlinked'
+  | 'feature_flag.created'
+  | 'feature_flag.deleted'
+  | 'feature_flag.disabled'
+  | 'feature_flag.enabled'
+  | 'feature_flag.recomposed'
+  | 'feature_subgraph.created'
+  | 'feature_subgraph.deleted'
+  | 'feature_subgraph.published'
+  | 'feature_subgraph.updated'
+  | 'feature_flag.updated'
+  | 'subgraph_member.created'
+  | 'subgraph_member.deleted'
+  | 'webhook_config.created'
+  | 'webhook_config.deleted'
+  | 'webhook_config.updated'
+  | 'organization_details.updated'
+  | 'integration.created'
+  | 'integration.deleted'
+  | 'integration.updated'
+  | 'api_key.created'
+  | 'api_key.deleted'
+  | 'api_key.group_updated'
+  | 'subscription.created'
+  | 'subscription.activated'
+  | 'subscription.deleted'
+  | 'subscription.canceled'
+  | 'subscription.upgraded'
+  | 'graph_collection.created'
+  | 'graph_collection.renamed'
+  | 'graph_collection.deleted'
+  | 'graph_collection.shared'
+  | 'graph_collection_operation.created'
+  | 'graph_collection_operation.updated'
+  | 'graph_collection_operation.renamed'
+  | 'graph_collection_operation.deleted'
+  | 'organization_invitation.created'
+  | 'organization_invitation.deleted'
+  | 'organization.joined'
+  | 'organization.left'
+  | 'organization_invitation.declined'
+  | 'organization_member.deleted'
+  | 'member_group.updated'
+  | 'member_group.added'
+  | 'member_group.removed'
+  | 'router_config.fetched'
+  | 'operation_change_override.created'
+  | 'operation_change_override.deleted'
+  | 'operation_ignore_override.created'
+  | 'operation_ignore_override.deleted'
+  | 'proposal.created'
+  | 'proposal.updated'
+  | 'proposal.approved'
+  | 'proposal.published'
+  | 'proposal.closed'
+  | 'proposal.enabled'
+  | 'proposal.disabled'
+  | 'namespace_proposal_config.updated'
+  | 'namespace_sso_mapping.updated'
+  | 'organization_login_methods.updated'
+  | 'scim.organization_invitation_created'
+  | 'scim.update_organization_member'
+  | 'scim.activate_organization_member'
+  | 'scim.deactivate_organization_member';

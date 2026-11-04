@@ -1,0 +1,798 @@
+{
+  "Version": "1",
+  "InstanceID": "",
+  "Graph": {
+    "Token": "token",
+    "SignKey": ""
+  },
+  "Telemetry": {
+    "ServiceName": "cosmo-router",
+    "Attributes": null,
+    "ResourceAttributes": null,
+    "Tracing": {
+      "Enabled": true,
+      "SamplingRate": 1,
+      "ParentBasedSampler": true,
+      "Exporters": null,
+      "Propagation": {
+        "TraceContext": true,
+        "Jaeger": false,
+        "B3": false,
+        "Baggage": false,
+        "Datadog": false
+      },
+      "ResponseTraceHeader": {
+        "Enabled": false,
+        "HeaderName": "x-wg-trace-id"
+      },
+      "Attributes": null,
+      "OperationContentAttributes": false,
+      "ExportGraphQLVariables": false,
+      "WithNewRoot": false,
+      "SanitizeUTF8": {
+        "Enabled": false,
+        "LogSanitizations": false
+      }
+    },
+    "Metrics": {
+      "Attributes": null,
+      "OTLP": {
+        "Enabled": true,
+        "RouterRuntime": true,
+        "GraphqlCache": false,
+        "ResponseCache": false,
+        "ConnectionStats": false,
+        "Network": {
+          "Enabled": false
+        },
+        "Resolver": {
+          "Enabled": false
+        },
+        "EngineStats": {
+          "Subscriptions": false
+        },
+        "CostStats": {
+          "EstimatedEnabled": false,
+          "ActualEnabled": false
+        },
+        "CircuitBreaker": false,
+        "Streams": false,
+        "ExcludeMetrics": null,
+        "ExcludeMetricLabels": null,
+        "Exporters": null,
+        "LogExporter": {
+          "Enabled": false,
+          "ExcludeMetrics": null,
+          "IncludeMetrics": null
+        },
+        "ExemplarFilter": "always_off"
+      },
+      "Prometheus": {
+        "Enabled": true,
+        "Path": "/metrics",
+        "ListenAddr": "127.0.0.1:8088",
+        "GraphqlCache": false,
+        "ResponseCache": false,
+        "ConnectionStats": false,
+        "Network": {
+          "Enabled": false
+        },
+        "Resolver": {
+          "Enabled": false
+        },
+        "Streams": false,
+        "EngineStats": {
+          "Subscriptions": false
+        },
+        "CostStats": {
+          "EstimatedEnabled": false,
+          "ActualEnabled": false
+        },
+        "CircuitBreaker": false,
+        "ExcludeMetrics": null,
+        "ExcludeMetricLabels": null,
+        "ExcludeScopeInfo": false,
+        "SchemaFieldUsage": {
+          "Enabled": false,
+          "IncludeOperationSha": false,
+          "Exporter": {
+            "BatchSize": 4096,
+            "QueueSize": 12800,
+            "Interval": 2000000000,
+            "ExportTimeout": 10000000000
+          }
+        },
+        "ExemplarFilter": "always_off"
+      },
+      "CardinalityLimit": 2000
+    }
+  },
+  "Pyroscope": {
+    "Enabled": false,
+    "ServerAddress": "",
+    "ApplicationName": "wundergraph.cosmo.router",
+    "BasicAuth": {
+      "Username": "",
+      "Password": ""
+    },
+    "Headers": null,
+    "Tags": null,
+    "UploadRate": 15000000000,
+    "ProfileTypes": null,
+    "DisableGCRuns": false,
+    "MutexProfileFraction": 5,
+    "BlockProfileRate": 5
+  },
+  "GraphqlMetrics": {
+    "Enabled": true,
+    "CollectorEndpoint": "https://cosmo-metrics.wundergraph.com"
+  },
+  "CORS": {
+    "Enabled": true,
+    "AllowOrigins": [
+      "*"
+    ],
+    "MatchOrigins": null,
+    "AllowMethods": [
+      "HEAD",
+      "GET",
+      "POST"
+    ],
+    "AllowHeaders": [
+      "Origin",
+      "Content-Length",
+      "Content-Type"
+    ],
+    "ExposeHeaders": null,
+    "AllowCredentials": true,
+    "MaxAge": 300000000000
+  },
+  "Cluster": {
+    "Name": ""
+  },
+  "Compliance": {
+    "AnonymizeIP": {
+      "Enabled": true,
+      "Method": "redact"
+    }
+  },
+  "TLS": {
+    "Server": {
+      "Enabled": false,
+      "CertFile": "",
+      "KeyFile": "",
+      "ClientAuth": {
+        "CertFile": "",
+        "Required": false
+      }
+    },
+    "Client": {
+      "All": {
+        "CertFile": "",
+        "KeyFile": "",
+        "CaFile": "",
+        "InsecureSkipCaVerification": false
+      },
+      "Subgraphs": null
+    },
+    "ClientGRPC": {
+      "All": {
+        "CertFile": "",
+        "KeyFile": "",
+        "CaFile": "",
+        "InsecureSkipCaVerification": false,
+        "Enabled": false
+      },
+      "Subgraphs": null
+    }
+  },
+  "CacheControl": {
+    "Enabled": false,
+    "Value": "",
+    "Subgraphs": null
+  },
+  "MCP": {
+    "Enabled": false,
+    "Server": {
+      "ListenAddr": "localhost:5025",
+      "BaseURL": "",
+      "Version": "",
+      "Title": "",
+      "Description": "",
+      "Discover": {
+        "Instructions": ""
+      }
+    },
+    "Storage": {
+      "ProviderID": ""
+    },
+    "Session": {
+      "Stateless": true
+    },
+    "GraphName": "mygraph",
+    "ExcludeMutations": false,
+    "EnableArbitraryOperations": false,
+    "ExposeSchema": false,
+    "RouterURL": "",
+    "OmitToolNamePrefix": false,
+    "OmitToolTitlePrefix": false,
+    "OAuth": {
+      "Enabled": false,
+      "JWKS": null,
+      "AuthorizationServerURL": "",
+      "AuthorizationServerURLs": null,
+      "Scopes": {
+        "Initialize": null,
+        "ToolsList": null,
+        "ToolsCall": null,
+        "ExecuteGraphQL": null,
+        "GetOperationInfo": null,
+        "GetSchema": null,
+        "GenerateQuery": null
+      },
+      "ScopeChallengeIncludeTokenScopes": false,
+      "MaxScopeCombinations": 2048
+    },
+    "ResourceDocumentation": "",
+    "OutputSchema": {
+      "Enabled": false
+    }
+  },
+  "ConnectRPC": {
+    "Enabled": false,
+    "Server": {
+      "ListenAddr": "localhost:5026",
+      "BaseURL": ""
+    },
+    "Storage": {
+      "ProviderID": ""
+    },
+    "GraphQLEndpoint": ""
+  },
+  "DemoMode": false,
+  "Modules": null,
+  "Headers": {
+    "All": null,
+    "Subgraphs": null,
+    "CookieWhitelist": null,
+    "Router": {
+      "Response": null
+    }
+  },
+  "TrafficShaping": {
+    "All": {
+      "BackoffJitterRetry": {
+        "Enabled": true,
+        "Algorithm": "backoff_jitter",
+        "MaxAttempts": 5,
+        "MaxDuration": 10000000000,
+        "Interval": 3000000000,
+        "Expression": "IsRetryableStatusCode() || IsConnectionError() || IsTimeout()"
+      },
+      "CircuitBreaker": {
+        "Enabled": false,
+        "ErrorThresholdPercentage": 50,
+        "RequestThreshold": 20,
+        "SleepWindow": 5000000000,
+        "HalfOpenAttempts": 1,
+        "RequiredSuccessfulAttempts": 1,
+        "RollingDuration": 10000000000,
+        "NumBuckets": 10,
+        "ExecutionTimeout": 60000000000,
+        "MaxConcurrentRequests": -1
+      },
+      "RequestTimeout": 60000000000,
+      "DialTimeout": 30000000000,
+      "ResponseHeaderTimeout": 0,
+      "ExpectContinueTimeout": 0,
+      "TLSHandshakeTimeout": 10000000000,
+      "KeepAliveIdleTimeout": 90000000000,
+      "KeepAliveProbeInterval": 30000000000,
+      "MaxConnsPerHost": 100,
+      "MaxIdleConns": 1024,
+      "MaxIdleConnsPerHost": 20
+    },
+    "Router": {
+      "MaxRequestBodyBytes": 5000000,
+      "MaxHeaderBytes": 0,
+      "DecompressionEnabled": true,
+      "ResponseCompressionMinSize": 4096
+    },
+    "Subgraphs": null
+  },
+  "FileUpload": {
+    "Enabled": true,
+    "MaxFileSizeBytes": 50000000,
+    "MaxFiles": 10
+  },
+  "AccessLogs": {
+    "Enabled": true,
+    "Level": "info",
+    "AddStacktrace": false,
+    "Buffer": {
+      "Enabled": false,
+      "Size": 256000,
+      "FlushInterval": 10000000000
+    },
+    "Output": {
+      "Stdout": {
+        "Enabled": true
+      },
+      "File": {
+        "Enabled": false,
+        "Path": "access.log",
+        "Mode": 416
+      }
+    },
+    "Router": {
+      "Filter": "",
+      "Fields": null,
+      "IgnoreQueryParamsList": [
+        "variables"
+      ]
+    },
+    "Subgraphs": {
+      "Filter": "",
+      "Enabled": false,
+      "Fields": null
+    }
+  },
+  "Batching": {
+    "Enabled": false,
+    "MaxConcurrency": 10,
+    "MaxEntriesPerBatch": 100,
+    "OmitExtensions": false
+  },
+  "ListenAddr": "localhost:3002",
+  "ControlplaneURL": "https://cosmo-cp.wundergraph.com",
+  "PlaygroundConfig": {
+    "Enabled": true,
+    "Path": "/",
+    "ConcurrencyLimit": 10
+  },
+  "PlaygroundEnabled": true,
+  "IntrospectionEnabled": true,
+  "IntrospectionConfig": {
+    "Enabled": true,
+    "Secret": ""
+  },
+  "QueryPlansEnabled": true,
+  "LogLevel": "info",
+  "JSONLog": true,
+  "LogServiceName": "@wundergraph/router",
+  "ShutdownDelay": 60000000000,
+  "GracePeriod": 30000000000,
+  "DrainPeriod": null,
+  "PollInterval": 10000000000,
+  "PollJitter": 5000000000,
+  "HealthCheckPath": "/health",
+  "ReadinessCheckPath": "/health/ready",
+  "LivenessCheckPath": "/health/live",
+  "GraphQLPath": "/graphql",
+  "PlaygroundPath": "/",
+  "Authentication": {
+    "JWT": {
+      "JWKS": null,
+      "ScopeClaim": "scope",
+      "HeaderName": "Authorization",
+      "HeaderValuePrefix": "Bearer",
+      "HeaderSources": null,
+      "OnError": "reject"
+    },
+    "IgnoreIntrospection": false
+  },
+  "Authorization": {
+    "RequireAuthentication": false,
+    "RejectOperationIfUnauthorized": false,
+    "EnablePreFetchFieldAuthorization": false
+  },
+  "RateLimit": {
+    "Enabled": false,
+    "Strategy": "simple",
+    "SimpleStrategy": {
+      "Rate": 10,
+      "Burst": 10,
+      "Period": 1000000000,
+      "RejectExceedingRequests": false,
+      "RejectStatusCode": 200,
+      "HideStatsFromResponseExtension": false,
+      "Overrides": null
+    },
+    "Storage": {
+      "URLs": null,
+      "ClusterEnabled": false,
+      "KeyPrefix": "cosmo_rate_limit"
+    },
+    "Debug": false,
+    "KeySuffixExpression": "",
+    "ErrorExtensionCode": {
+      "Enabled": true,
+      "Code": "RATE_LIMIT_EXCEEDED"
+    },
+    "ExcludeSubscriptions": false
+  },
+  "LocalhostFallbackInsideDocker": true,
+  "CDN": {
+    "URL": "https://cosmo-cdn.wundergraph.com",
+    "CacheSize": 100000000
+  },
+  "DevelopmentMode": false,
+  "Events": {
+    "Providers": {
+      "Nats": null,
+      "Kafka": null,
+      "Redis": null
+    },
+    "SkipUnavailableProviders": true,
+    "Handlers": {
+      "OnReceiveEvents": {
+        "MaxConcurrentHandlers": 100,
+        "HandlerTimeout": 5000000000
+      },
+      "BeforeEventsDispatch": {
+        "HandlerTimeout": 5000000000
+      }
+    },
+    "DeliveryGuarantees": {
+      "CursorResume": {
+        "IdentityClaim": "sub",
+        "Keys": null,
+        "MaxResumeWindow": 10800000000000
+      }
+    }
+  },
+  "CacheWarmup": {
+    "Enabled": false,
+    "Source": {
+      "Filesystem": null,
+      "CdnSource": {
+        "Enabled": true
+      }
+    },
+    "Workers": 8,
+    "ItemsPerSecond": 50,
+    "ItemDelay": 0,
+    "Timeout": 30000000000,
+    "InMemoryFallback": true
+  },
+  "ResponseCache": {
+    "Enabled": false,
+    "KeyPrefix": "cosmo_response_cache:",
+    "Storage": {
+      "Provider": "redis",
+      "ProviderID": "",
+      "MaxEntries": 10000
+    },
+    "Invalidation": {
+      "CacheTag": true,
+      "Subgraph": true,
+      "Type": true,
+      "Endpoint": {
+        "Enabled": false,
+        "ListenAddr": "localhost:5027",
+        "Path": "/invalidation",
+        "SharedKey": ""
+      }
+    },
+    "TagHeader": {
+      "Enabled": false,
+      "Name": "Cache-Tag",
+      "Delimiter": ",",
+      "Tiers": [
+        "subgraph",
+        "type",
+        "cache_tag"
+      ],
+      "MaxBytes": 16384,
+      "OnOverflow": "truncate"
+    },
+    "All": {
+      "Enabled": true,
+      "FallbackTTL": 30000000000,
+      "PrivateID": ""
+    },
+    "Subgraphs": null
+  },
+  "RouterConfigPath": "",
+  "RouterRegistration": true,
+  "OverrideRoutingURL": {
+    "Subgraphs": null
+  },
+  "Overrides": {
+    "Subgraphs": null
+  },
+  "SecurityConfiguration": {
+    "BlockMutations": {
+      "Enabled": false,
+      "Condition": ""
+    },
+    "BlockSubscriptions": {
+      "Enabled": false,
+      "Condition": ""
+    },
+    "BlockNonPersistedOperations": {
+      "Enabled": false,
+      "Condition": ""
+    },
+    "BlockPersistedOperations": {
+      "Enabled": false,
+      "Condition": ""
+    },
+    "ComplexityCalculationCache": null,
+    "ComplexityLimits": null,
+    "CostControl": null,
+    "DepthLimit": null,
+    "ParserLimits": {
+      "ApproximateDepthLimit": 200,
+      "TotalFieldsLimit": 3500
+    },
+    "OperationNameLengthLimit": 512
+  },
+  "EngineExecutionConfiguration": {
+    "Debug": {
+      "PrintOperationTransformations": false,
+      "PrintOperationEnableASTRefs": false,
+      "PrintPlanningPaths": false,
+      "PrintQueryPlans": false,
+      "PrintIntermediateQueryPlans": false,
+      "PrintNodeSuggestions": false,
+      "ConfigurationVisitor": false,
+      "PlanningVisitor": false,
+      "DatasourceVisitor": false,
+      "ReportWebSocketConnections": false,
+      "ReportMemoryUsage": false,
+      "EnableResolverDebugging": false,
+      "EnablePersistedOperationsCacheResponseHeader": false,
+      "EnableNormalizationCacheResponseHeader": false,
+      "EnableCacheResponseHeaders": false,
+      "AlwaysIncludeQueryPlan": false,
+      "AlwaysSkipLoader": false,
+      "SynchronousCacheWrites": false
+    },
+    "EnableSingleFlight": true,
+    "ForceEnableSingleFlight": false,
+    "EnableInboundRequestDeduplication": true,
+    "ForceEnableInboundRequestDeduplication": false,
+    "EnableRequestTracing": true,
+    "ForceUnauthenticatedRequestTracing": false,
+    "EnableExecutionPlanCacheResponseHeader": false,
+    "MaxConcurrentResolvers": 1024,
+    "EnableNetPoll": false,
+    "ExecutionPlanCacheSize": 1024,
+    "SlowPlanCacheSize": 300,
+    "SlowPlanCacheThreshold": 100000000,
+    "MinifySubgraphOperations": true,
+    "EnablePersistedOperationsCache": true,
+    "EnableNormalizationCache": true,
+    "NormalizationCacheSize": 1024,
+    "OperationHashCacheSize": 2048,
+    "ParseKitPoolSize": 16,
+    "EnableValidationCache": true,
+    "ValidationCacheSize": 1024,
+    "DisableExposingVariablesContentOnValidationError": false,
+    "ResolverMaxRecyclableParserSize": 32768,
+    "EnableSubgraphFetchOperationName": false,
+    "DisableVariablesRemapping": false,
+    "EnableRequireFetchReasons": false,
+    "SubscriptionFetchTimeout": 30000000000,
+    "SSEServerWriteTimeout": 10000000000,
+    "EnableDefer": false,
+    "EnableMultiFetch": true,
+    "EnableScheduleFetches": true,
+    "EnableGRPCWireEncoding": true,
+    "WebSocketServerReadTimeout": 5000000000,
+    "WebSocketServerWriteTimeout": 10000000000,
+    "WebSocketServerPollTimeout": 1000000000,
+    "WebSocketServerConnBufferSize": 128,
+    "WebSocketClientWriteTimeout": 10000000000,
+    "WebSocketClientReadLimit": 1000000,
+    "WebSocketClientPingInterval": 15000000000,
+    "WebSocketClientPingTimeout": 30000000000,
+    "WebSocketClientAckTimeout": 30000000000,
+    "ValidateRequiredExternalFields": false,
+    "RelaxSubgraphOperationFieldSelectionMergingNullability": false,
+    "AllowStringLiteralsForEnums": false,
+    "ValidateInlineArguments": {
+      "Mode": "off",
+      "EnforceHTTPStatusCode": 400,
+      "ErrorCode": "INLINE_ARGUMENT_VALUES_NOT_ALLOWED",
+      "ErrorMessage": "Inline argument values are not allowed. Use variables instead.",
+      "IncludePersistedOperations": false,
+      "ReturnInResponseExtensions": false
+    }
+  },
+  "WebSocket": {
+    "Enabled": true,
+    "AbsintheProtocol": {
+      "Enabled": true,
+      "HandlerPath": "/absinthe/socket"
+    },
+    "DefaultSubprotocol": "",
+    "ForwardUpgradeHeaders": {
+      "Enabled": true,
+      "AllowList": [
+        "Authorization"
+      ]
+    },
+    "ForwardUpgradeQueryParams": {
+      "Enabled": true,
+      "AllowList": [
+        "Authorization"
+      ]
+    },
+    "ForwardInitialPayload": true,
+    "Authentication": {
+      "FromInitialPayload": {
+        "Enabled": false,
+        "Key": "Authorization",
+        "ExportToken": {
+          "Enabled": true,
+          "HeaderKey": "Authorization"
+        }
+      }
+    },
+    "ClientInfoFromInitialPayload": {
+      "Enabled": true,
+      "NameField": "graphql-client-name",
+      "VersionField": "graphql-client-version",
+      "ForwardToRequestHeaders": {
+        "Enabled": true,
+        "NameTargetHeader": "graphql-client-name",
+        "VersionTargetHeader": "graphql-client-version"
+      }
+    }
+  },
+  "SubgraphErrorPropagation": {
+    "Enabled": true,
+    "PropagateStatusCodes": false,
+    "Mode": "wrapped",
+    "RewritePaths": true,
+    "OmitLocations": true,
+    "OmitExtensions": false,
+    "AttachServiceName": true,
+    "DefaultExtensionCode": "DOWNSTREAM_SERVICE_ERROR",
+    "AllowAllExtensionFields": false,
+    "AllowedExtensionFields": [
+      "code"
+    ],
+    "AllowedFields": null
+  },
+  "SubgraphExtensionPropagation": {
+    "Enabled": false,
+    "AllowedExtensionFields": null,
+    "Algorithm": "first_write"
+  },
+  "StorageProviders": {
+    "S3": null,
+    "CDN": null,
+    "Redis": null,
+    "FileSystem": null
+  },
+  "ExecutionConfig": {
+    "File": {
+      "Path": "",
+      "Watch": false,
+      "WatchInterval": 1000000000
+    },
+    "Storage": {
+      "ProviderID": "",
+      "ObjectPath": ""
+    },
+    "FallbackStorage": {
+      "Enabled": false,
+      "ProviderID": "",
+      "ObjectPath": ""
+    },
+    "Manifest": {
+      "Path": "",
+      "SkipMissingFeatureFlags": false,
+      "IgnoredFeatureFlags": null,
+      "Watch": false,
+      "WatchInterval": 1000000000
+    }
+  },
+  "SplitConfigPoller": {
+    "SkipMissingFeatureFlags": false,
+    "IgnoredFeatureFlags": null,
+    "FetchRetry": {
+      "MaxAttempts": 3,
+      "Interval": 100000000,
+      "MaxDuration": 2000000000
+    }
+  },
+  "PersistedOperationsConfig": {
+    "Disabled": false,
+    "LogUnknown": false,
+    "Safelist": {
+      "Enabled": false
+    },
+    "Cache": {
+      "Size": 100000000
+    },
+    "Storage": {
+      "ProviderID": "",
+      "ObjectPrefix": ""
+    },
+    "Manifest": {
+      "Enabled": false,
+      "FileName": "manifest.json",
+      "PollInterval": 10000000000,
+      "PollJitter": 5000000000,
+      "Warmup": {
+        "Enabled": true,
+        "Workers": 4,
+        "ItemsPerSecond": 50,
+        "Timeout": 30000000000
+      }
+    }
+  },
+  "AutomaticPersistedQueries": {
+    "Enabled": false,
+    "Cache": {
+      "Size": 100000000,
+      "TTL": -1
+    },
+    "Storage": {
+      "ProviderID": "",
+      "ObjectPrefix": ""
+    }
+  },
+  "ApolloCompatibilityFlags": {
+    "EnableAll": false,
+    "ValueCompletion": {
+      "Enabled": false
+    },
+    "TruncateFloats": {
+      "Enabled": false
+    },
+    "SuppressFetchErrors": {
+      "Enabled": false
+    },
+    "ReplaceUndefinedOpFieldErrors": {
+      "Enabled": false
+    },
+    "ReplaceInvalidVarErrors": {
+      "Enabled": false
+    },
+    "ReplaceValidationErrorStatus": {
+      "Enabled": false
+    },
+    "SubscriptionMultipartPrintBoundary": {
+      "Enabled": false
+    },
+    "UseGraphQLValidationFailedStatus": {
+      "Enabled": false
+    }
+  },
+  "ApolloRouterCompatibilityFlags": {
+    "ReplaceInvalidVarErrors": {
+      "Enabled": false
+    },
+    "SubrequestHTTPError": {
+      "Enabled": false
+    },
+    "SkipNullVariablesError": {
+      "Enabled": false
+    }
+  },
+  "ClientHeader": {
+    "Name": "",
+    "Version": ""
+  },
+  "Plugins": {
+    "Enabled": false,
+    "Path": "plugins",
+    "Registry": {
+      "URL": "cosmo-registry.wundergraph.com",
+      "Insecure": false
+    }
+  },
+  "WatchConfig": {
+    "Enabled": false,
+    "Interval": 10000000000,
+    "StartupDelay": {
+      "Enabled": false,
+      "Maximum": 10000000000
+    }
+  }
+}

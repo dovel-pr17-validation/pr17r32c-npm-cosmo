@@ -1,0 +1,726 @@
+import Fastify, { FastifyBaseLogger } from 'fastify';
+import { S3Client } from '@aws-sdk/client-s3';
+import { fastifyConnectPlugin } from '@connectrpc/connect-fastify';
+import * as Sentry from '@sentry/node';
+import { Client, cors, createContextValues, createClient } from '@connectrpc/connect';
+import { createConnectTransport, compressionBrotli, compressionGzip } from '@connectrpc/connect-node';
+import fastifyCors from '@fastify/cors';
+import { pino, stdTimeFunctions, LoggerOptions } from 'pino';
+import fastifyGracefulShutdown from 'fastify-graceful-shutdown';
+import { App } from 'octokit';
+import { Worker } from 'bullmq';
+import { PromptToQueryService } from '@wundergraph/cosmo-connect/dist/yoko/v1/prompt_to_query_pb';
+import routes from './routes.js';
+import { withRequestSpans } from './tracing.js';
+import fastifyHealth from './plugins/health.js';
+import fastifyMetrics from './plugins/metrics.js';
+import fastifyDatabase from './plugins/database.js';
+import fastifyClickHouse from './plugins/clickhouse.js';
+import fastifyRedis from './plugins/redis.js';
+import AuthController from './controllers/auth.js';
+import ScimController from './controllers/scim.js';
+import GitHubWebhookController from './controllers/github.js';
+import StripeWebhookController from './controllers/stripe.js';
+import { pkceCodeVerifierCookieName, userSessionCookieName } from './crypto/jwt.js';
+import ApiKeyAuthenticator from './services/ApiKeyAuthenticator.js';
+import WebSessionAuthenticator from './services/WebSessionAuthenticator.js';
+import { Authentication } from './services/Authentication.js';
+import { OrganizationRepository } from './repositories/OrganizationRepository.js';
+import GraphApiTokenAuthenticator from './services/GraphApiTokenAuthenticator.js';
+import AuthUtils from './auth-utils.js';
+import Keycloak from './services/Keycloak.js';
+import { PlatformWebhookService } from './webhooks/PlatformWebhookService.js';
+import AccessTokenAuthenticator from './services/AccessTokenAuthenticator.js';
+import { GitHubRepository } from './repositories/GitHubRepository.js';
+import { S3BlobStorage, DualBlobStorage, type BlobStorage } from './blobstorage/index.js';
+import Mailer from './services/Mailer.js';
+import { OrganizationInvitationRepository } from './repositories/OrganizationInvitationRepository.js';
+import { Authorization } from './services/Authorization.js';
+import { BillingRepository } from './repositories/BillingRepository.js';
+import { BillingService } from './services/BillingService.js';
+import { UserRepository } from './repositories/UserRepository.js';
+import { AIGraphReadmeQueue, createAIGraphReadmeWorker } from './workers/AIGraphReadmeWorker.js';
+import {
+  fastifyLoggerId,
+  sentrySpanId,
+  createS3ClientConfig,
+  extractS3BucketName,
+  isGoogleCloudStorageUrl,
+} from './util.js';
+import { ApiKeyRepository } from './repositories/ApiKeyRepository.js';
+import { OidcRepository } from './repositories/OidcRepository.js';
+import { NamespaceLoginMethodRepository } from './repositories/NamespaceLoginMethodRepository.js';
+import { OrganizationLoginMethodRepository } from './repositories/OrganizationLoginMethodRepository.js';
+import { createDeleteOrganizationWorker, DeleteOrganizationQueue } from './workers/DeleteOrganizationWorker.js';
+import {
+  createDeleteOrganizationAuditLogsWorker,
+  DeleteOrganizationAuditLogsQueue,
+} from './workers/DeleteOrganizationAuditLogsWorker.js';
+import {
+  createDeactivateOrganizationWorker,
+  DeactivateOrganizationQueue,
+} from './workers/DeactivateOrganizationWorker.js';
+import { createDeleteUserWorker, DeleteUserQueue } from './workers/DeleteUserQueue.js';
+import {
+  createReactivateOrganizationWorker,
+  ReactivateOrganizationQueue,
+} from './workers/ReactivateOrganizationWorker.js';
+import { createNotifyOrganizationDeletionQueuedWorker } from './workers/NotifyOrganizationDeletionQueuedWorker.js';
+import {
+  createDeleteBatchPublishJobDetailsWorker,
+  DeleteBatchPublishJobDetailsQueue,
+} from './workers/DeleteBatchPublishJobDetailsWorker.js';
+import { configureComposeGraphsPool, destroyComposeGraphsPool } from './composition/composeGraphs.pool.js';
+
+export interface BuildConfig {
+  logger: LoggerOptions;
+  composition?: {
+    minThreads: number;
+    maxThreads: number;
+  };
+  database: {
+    url: string;
+    tls?: {
+      cert?: string; // e.g. string or '/path/to/my/client-cert.pem'
+      ca?: string; // e.g. string or '/path/to/my/server-ca.pem'
+      key?: string; // e.g. string or '/path/to/my/client-key.pem'
+    };
+  };
+  prometheus?: MetricsOptions;
+  openaiAPIKey?: string;
+  allowedOrigins?: string[];
+  debugSQL?: boolean;
+  production?: boolean;
+  clickhouseDsn?: string;
+  keycloak: {
+    loginRealm: string;
+    realm: string;
+    clientId: string;
+    adminUser: string;
+    adminPassword: string;
+    apiUrl: string;
+    frontendUrl: string;
+  };
+  auth: {
+    webBaseUrl: string;
+    secureCookie?: boolean;
+    ssoCookieDomain?: string;
+    webErrorPath: string;
+    secret: string;
+    redirectUri: string;
+  };
+  webhook?: {
+    url?: string;
+    key?: string;
+    proxyUrl?: string;
+  };
+  githubApp?: {
+    webhookSecret?: string;
+    clientId?: string;
+    clientSecret?: string;
+    id?: string;
+    privateKey?: string;
+  };
+  slack: { clientID?: string; clientSecret?: string };
+  cdnBaseUrl: string;
+  s3Storage: {
+    url: string;
+    endpoint?: string;
+    region?: string;
+    username?: string;
+    password?: string;
+    forcePathStyle?: boolean;
+    useIndividualDeletes?: boolean;
+  };
+  s3StorageFailover?: {
+    url: string;
+    endpoint?: string;
+    region?: string;
+    username?: string;
+    password?: string;
+    forcePathStyle?: boolean;
+    useIndividualDeletes?: boolean;
+  };
+  mailer: {
+    smtpEnabled: boolean;
+    smtpHost?: string;
+    smtpPort?: number;
+    smtpUsername?: string;
+    smtpPassword?: string;
+    smtpSecure: boolean;
+    smtpRequireTls: boolean;
+  };
+  admissionWebhook: {
+    secret: string;
+  };
+  stripe?: {
+    secret?: string;
+    webhookSecret?: string;
+    defaultPlanId?: string;
+  };
+  redis: {
+    host: string;
+    port: number;
+    password?: string;
+    tls?: {
+      cert?: string; // e.g. string or '/path/to/my/client-cert.pem'
+      ca?: string; // e.g. string or '/path/to/my/server-ca.pem'
+      key?: string; // e.g. string or '/path/to/my/client-key.pem'
+    };
+  };
+  promptToQuery?: {
+    address: string | undefined;
+    httpVersion?: string;
+    token?: string;
+  };
+}
+
+export interface MetricsOptions {
+  enabled?: boolean;
+  path?: string;
+  host?: string;
+  port?: number;
+}
+
+const developmentLoggerOpts: LoggerOptions = {
+  transport: {
+    target: 'pino-pretty',
+    options: {
+      singleLine: true,
+      translateTime: 'HH:MM:ss Z',
+      ignore: 'pid,hostname',
+    },
+  },
+};
+
+export default async function build(opts: BuildConfig) {
+  configureComposeGraphsPool({
+    minThreads: opts.composition?.minThreads ?? 0,
+    maxThreads: opts.composition?.maxThreads ?? 0,
+  });
+
+  opts.logger = {
+    timestamp: stdTimeFunctions.isoTime,
+    formatters: {
+      level: (label) => {
+        return {
+          level: label,
+        };
+      },
+    },
+    ...opts.logger,
+  };
+
+  const logger = pino(opts.production ? opts.logger : { ...developmentLoggerOpts, ...opts.logger });
+
+  const fastify = Fastify({
+    loggerInstance: logger,
+    // The maximum amount of time in *milliseconds* in which a plugin can load
+    pluginTimeout: 10_000, // 10s
+  });
+
+  /**
+   * CVE-2026-25223 prevention
+   */
+  fastify.addHook('onRequest', async (request, reply) => {
+    const contentType = request.headers['content-type'];
+
+    const contentTypeNormalized = contentType || [];
+    const contentTypeValues = Array.isArray(contentTypeNormalized) ? contentTypeNormalized : [contentTypeNormalized];
+
+    if (contentTypeValues.some((v) => v.includes('\t'))) {
+      await reply.code(400).send({ error: 'Invalid Content-Type header' });
+    }
+  });
+
+  /**
+   * Plugin registration
+   */
+
+  await fastify.register(fastifyHealth);
+
+  if (opts.prometheus?.enabled) {
+    await fastify.register(fastifyMetrics, {
+      path: opts.prometheus.path,
+    });
+    await fastify.metricsServer.listen({
+      host: opts.prometheus.host,
+      port: opts.prometheus.port,
+    });
+  }
+
+  await fastify.register(fastifyDatabase, {
+    databaseConnectionUrl: opts.database.url,
+    gracefulTimeoutSec: 15,
+    tls: opts.database.tls,
+    debugSQL: opts.debugSQL,
+  });
+
+  await fastify.register(fastifyCors, {
+    // Produce an error if allowedOrigins is undefined
+    origin: opts.allowedOrigins || [],
+    methods: [...cors.allowedMethods],
+    allowedHeaders: [...cors.allowedHeaders, 'cosmo-org-slug', 'user-agent'],
+    exposedHeaders: [...cors.exposedHeaders, 'Trailer-Response-Id'],
+    credentials: true,
+    // Let browsers cache CORS information to reduce the number of
+    // preflight requests. Modern Chrome caps the value at 2h.
+    maxAge: 2 * 60 * 60,
+  });
+
+  if (opts.clickhouseDsn) {
+    await fastify.register(fastifyClickHouse, {
+      dsn: opts.clickhouseDsn,
+      logger,
+    });
+  } else {
+    logger.warn('ClickHouse connection not configured');
+  }
+
+  const authUtils = new AuthUtils(fastify.db, {
+    jwtSecret: opts.auth.secret,
+    session: {
+      cookieName: userSessionCookieName,
+    },
+    oauth: {
+      clientID: opts.keycloak.clientId,
+      redirectUri: opts.auth.redirectUri,
+      openIdApiBaseUrl: opts.keycloak.apiUrl + '/realms/' + opts.keycloak.realm,
+      openIdFrontendUrl: opts.keycloak.frontendUrl + '/realms/' + opts.keycloak.realm,
+      logoutRedirectUri: opts.auth.webBaseUrl + '/login',
+    },
+    pkce: {
+      cookieName: pkceCodeVerifierCookieName,
+    },
+    webBaseUrl: opts.auth.webBaseUrl,
+    ssoCookieDomain: opts.auth.ssoCookieDomain,
+    webErrorPath: opts.auth.webErrorPath,
+  });
+
+  const organizationRepository = new OrganizationRepository(logger, fastify.db, opts.stripe?.defaultPlanId);
+  const orgInvitationRepository = new OrganizationInvitationRepository(logger, fastify.db, opts.stripe?.defaultPlanId);
+  const apiKeyAuth = new ApiKeyAuthenticator(fastify.db, organizationRepository);
+  const userRepo = new UserRepository(logger, fastify.db);
+  const apiKeyRepository = new ApiKeyRepository(fastify.db);
+  const webAuth = new WebSessionAuthenticator(fastify.db, opts.auth.secret, userRepo);
+  const graphKeyAuth = new GraphApiTokenAuthenticator(opts.auth.secret);
+  const oidcRepository = new OidcRepository(fastify.db);
+  const namespaceLoginMethodRepository = new NamespaceLoginMethodRepository(fastify.db);
+  const organizationLoginMethodRepository = new OrganizationLoginMethodRepository(fastify.db);
+  const accessTokenAuth = new AccessTokenAuthenticator(
+    organizationRepository,
+    authUtils,
+    oidcRepository,
+    namespaceLoginMethodRepository,
+    organizationLoginMethodRepository,
+  );
+  const authenticator = new Authentication(
+    webAuth,
+    apiKeyAuth,
+    accessTokenAuth,
+    graphKeyAuth,
+    organizationRepository,
+    oidcRepository,
+    namespaceLoginMethodRepository,
+    organizationLoginMethodRepository,
+    logger,
+  );
+
+  const authorizer = new Authorization(logger, opts.stripe?.defaultPlanId);
+
+  const keycloakClient = new Keycloak({
+    apiUrl: opts.keycloak.apiUrl,
+    realm: opts.keycloak.loginRealm,
+    clientId: opts.keycloak.clientId,
+    adminUser: opts.keycloak.adminUser,
+    adminPassword: opts.keycloak.adminPassword,
+    logger,
+    webhookProxyUrl: opts.webhook?.proxyUrl,
+  });
+
+  let mailerClient: Mailer | undefined;
+  if (opts.mailer.smtpEnabled) {
+    const { smtpHost, smtpPort, smtpSecure, smtpRequireTls, smtpUsername, smtpPassword } = opts.mailer;
+    const isSmtpHostSet = smtpHost && smtpPort;
+    const isSmtpAuthSet = smtpUsername && smtpPassword;
+
+    if (!isSmtpHostSet) {
+      throw new Error(`smtp host or port not set properly! Please ensure to do so!`);
+    }
+
+    if (!isSmtpAuthSet) {
+      throw new Error(`smtp username and host not set properly!`);
+    }
+
+    mailerClient = new Mailer({
+      smtpHost,
+      smtpPort,
+      smtpSecure,
+      smtpRequireTls,
+      smtpUsername,
+      smtpPassword,
+    });
+    try {
+      const verified = await mailerClient.verifyConnection();
+      if (verified) {
+        logger.info('Email client ready to send emails');
+      } else {
+        logger.error('Email client failed to verify connection');
+      }
+    } catch (error) {
+      logger.error(error, 'Email client could not verify connection');
+    }
+  }
+
+  const bullWorkers: Worker[] = [];
+
+  await fastify.register(fastifyRedis, {
+    host: opts.redis.host,
+    port: opts.redis.port,
+    password: opts.redis.password,
+    tls: opts.redis.tls,
+  });
+
+  if (!opts.s3Storage || !opts.s3Storage.url) {
+    throw new Error('S3 storage URL is required');
+  }
+
+  const bucketName = extractS3BucketName(opts.s3Storage);
+  const s3Config = createS3ClientConfig(bucketName, opts.s3Storage);
+
+  const s3Client = new S3Client(s3Config);
+  const primaryBlobStorage = new S3BlobStorage(s3Client, bucketName, {
+    // GCS does not support DeleteObjects; force individual deletes when detected.
+    useIndividualDeletes:
+      isGoogleCloudStorageUrl(opts.s3Storage.url) || isGoogleCloudStorageUrl(s3Config.endpoint as string)
+        ? true
+        : (opts.s3Storage.useIndividualDeletes ?? false),
+  });
+
+  let blobStorage: BlobStorage = primaryBlobStorage;
+
+  if (opts.s3StorageFailover?.url) {
+    const failoverBucketName = extractS3BucketName(opts.s3StorageFailover);
+    const failoverS3Config = createS3ClientConfig(failoverBucketName, opts.s3StorageFailover);
+    const failoverS3Client = new S3Client(failoverS3Config);
+    const failoverBlobStorage = new S3BlobStorage(failoverS3Client, failoverBucketName, {
+      useIndividualDeletes:
+        isGoogleCloudStorageUrl(opts.s3StorageFailover.url) ||
+        isGoogleCloudStorageUrl(failoverS3Config.endpoint as string)
+          ? true
+          : (opts.s3StorageFailover.useIndividualDeletes ?? false),
+    });
+
+    blobStorage = new DualBlobStorage(primaryBlobStorage, failoverBlobStorage);
+  }
+
+  const platformWebhooks = new PlatformWebhookService(
+    opts.webhook?.url,
+    opts.webhook?.key,
+    logger,
+    opts.webhook?.proxyUrl,
+  );
+
+  const readmeQueue = new AIGraphReadmeQueue(logger, fastify.redisForQueue);
+
+  if (opts.openaiAPIKey) {
+    bullWorkers.push(
+      createAIGraphReadmeWorker({
+        redisConnection: fastify.redisForWorker,
+        db: fastify.db,
+        logger,
+        openAiApiKey: opts.openaiAPIKey,
+      }),
+    );
+  }
+
+  const deleteOrganizationAuditLogsQueue = new DeleteOrganizationAuditLogsQueue(logger, fastify.redisForQueue);
+  bullWorkers.push(
+    createDeleteOrganizationAuditLogsWorker({
+      redisConnection: fastify.redisForWorker,
+      db: fastify.db,
+      logger,
+    }),
+  );
+
+  const deleteOrganizationQueue = new DeleteOrganizationQueue(logger, fastify.redisForQueue);
+  bullWorkers.push(
+    createDeleteOrganizationWorker({
+      redisConnection: fastify.redisForWorker,
+      db: fastify.db,
+      logger,
+      keycloakClient,
+      keycloakRealm: opts.keycloak.realm,
+      blobStorage,
+      deleteOrganizationAuditLogsQueue,
+    }),
+  );
+
+  const deactivateOrganizationQueue = new DeactivateOrganizationQueue(logger, fastify.redisForQueue);
+  bullWorkers.push(
+    createDeactivateOrganizationWorker({
+      redisConnection: fastify.redisForWorker,
+      db: fastify.db,
+      logger,
+      keycloakClient,
+      keycloakRealm: opts.keycloak.realm,
+      deleteOrganizationQueue,
+    }),
+  );
+
+  const reactivateOrganizationQueue = new ReactivateOrganizationQueue(logger, fastify.redisForQueue);
+  bullWorkers.push(
+    createReactivateOrganizationWorker({
+      redisConnection: fastify.redisForWorker,
+      db: fastify.db,
+      logger,
+      deleteOrganizationQueue,
+    }),
+  );
+
+  const deleteUserQueue = new DeleteUserQueue(logger, fastify.redisForQueue);
+  bullWorkers.push(
+    createDeleteUserWorker({
+      redisConnection: fastify.redisForWorker,
+      db: fastify.db,
+      logger,
+      keycloakClient,
+      keycloakRealm: opts.keycloak.realm,
+      blobStorage,
+      platformWebhooks,
+      deleteOrganizationAuditLogsQueue,
+    }),
+  );
+
+  bullWorkers.push(
+    createNotifyOrganizationDeletionQueuedWorker({
+      redisConnection: fastify.redisForWorker,
+      db: fastify.db,
+      logger,
+      mailer: mailerClient,
+    }),
+  );
+
+  const deleteBatchPublishJobDetailsQueue = new DeleteBatchPublishJobDetailsQueue(logger, fastify.redisForQueue);
+  bullWorkers.push(
+    createDeleteBatchPublishJobDetailsWorker({
+      redisConnection: fastify.redisForWorker,
+      db: fastify.db,
+      lockAdapter: fastify.lockAdapter,
+      logger,
+    }),
+  );
+
+  // required to verify webhook payloads
+  await fastify.register(import('fastify-raw-body'), {
+    field: 'rawBody',
+    global: false,
+    encoding: 'utf8',
+  });
+
+  let githubApp: App | undefined;
+  if (opts.githubApp?.clientId) {
+    githubApp = new App({
+      appId: opts.githubApp?.id ?? '',
+      privateKey: Buffer.from(opts.githubApp?.privateKey ?? '', 'base64').toString(),
+      oauth: {
+        clientId: opts.githubApp?.clientId ?? '',
+        clientSecret: opts.githubApp?.clientSecret ?? '',
+      },
+    });
+
+    const githubRepository = new GitHubRepository(fastify.db, githubApp);
+
+    await fastify.register(GitHubWebhookController, {
+      prefix: '/webhook/github',
+      githubRepository,
+      webhookSecret: opts.githubApp?.webhookSecret ?? '',
+      logger,
+    });
+  }
+
+  if (opts.stripe?.secret && opts.stripe?.webhookSecret) {
+    const billingRepo = new BillingRepository(fastify.db);
+    const billingService = new BillingService(fastify.db, billingRepo);
+    await fastify.register(StripeWebhookController, {
+      prefix: '/webhook/stripe',
+      billingService,
+      webhookSecret: opts.stripe.webhookSecret,
+      logger,
+    });
+  }
+
+  /**
+   * Controllers registration
+   */
+
+  await fastify.register(AuthController, {
+    organizationRepository,
+    orgInvitationRepository,
+    webAuth,
+    authUtils,
+    prefix: '/v1/auth',
+    db: fastify.db,
+    jwtSecret: opts.auth.secret,
+    session: {
+      cookieName: userSessionCookieName,
+    },
+    pkce: {
+      cookieName: pkceCodeVerifierCookieName,
+    },
+    webBaseUrl: opts.auth.webBaseUrl,
+    keycloakClient,
+    keycloakRealm: opts.keycloak.realm,
+    platformWebhooks,
+    defaultBillingPlanId: opts.stripe?.defaultPlanId,
+  });
+
+  await fastify.register(ScimController, {
+    organizationRepository,
+    mailer: mailerClient,
+    userRepository: userRepo,
+    apiKeyRepository,
+    authenticator: apiKeyAuth,
+    prefix: '/scim/v2',
+    db: fastify.db,
+    keycloakClient,
+    keycloakRealm: opts.keycloak.realm,
+  });
+
+  //
+  let promptToQueryClient: Client<typeof PromptToQueryService> | undefined;
+  if (opts.promptToQuery?.address) {
+    let ptqHttpVersion: '1.1' | '2' = '2';
+    if (
+      opts.promptToQuery.httpVersion &&
+      (opts.promptToQuery.httpVersion === '1.1' || opts.promptToQuery.httpVersion === '2')
+    ) {
+      ptqHttpVersion = opts.promptToQuery.httpVersion;
+    }
+
+    promptToQueryClient = createClient(
+      PromptToQueryService,
+      createConnectTransport({
+        httpVersion: ptqHttpVersion,
+        baseUrl: opts.promptToQuery.address,
+        interceptors: [
+          (next) => (req) => {
+            if (opts.promptToQuery?.token) {
+              // Overwrite the request to include the authorization header
+              const modifiedHeaders = new Headers(req.header);
+              modifiedHeaders.set('authorization', `Bearer ${opts.promptToQuery.token}`);
+
+              return next({ ...req, header: modifiedHeaders });
+            }
+
+            // Otherwise, proceed normally
+            return next(req);
+          },
+        ],
+      }),
+    );
+  }
+
+  // Capture the active Sentry span in preHandler (where OTEL context is still available)
+  // and store it on the request so Connect interceptors can use it as parentSpan.
+  fastify.addHook('preHandler', (req, _reply, done) => {
+    const span = Sentry.getActiveSpan();
+    if (span) {
+      (req.raw as any).__sentrySpan = span;
+    }
+    done();
+  });
+
+  // Must be registered after custom fastify routes
+  // Because it registers an all-catch route for connect handlers
+
+  await fastify.register(fastifyConnectPlugin, {
+    routes: routes({
+      db: fastify.db,
+      logger,
+      jwtSecret: opts.auth.secret,
+      keycloakRealm: opts.keycloak.realm,
+      keycloakApiUrl: opts.keycloak.apiUrl,
+      chClient: fastify.ch,
+      authenticator,
+      authorizer,
+      keycloakClient,
+      platformWebhooks,
+      githubApp,
+      webBaseUrl: opts.auth.webBaseUrl,
+      slack: opts.slack,
+      blobStorage,
+      mailerClient,
+      billingDefaultPlanId: opts.stripe?.defaultPlanId,
+      openaiApiKey: opts.openaiAPIKey,
+      queues: {
+        readmeQueue,
+        deleteOrganizationQueue,
+        deleteOrganizationAuditLogsQueue,
+        deactivateOrganizationQueue,
+        reactivateOrganizationQueue,
+        deleteUserQueue,
+        deleteBatchPublishJobDetailsQueue,
+      },
+      stripeSecretKey: opts.stripe?.secret,
+      admissionWebhookJWTSecret: opts.admissionWebhook.secret,
+      webhookProxyUrl: opts.webhook?.proxyUrl,
+      cdnBaseUrl: opts.cdnBaseUrl,
+      lockAdapter: fastify.lockAdapter,
+      promptToQueryClient,
+    }),
+    contextValues(req) {
+      const values = createContextValues().set<FastifyBaseLogger>(
+        { id: fastifyLoggerId, defaultValue: req.log },
+        req.log,
+      );
+      // Read the parent span captured during the preHandler hook
+      const parentSpan = (req.raw as any).__sentrySpan;
+      if (parentSpan) {
+        values.set({ id: sentrySpanId, defaultValue: undefined }, parentSpan);
+      }
+      return values;
+    },
+    logLevel: opts.logger.level as pino.LevelWithSilent,
+    // Avoid compression for small requests
+    compressMinBytes: 1024,
+    maxTimeoutMs: 120_000,
+    shutdownTimeoutMs: 30_000,
+    // The default limit is the maximum supported value of ~4GiB
+    // We go with 32MiB to avoid allocating too much memory for large requests
+    writeMaxBytes: 32 * 1024 * 1024,
+    acceptCompression: [compressionBrotli, compressionGzip],
+    interceptors: [
+      (next) => (req) => {
+        const parentSpan = req.contextValues?.get({
+          id: sentrySpanId,
+          defaultValue: undefined,
+        });
+        if (parentSpan) {
+          return Sentry.withActiveSpan(parentSpan, () => withRequestSpans(req.signal, () => next(req)));
+        }
+        return next(req);
+      },
+    ],
+  });
+
+  await fastify.register(fastifyGracefulShutdown, {
+    timeout: 60_000,
+  });
+
+  fastify.gracefulShutdown(async () => {
+    fastify.log.debug('Shutting down bull workers');
+
+    await Promise.all(bullWorkers.map((worker) => worker.close()));
+
+    fastify.log.debug('Bull workers shut down');
+
+    fastify.log.debug('Shutting down composition worker pool');
+
+    await destroyComposeGraphsPool();
+
+    fastify.log.debug('Composition worker pool shut down');
+  });
+
+  return fastify;
+}

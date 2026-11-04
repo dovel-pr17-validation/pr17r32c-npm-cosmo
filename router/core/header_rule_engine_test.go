@@ -1,0 +1,903 @@
+package core
+
+import (
+	"net/http"
+	"os"
+	"path/filepath"
+	"sync"
+	"testing"
+	"time"
+
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+	"go.uber.org/zap"
+
+	cachedirective "github.com/pquerna/cachecontrol/cacheobject"
+	"github.com/wundergraph/cosmo/router/pkg/config"
+)
+
+// writeHeaderSourceFile writes contents to a fresh temp file and returns its path.
+// Used by FromFile header rule tests.
+func writeHeaderSourceFile(t *testing.T, contents string) string {
+	t.Helper()
+	path := filepath.Join(t.TempDir(), "header-source")
+	require.NoError(t, os.WriteFile(path, []byte(contents), 0o600))
+	return path
+}
+
+func TestCreateMostRestrictivePolicy(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name               string
+		policies           []*cachedirective.Object
+		expectedHeader     string
+		expectedDirectives *cachedirective.ResponseCacheDirectives
+	}{
+		{
+			name:               "empty policies",
+			policies:           []*cachedirective.Object{},
+			expectedHeader:     "",
+			expectedDirectives: &cachedirective.ResponseCacheDirectives{},
+		},
+		{
+			name: "single policy max-age",
+			policies: []*cachedirective.Object{
+				{RespDirectives: &cachedirective.ResponseCacheDirectives{MaxAge: 60}},
+			},
+			expectedHeader:     "max-age=60",
+			expectedDirectives: &cachedirective.ResponseCacheDirectives{MaxAge: 60},
+		},
+		{
+			name: "no-store short-circuits",
+			policies: []*cachedirective.Object{
+				{RespDirectives: &cachedirective.ResponseCacheDirectives{NoStore: true}},
+				{RespDirectives: &cachedirective.ResponseCacheDirectives{MaxAge: 300}},
+			},
+			expectedHeader:     "no-store",
+			expectedDirectives: &cachedirective.ResponseCacheDirectives{NoStore: true},
+		},
+		{
+			name: "no-cache wins over max-age",
+			policies: []*cachedirective.Object{
+				{RespDirectives: &cachedirective.ResponseCacheDirectives{NoCachePresent: true}},
+				{RespDirectives: &cachedirective.ResponseCacheDirectives{MaxAge: 300}},
+			},
+			expectedHeader:     "no-cache",
+			expectedDirectives: &cachedirective.ResponseCacheDirectives{NoCachePresent: true, MaxAge: 300},
+		},
+		{
+			name: "shortest max-age wins",
+			policies: []*cachedirective.Object{
+				{RespDirectives: &cachedirective.ResponseCacheDirectives{MaxAge: 600}},
+				{RespDirectives: &cachedirective.ResponseCacheDirectives{MaxAge: 300}},
+			},
+			expectedHeader:     "max-age=300",
+			expectedDirectives: &cachedirective.ResponseCacheDirectives{MaxAge: 300},
+		},
+		{
+			name: "private wins over public",
+			policies: []*cachedirective.Object{
+				{RespDirectives: &cachedirective.ResponseCacheDirectives{MaxAge: 300, Public: true}},
+				{RespDirectives: &cachedirective.ResponseCacheDirectives{MaxAge: 600, PrivatePresent: true}},
+			},
+			expectedHeader:     "max-age=300, private",
+			expectedDirectives: &cachedirective.ResponseCacheDirectives{MaxAge: 300, PrivatePresent: true},
+		},
+		{
+			name: "public without private",
+			policies: []*cachedirective.Object{
+				{RespDirectives: &cachedirective.ResponseCacheDirectives{MaxAge: 300, Public: true}},
+				{RespDirectives: &cachedirective.ResponseCacheDirectives{MaxAge: 600, Public: true}},
+			},
+			expectedHeader:     "max-age=300, public",
+			expectedDirectives: &cachedirective.ResponseCacheDirectives{MaxAge: 300, Public: true},
+		},
+		{
+			name: "single public policy keeps public on the result",
+			policies: []*cachedirective.Object{
+				{RespDirectives: &cachedirective.ResponseCacheDirectives{Public: true}},
+			},
+			expectedHeader:     "public",
+			expectedDirectives: &cachedirective.ResponseCacheDirectives{Public: true},
+		},
+		{
+			name: "no-cache with public",
+			policies: []*cachedirective.Object{
+				{RespDirectives: &cachedirective.ResponseCacheDirectives{NoCachePresent: true, Public: true}},
+			},
+			expectedHeader:     "no-cache, public",
+			expectedDirectives: &cachedirective.ResponseCacheDirectives{NoCachePresent: true, Public: true},
+		},
+		{
+			name: "s-maxage is kept and capped by the shortest shared life",
+			policies: []*cachedirective.Object{
+				{RespDirectives: &cachedirective.ResponseCacheDirectives{MaxAge: 45, SMaxAge: 10, Public: true}},
+				{RespDirectives: &cachedirective.ResponseCacheDirectives{MaxAge: 3600, Public: true}},
+			},
+			expectedHeader:     "max-age=45, s-maxage=10, public",
+			expectedDirectives: &cachedirective.ResponseCacheDirectives{MaxAge: 45, SMaxAge: 10, Public: true},
+		},
+		{
+			name: "a shorter max-age elsewhere caps s-maxage",
+			policies: []*cachedirective.Object{
+				{RespDirectives: &cachedirective.ResponseCacheDirectives{MaxAge: 60, SMaxAge: 30}},
+				{RespDirectives: &cachedirective.ResponseCacheDirectives{MaxAge: 20}},
+				{RespDirectives: &cachedirective.ResponseCacheDirectives{MaxAge: 90, SMaxAge: 25}},
+			},
+			expectedHeader:     "max-age=20, s-maxage=20",
+			expectedDirectives: &cachedirective.ResponseCacheDirectives{MaxAge: 20, SMaxAge: 20},
+		},
+		{
+			name: "no s-maxage without one in the policies",
+			policies: []*cachedirective.Object{
+				{RespDirectives: &cachedirective.ResponseCacheDirectives{MaxAge: 60, SMaxAge: -1}},
+			},
+			expectedHeader:     "max-age=60",
+			expectedDirectives: &cachedirective.ResponseCacheDirectives{MaxAge: 60},
+		},
+		{
+			name: "public only when every policy grants it",
+			policies: []*cachedirective.Object{
+				{RespDirectives: &cachedirective.ResponseCacheDirectives{MaxAge: 60, Public: true}},
+				{RespDirectives: &cachedirective.ResponseCacheDirectives{MaxAge: 30}},
+			},
+			expectedHeader:     "max-age=30",
+			expectedDirectives: &cachedirective.ResponseCacheDirectives{MaxAge: 30},
+		},
+		{
+			name: "no-cache with private",
+			policies: []*cachedirective.Object{
+				{RespDirectives: &cachedirective.ResponseCacheDirectives{NoCachePresent: true, PrivatePresent: true}},
+			},
+			expectedHeader:     "no-cache, private",
+			expectedDirectives: &cachedirective.ResponseCacheDirectives{NoCachePresent: true, PrivatePresent: true},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			result, header := createMostRestrictivePolicy(tt.policies)
+			assert.Equal(t, tt.expectedHeader, header)
+			require.NotNil(t, result)
+			require.NotNil(t, result.RespDirectives)
+			assert.Equal(t, tt.expectedDirectives.Public, result.RespDirectives.Public, "public directive")
+			assert.Equal(t, tt.expectedDirectives.PrivatePresent, result.RespDirectives.PrivatePresent, "private directive")
+			assert.Equal(t, tt.expectedDirectives.NoStore, result.RespDirectives.NoStore, "no-store directive")
+			assert.Equal(t, tt.expectedDirectives.NoCachePresent, result.RespDirectives.NoCachePresent, "no-cache directive")
+			assert.Equal(t, tt.expectedDirectives.MaxAge, result.RespDirectives.MaxAge, "max-age directive")
+			assert.Equal(t, tt.expectedDirectives.SMaxAge, result.RespDirectives.SMaxAge, "s-maxage directive")
+		})
+	}
+
+	// The caller stores the returned policy as previousCacheControl and merges it
+	// with the next subgraph response, so directives dropped from the result
+	// silently disappear from the header on the following round.
+	t.Run("result is a valid input for the next round", func(t *testing.T) {
+		t.Parallel()
+
+		roundTripTests := []struct {
+			name           string
+			first          []*cachedirective.Object
+			second         *cachedirective.Object
+			expectedHeader string
+		}{
+			{
+				name: "public survives a round trip",
+				first: []*cachedirective.Object{
+					{RespDirectives: &cachedirective.ResponseCacheDirectives{MaxAge: 300, Public: true}},
+				},
+				second:         &cachedirective.Object{RespDirectives: &cachedirective.ResponseCacheDirectives{MaxAge: 600, Public: true}},
+				expectedHeader: "max-age=300, public",
+			},
+			{
+				name: "public from a previous round is downgraded by a later private",
+				first: []*cachedirective.Object{
+					{RespDirectives: &cachedirective.ResponseCacheDirectives{MaxAge: 300, Public: true}},
+				},
+				second:         &cachedirective.Object{RespDirectives: &cachedirective.ResponseCacheDirectives{MaxAge: 600, PrivatePresent: true}},
+				expectedHeader: "max-age=300, private",
+			},
+			{
+				name: "public without max-age survives a round trip",
+				first: []*cachedirective.Object{
+					{RespDirectives: &cachedirective.ResponseCacheDirectives{Public: true}},
+				},
+				second:         &cachedirective.Object{RespDirectives: &cachedirective.ResponseCacheDirectives{Public: true}},
+				expectedHeader: "public",
+			},
+			{
+				name: "a later policy without public withdraws it",
+				first: []*cachedirective.Object{
+					{RespDirectives: &cachedirective.ResponseCacheDirectives{Public: true, MaxAge: 60}},
+				},
+				second:         &cachedirective.Object{RespDirectives: &cachedirective.ResponseCacheDirectives{MaxAge: 30}},
+				expectedHeader: "max-age=30",
+			},
+			{
+				name: "no-cache from a previous round is not lost to a later max-age",
+				first: []*cachedirective.Object{
+					{RespDirectives: &cachedirective.ResponseCacheDirectives{NoCachePresent: true}},
+				},
+				second:         &cachedirective.Object{RespDirectives: &cachedirective.ResponseCacheDirectives{MaxAge: 300}},
+				expectedHeader: "no-cache",
+			},
+			{
+				name: "no-cache in a later round overrides a previous max-age",
+				first: []*cachedirective.Object{
+					{RespDirectives: &cachedirective.ResponseCacheDirectives{MaxAge: 300}},
+				},
+				second:         &cachedirective.Object{RespDirectives: &cachedirective.ResponseCacheDirectives{NoCachePresent: true}},
+				expectedHeader: "no-cache",
+			},
+			{
+				name: "no-store from a previous round is not lost to a later max-age",
+				first: []*cachedirective.Object{
+					{RespDirectives: &cachedirective.ResponseCacheDirectives{NoStore: true}},
+				},
+				second:         &cachedirective.Object{RespDirectives: &cachedirective.ResponseCacheDirectives{MaxAge: 300}},
+				expectedHeader: "no-store",
+			},
+			{
+				name: "no-store in a later round overrides a previous no-cache",
+				first: []*cachedirective.Object{
+					{RespDirectives: &cachedirective.ResponseCacheDirectives{NoCachePresent: true}},
+				},
+				second:         &cachedirective.Object{RespDirectives: &cachedirective.ResponseCacheDirectives{NoStore: true}},
+				expectedHeader: "no-store",
+			},
+			{
+				name: "shorter max-age from a previous round survives a longer one",
+				first: []*cachedirective.Object{
+					{RespDirectives: &cachedirective.ResponseCacheDirectives{MaxAge: 300}},
+				},
+				second:         &cachedirective.Object{RespDirectives: &cachedirective.ResponseCacheDirectives{MaxAge: 600}},
+				expectedHeader: "max-age=300",
+			},
+			{
+				name: "shorter max-age in a later round wins over a previous one",
+				first: []*cachedirective.Object{
+					{RespDirectives: &cachedirective.ResponseCacheDirectives{MaxAge: 600}},
+				},
+				second:         &cachedirective.Object{RespDirectives: &cachedirective.ResponseCacheDirectives{MaxAge: 300}},
+				expectedHeader: "max-age=300",
+			},
+			{
+				name: "max-age and private both survive a round trip",
+				first: []*cachedirective.Object{
+					{RespDirectives: &cachedirective.ResponseCacheDirectives{MaxAge: 300, PrivatePresent: true}},
+				},
+				second:         &cachedirective.Object{RespDirectives: &cachedirective.ResponseCacheDirectives{MaxAge: 600}},
+				expectedHeader: "max-age=300, private",
+			},
+			{
+				name: "field-specific no-cache survives a round trip, its fields merged",
+				first: []*cachedirective.Object{
+					{RespDirectives: &cachedirective.ResponseCacheDirectives{MaxAge: 60, NoCachePresent: true, NoCache: cachedirective.FieldNames{"Set-Cookie": true}}},
+				},
+				second:         &cachedirective.Object{RespDirectives: &cachedirective.ResponseCacheDirectives{MaxAge: 300, NoCachePresent: true, NoCache: cachedirective.FieldNames{"X-Token": true}}},
+				expectedHeader: `max-age=60, no-cache="Set-Cookie, X-Token"`,
+			},
+			{
+				name: "bare no-cache in a later round overrides field-specific no-cache",
+				first: []*cachedirective.Object{
+					{RespDirectives: &cachedirective.ResponseCacheDirectives{MaxAge: 60, NoCachePresent: true, NoCache: cachedirective.FieldNames{"Set-Cookie": true}}},
+				},
+				second:         &cachedirective.Object{RespDirectives: &cachedirective.ResponseCacheDirectives{NoCachePresent: true}},
+				expectedHeader: "no-cache",
+			},
+			{
+				name: "must-revalidate and proxy-revalidate survive a round trip",
+				first: []*cachedirective.Object{
+					{RespDirectives: &cachedirective.ResponseCacheDirectives{MaxAge: 60, MustRevalidate: true}},
+				},
+				second:         &cachedirective.Object{RespDirectives: &cachedirective.ResponseCacheDirectives{MaxAge: 300, ProxyRevalidate: true}},
+				expectedHeader: "max-age=60, must-revalidate, proxy-revalidate",
+			},
+			{
+				name: "no-cache and public both survive a round trip",
+				first: []*cachedirective.Object{
+					{RespDirectives: &cachedirective.ResponseCacheDirectives{NoCachePresent: true, Public: true}},
+				},
+				second:         &cachedirective.Object{RespDirectives: &cachedirective.ResponseCacheDirectives{MaxAge: 300, Public: true}},
+				expectedHeader: "no-cache, public",
+			},
+		}
+
+		for _, tt := range roundTripTests {
+			t.Run(tt.name, func(t *testing.T) {
+				t.Parallel()
+				previous, _ := createMostRestrictivePolicy(tt.first)
+				_, header := createMostRestrictivePolicy([]*cachedirective.Object{tt.second, previous})
+				assert.Equal(t, tt.expectedHeader, header)
+			})
+		}
+	})
+
+	t.Run("expires header - earlier wins", func(t *testing.T) {
+		t.Parallel()
+		policies := []*cachedirective.Object{
+			{
+				RespDirectives:    &cachedirective.ResponseCacheDirectives{},
+				RespExpiresHeader: time.Now().Add(10 * time.Minute),
+			},
+			{
+				RespDirectives:    &cachedirective.ResponseCacheDirectives{},
+				RespExpiresHeader: time.Now().Add(5 * time.Minute),
+			},
+		}
+		result, header := createMostRestrictivePolicy(policies)
+		assert.Equal(t, "", header)
+		assert.NotNil(t, result)
+		assert.False(t, result.RespExpiresHeader.IsZero())
+		assert.True(t, result.RespExpiresHeader.Before(time.Now().Add(6*time.Minute)))
+	})
+}
+
+func TestCreateCacheControlPolicyHeaderRules(t *testing.T) {
+	t.Parallel()
+
+	t.Run("disabled cache returns nil", func(t *testing.T) {
+		t.Parallel()
+		result := CreateCacheControlPolicyHeaderRules(config.CacheControlPolicy{
+			Enabled: false,
+		})
+		assert.Nil(t, result)
+	})
+
+	t.Run("enabled cache returns global after-rule", func(t *testing.T) {
+		t.Parallel()
+		result := CreateCacheControlPolicyHeaderRules(config.CacheControlPolicy{
+			Enabled: true,
+			Value:   "max-age=300",
+		})
+		require.NotNil(t, result)
+		require.Len(t, result.All, 1)
+		assert.Equal(t, config.ResponseHeaderRuleAlgorithmMostRestrictiveCacheControl, result.All[0].Algorithm)
+		assert.Equal(t, "max-age=300", result.All[0].Default)
+		assert.Nil(t, result.Subgraphs)
+	})
+
+	t.Run("subgraph-specific cache returns per-subgraph after-rule", func(t *testing.T) {
+		t.Parallel()
+		result := CreateCacheControlPolicyHeaderRules(config.CacheControlPolicy{
+			Subgraphs: []config.SubgraphCacheControlRule{
+				{Name: "sg1", Value: "max-age=60"},
+			},
+		})
+		require.NotNil(t, result)
+		assert.Nil(t, result.All)
+		require.Contains(t, result.Subgraphs, "sg1")
+		require.Len(t, result.Subgraphs["sg1"], 1)
+		assert.Equal(t, "max-age=60", result.Subgraphs["sg1"][0].Default)
+	})
+
+	t.Run("global and subgraph rules coexist", func(t *testing.T) {
+		t.Parallel()
+		result := CreateCacheControlPolicyHeaderRules(config.CacheControlPolicy{
+			Enabled: true,
+			Value:   "max-age=300",
+			Subgraphs: []config.SubgraphCacheControlRule{
+				{Name: "sg1", Value: "max-age=60"},
+			},
+		})
+		require.NotNil(t, result)
+		require.Len(t, result.All, 1)
+		assert.Equal(t, "max-age=300", result.All[0].Default)
+		require.Contains(t, result.Subgraphs, "sg1")
+		assert.Equal(t, "max-age=60", result.Subgraphs["sg1"][0].Default)
+	})
+}
+
+func TestApplyResponseRuleKeyValue(t *testing.T) {
+	t.Parallel()
+
+	newPropagation := func() *responseHeaderPropagation {
+		return &responseHeaderPropagation{
+			header: make(http.Header),
+			m:      &sync.Mutex{},
+		}
+	}
+
+	// We need a minimal HeaderPropagation to call the method
+	hp := &HeaderPropagation{}
+
+	t.Run("first write sets initial value", func(t *testing.T) {
+		t.Parallel()
+		prop := newPropagation()
+		rule := &config.ResponseHeaderRule{Algorithm: config.ResponseHeaderRuleAlgorithmFirstWrite}
+		hp.applyResponseRuleKeyValue(nil, prop, rule, "X-Test", []string{"first"})
+		assert.Equal(t, []string{"first"}, prop.header.Values("X-Test"))
+	})
+
+	t.Run("first write ignores second value", func(t *testing.T) {
+		t.Parallel()
+		prop := newPropagation()
+		rule := &config.ResponseHeaderRule{Algorithm: config.ResponseHeaderRuleAlgorithmFirstWrite}
+		hp.applyResponseRuleKeyValue(nil, prop, rule, "X-Test", []string{"first"})
+		hp.applyResponseRuleKeyValue(nil, prop, rule, "X-Test", []string{"second"})
+		assert.Equal(t, []string{"first"}, prop.header.Values("X-Test"))
+	})
+
+	t.Run("last write overwrites", func(t *testing.T) {
+		t.Parallel()
+		prop := newPropagation()
+		rule := &config.ResponseHeaderRule{Algorithm: config.ResponseHeaderRuleAlgorithmLastWrite}
+		hp.applyResponseRuleKeyValue(nil, prop, rule, "X-Test", []string{"first"})
+		hp.applyResponseRuleKeyValue(nil, prop, rule, "X-Test", []string{"second"})
+		assert.Equal(t, []string{"second"}, prop.header.Values("X-Test"))
+	})
+
+	t.Run("append accumulates values", func(t *testing.T) {
+		t.Parallel()
+		prop := newPropagation()
+		rule := &config.ResponseHeaderRule{Algorithm: config.ResponseHeaderRuleAlgorithmAppend}
+		hp.applyResponseRuleKeyValue(nil, prop, rule, "X-Test", []string{"a"})
+		hp.applyResponseRuleKeyValue(nil, prop, rule, "X-Test", []string{"b", "c"})
+		assert.Equal(t, []string{"a,b,c"}, prop.header.Values("X-Test"))
+	})
+
+	t.Run("append to empty header", func(t *testing.T) {
+		t.Parallel()
+		prop := newPropagation()
+		rule := &config.ResponseHeaderRule{Algorithm: config.ResponseHeaderRuleAlgorithmAppend}
+		hp.applyResponseRuleKeyValue(nil, prop, rule, "X-Test", []string{"only"})
+		assert.Equal(t, []string{"only"}, prop.header.Values("X-Test"))
+	})
+
+	t.Run("append with Set-Cookie preserves multiple header lines", func(t *testing.T) {
+		t.Parallel()
+		prop := newPropagation()
+		rule := &config.ResponseHeaderRule{Algorithm: config.ResponseHeaderRuleAlgorithmAppend}
+		hp.applyResponseRuleKeyValue(nil, prop, rule, "Set-Cookie", []string{"a=1; Path=/"})
+		hp.applyResponseRuleKeyValue(nil, prop, rule, "Set-Cookie", []string{"b=2; Path=/"})
+		// Set-Cookie must NOT be comma-joined (RFC 6265)
+		assert.Equal(t, []string{"a=1; Path=/", "b=2; Path=/"}, prop.header.Values("Set-Cookie"))
+	})
+}
+
+func TestApplyResponseRuleSetWritesToSubgraphResponse(t *testing.T) {
+	t.Parallel()
+
+	newPropagation := func() *responseHeaderPropagation {
+		return &responseHeaderPropagation{
+			header: make(http.Header),
+			m:      &sync.Mutex{},
+		}
+	}
+
+	hp := &HeaderPropagation{}
+
+	t.Run("set writes to subgraph response header, not propagation header", func(t *testing.T) {
+		t.Parallel()
+		prop := newPropagation()
+		res := &http.Response{Header: make(http.Header)}
+		rule := &config.ResponseHeaderRule{
+			Operation: config.HeaderRuleOperationSet,
+			Name:      "X-Custom",
+			Value:     "test-value",
+		}
+		hp.applyResponseRule(prop, res, rule)
+		require.Equal(t, "", prop.header.Get("X-Custom"), "set should not write to propagation header")
+		require.Equal(t, "test-value", res.Header.Get("X-Custom"), "set should write to subgraph response header")
+	})
+
+	t.Run("set Cache-Control writes to subgraph response header", func(t *testing.T) {
+		t.Parallel()
+		prop := newPropagation()
+		res := &http.Response{Header: make(http.Header)}
+		rule := &config.ResponseHeaderRule{
+			Operation: config.HeaderRuleOperationSet,
+			Name:      "Cache-Control",
+			Value:     "max-age=300",
+		}
+		hp.applyResponseRule(prop, res, rule)
+		require.Equal(t, "", prop.header.Get("Cache-Control"), "set should not write to propagation header")
+		require.Equal(t, "max-age=300", res.Header.Get("Cache-Control"), "set should write to subgraph response header")
+	})
+
+	t.Run("propagate still writes to propagation header", func(t *testing.T) {
+		t.Parallel()
+		prop := newPropagation()
+		rule := &config.ResponseHeaderRule{
+			Operation: config.HeaderRuleOperationPropagate,
+			Named:     "X-Custom",
+			Algorithm: config.ResponseHeaderRuleAlgorithmFirstWrite,
+		}
+		res := &http.Response{
+			Header: http.Header{"X-Custom": []string{"from-subgraph"}},
+		}
+		hp.applyResponseRule(prop, res, rule)
+		require.Equal(t, "from-subgraph", prop.header.Get("X-Custom"))
+	})
+}
+
+func TestPropagatedHeaders(t *testing.T) {
+	t.Parallel()
+
+	t.Run("set rule returns header name", func(t *testing.T) {
+		t.Parallel()
+		names, regexps, err := PropagatedHeaders([]*config.RequestHeaderRule{
+			{Operation: config.HeaderRuleOperationSet, Name: "X-A", Value: "v"},
+		})
+		require.NoError(t, err)
+		assert.Equal(t, []string{"X-A"}, names)
+		assert.Nil(t, regexps)
+	})
+
+	t.Run("propagate named returns name", func(t *testing.T) {
+		t.Parallel()
+		names, regexps, err := PropagatedHeaders([]*config.RequestHeaderRule{
+			{Operation: config.HeaderRuleOperationPropagate, Named: "X-B"},
+		})
+		require.NoError(t, err)
+		assert.Equal(t, []string{"X-B"}, names)
+		assert.Nil(t, regexps)
+	})
+
+	t.Run("propagate matching returns compiled regex", func(t *testing.T) {
+		t.Parallel()
+		names, regexps, err := PropagatedHeaders([]*config.RequestHeaderRule{
+			{Operation: config.HeaderRuleOperationPropagate, Matching: "^X-.*"},
+		})
+		require.NoError(t, err)
+		assert.Nil(t, names)
+		require.Len(t, regexps, 1)
+		assert.True(t, regexps[0].Pattern.MatchString("X-Custom"))
+		assert.False(t, regexps[0].NegateMatch)
+	})
+
+	t.Run("propagate matching with negate", func(t *testing.T) {
+		t.Parallel()
+		_, regexps, err := PropagatedHeaders([]*config.RequestHeaderRule{
+			{Operation: config.HeaderRuleOperationPropagate, Matching: "^X-.*", NegateMatch: true},
+		})
+		require.NoError(t, err)
+		require.Len(t, regexps, 1)
+		assert.True(t, regexps[0].NegateMatch)
+	})
+
+	t.Run("set with empty name errors", func(t *testing.T) {
+		t.Parallel()
+		_, _, err := PropagatedHeaders([]*config.RequestHeaderRule{
+			{Operation: config.HeaderRuleOperationSet, Name: ""},
+		})
+		require.Error(t, err)
+	})
+	t.Run("set with FromFile returns header name", func(t *testing.T) {
+		t.Parallel()
+		path := writeHeaderSourceFile(t, "secret-value")
+		names, regexps, err := PropagatedHeaders([]*config.RequestHeaderRule{
+			{Operation: config.HeaderRuleOperationSet, Name: "X-Secret", FromFile: &config.FileHeaderSource{Path: path}},
+		})
+		require.NoError(t, err)
+		assert.Equal(t, []string{"X-Secret"}, names)
+		assert.Nil(t, regexps)
+	})
+	t.Run("propagate with no name or match errors", func(t *testing.T) {
+		t.Parallel()
+		_, _, err := PropagatedHeaders([]*config.RequestHeaderRule{
+			{Operation: config.HeaderRuleOperationPropagate},
+		})
+		require.Error(t, err)
+	})
+
+	t.Run("invalid operation errors", func(t *testing.T) {
+		t.Parallel()
+		_, _, err := PropagatedHeaders([]*config.RequestHeaderRule{
+			{Operation: "invalid"},
+		})
+		require.Error(t, err)
+	})
+
+	t.Run("invalid regex errors", func(t *testing.T) {
+		t.Parallel()
+		_, _, err := PropagatedHeaders([]*config.RequestHeaderRule{
+			{Operation: config.HeaderRuleOperationPropagate, Matching: "[invalid"},
+		})
+		require.Error(t, err)
+	})
+}
+
+func TestNewHeaderPropagation(t *testing.T) {
+	t.Parallel()
+
+	t.Run("nil rules returns nil", func(t *testing.T) {
+		t.Parallel()
+		hp, err := NewHeaderPropagation(t.Context(), zap.NewNop(), nil, nil)
+		require.NoError(t, err)
+		assert.Nil(t, hp)
+	})
+
+	t.Run("empty rules returns valid instance", func(t *testing.T) {
+		t.Parallel()
+		hp, err := NewHeaderPropagation(t.Context(), zap.NewNop(), &config.HeaderRules{}, nil)
+		require.NoError(t, err)
+		require.NotNil(t, hp)
+	})
+
+	t.Run("invalid regex in request rule returns error", func(t *testing.T) {
+		t.Parallel()
+		_, err := NewHeaderPropagation(t.Context(), zap.NewNop(), &config.HeaderRules{
+			All: &config.GlobalHeaderRule{
+				Request: []*config.RequestHeaderRule{
+					{Operation: config.HeaderRuleOperationPropagate, Matching: "[invalid"},
+				},
+			},
+		}, nil)
+		require.Error(t, err)
+	})
+
+	t.Run("invalid regex in response rule returns error", func(t *testing.T) {
+		t.Parallel()
+		_, err := NewHeaderPropagation(t.Context(), zap.NewNop(), &config.HeaderRules{
+			All: &config.GlobalHeaderRule{
+				Response: []*config.ResponseHeaderRule{
+					{Operation: config.HeaderRuleOperationPropagate, Matching: "[invalid"},
+				},
+			},
+		}, nil)
+		require.Error(t, err)
+	})
+
+	t.Run("nil receiver returns false for Has*Rules", func(t *testing.T) {
+		t.Parallel()
+		var hp *HeaderPropagation
+		assert.False(t, hp.HasRequestRules())
+		assert.False(t, hp.HasResponseRules())
+	})
+}
+
+func TestNewHeaderPropagation_FromFile(t *testing.T) {
+	t.Parallel()
+
+	t.Run("loads file contents into memory at startup", func(t *testing.T) {
+		t.Parallel()
+
+		path := writeHeaderSourceFile(t, "secret-token")
+
+		hp, err := NewHeaderPropagation(t.Context(), zap.NewNop(), &config.HeaderRules{
+			All: &config.GlobalHeaderRule{
+				Request: []*config.RequestHeaderRule{
+					{
+						Operation: config.HeaderRuleOperationSet,
+						Name:      "X-Auth",
+						FromFile:  &config.FileHeaderSource{Path: path, RefreshInterval: time.Second},
+					},
+				},
+			},
+		}, nil)
+		require.NoError(t, err)
+		require.NotNil(t, hp)
+
+		// The buffered content must be the file's exact bytes — no trimming, no decoding.
+		content, ok := hp.fileSourceContents[path]
+		require.True(t, ok, "expected file source content to be cached under the file path")
+		assert.Equal(t, "secret-token", content.buffer.String())
+	})
+
+	t.Run("missing file returns error", func(t *testing.T) {
+		t.Parallel()
+
+		missing := filepath.Join(t.TempDir(), "does-not-exist")
+		_, err := NewHeaderPropagation(t.Context(), zap.NewNop(), &config.HeaderRules{
+			All: &config.GlobalHeaderRule{
+				Request: []*config.RequestHeaderRule{
+					{
+						Operation: config.HeaderRuleOperationSet,
+						Name:      "X-Auth",
+						FromFile:  &config.FileHeaderSource{Path: missing, RefreshInterval: time.Second},
+					},
+				},
+			},
+		}, nil)
+		require.Error(t, err)
+		assert.ErrorContains(t, err, "does not exist")
+	})
+
+	t.Run("multiple rules referencing the same path share one in-memory copy", func(t *testing.T) {
+		t.Parallel()
+
+		path := writeHeaderSourceFile(t, "shared-value")
+
+		hp, err := NewHeaderPropagation(t.Context(), zap.NewNop(), &config.HeaderRules{
+			All: &config.GlobalHeaderRule{
+				Request: []*config.RequestHeaderRule{
+					{Operation: config.HeaderRuleOperationSet, Name: "X-A", FromFile: &config.FileHeaderSource{Path: path, RefreshInterval: time.Second}},
+					{Operation: config.HeaderRuleOperationSet, Name: "X-B", FromFile: &config.FileHeaderSource{Path: path, RefreshInterval: time.Second}},
+				},
+			},
+		}, nil)
+		require.NoError(t, err)
+
+		assert.Len(t, hp.fileSourceContents, 1, "expected the file to be loaded once and shared across rules")
+	})
+
+	t.Run("zero refresh_interval is defaulted to 30s", func(t *testing.T) {
+		t.Parallel()
+
+		path := writeHeaderSourceFile(t, "x")
+		rule := &config.RequestHeaderRule{
+			Operation: config.HeaderRuleOperationSet,
+			Name:      "X-A",
+			FromFile:  &config.FileHeaderSource{Path: path},
+		}
+
+		_, err := NewHeaderPropagation(t.Context(), zap.NewNop(), &config.HeaderRules{
+			All: &config.GlobalHeaderRule{Request: []*config.RequestHeaderRule{rule}},
+		}, nil)
+		require.NoError(t, err)
+		assert.Equal(t, 30*time.Second, rule.FromFile.RefreshInterval, "engine must apply the 30s default for rules built outside YAML loading")
+	})
+
+	t.Run("subgraph-scoped FromFile rule is loaded", func(t *testing.T) {
+		t.Parallel()
+
+		path := writeHeaderSourceFile(t, "sg-secret")
+
+		hp, err := NewHeaderPropagation(t.Context(), zap.NewNop(), &config.HeaderRules{
+			Subgraphs: map[string]*config.GlobalHeaderRule{
+				"sg-1": {
+					Request: []*config.RequestHeaderRule{
+						{Operation: config.HeaderRuleOperationSet, Name: "X-Auth", FromFile: &config.FileHeaderSource{Path: path, RefreshInterval: time.Second}},
+					},
+				},
+			},
+		}, nil)
+		require.NoError(t, err)
+
+		content, ok := hp.fileSourceContents[path]
+		require.True(t, ok)
+		assert.Equal(t, "sg-secret", content.buffer.String())
+	})
+
+	t.Run("Set rule mixing Expression and FromFile skips file watcher but still compiles expression", func(t *testing.T) {
+		t.Parallel()
+
+		path := writeHeaderSourceFile(t, "file-value")
+		expression := "request.header.Get('X-Origin')"
+
+		hp, err := NewHeaderPropagation(t.Context(), zap.NewNop(), &config.HeaderRules{
+			All: &config.GlobalHeaderRule{
+				Request: []*config.RequestHeaderRule{
+					{
+						Operation:  config.HeaderRuleOperationSet,
+						Name:       "X-Auth",
+						Expression: expression,
+						FromFile:   &config.FileHeaderSource{Path: path, RefreshInterval: time.Second},
+					},
+				},
+			},
+		}, nil)
+		require.NoError(t, err)
+		require.NotNil(t, hp)
+
+		_, watcherCreated := hp.fileSourceContents[path]
+		assert.False(t, watcherCreated, "mixed Expression+FromFile rule must not register a file source / watcher")
+		assert.Empty(t, hp.fileSourceContents, "no file source content should be cached for mixed rules")
+
+		_, compiled := hp.compiledRules[expression]
+		assert.True(t, compiled, "expression compilation is independent of file source validation — the expression is still compiled and wins at apply time (see applyRequestRuleToHeader)")
+	})
+
+	t.Run("Propagate rule with FromFile skips file watcher", func(t *testing.T) {
+		t.Parallel()
+
+		path := writeHeaderSourceFile(t, "ignored")
+
+		hp, err := NewHeaderPropagation(t.Context(), zap.NewNop(), &config.HeaderRules{
+			All: &config.GlobalHeaderRule{
+				Request: []*config.RequestHeaderRule{
+					{
+						Operation: config.HeaderRuleOperationPropagate,
+						Named:     "X-Auth",
+						FromFile:  &config.FileHeaderSource{Path: path, RefreshInterval: time.Second},
+					},
+				},
+			},
+		}, nil)
+		require.NoError(t, err)
+		require.NotNil(t, hp)
+
+		assert.Empty(t, hp.fileSourceContents, "FromFile is only meaningful for set rules — propagate rules must not register a file source")
+	})
+
+	t.Run("missing file is not statted when rule is invalid", func(t *testing.T) {
+		t.Parallel()
+
+		// If validation didn't skip invalid rules, this would error because the file
+		// doesn't exist. NewHeaderPropagation must succeed — proving the file is never
+		// touched for mixed rules.
+		missing := filepath.Join(t.TempDir(), "never-read")
+		expression := "request.header.Get('X-Origin')"
+
+		hp, err := NewHeaderPropagation(t.Context(), zap.NewNop(), &config.HeaderRules{
+			All: &config.GlobalHeaderRule{
+				Request: []*config.RequestHeaderRule{
+					{
+						Operation:  config.HeaderRuleOperationSet,
+						Name:       "X-Auth",
+						Expression: expression,
+						FromFile:   &config.FileHeaderSource{Path: missing, RefreshInterval: time.Second},
+					},
+				},
+			},
+		}, nil)
+		require.NoError(t, err, "validation must short-circuit before os.Stat for mixed rules")
+		require.NotNil(t, hp)
+		assert.Empty(t, hp.fileSourceContents)
+	})
+}
+
+func TestSubtractAge(t *testing.T) {
+	t.Parallel()
+
+	for _, tc := range []struct {
+		name            string
+		maxAge, sMaxAge cachedirective.DeltaSeconds
+		age             string
+		wantMaxAge      cachedirective.DeltaSeconds
+		wantSMaxAge     cachedirective.DeltaSeconds
+	}{
+		{name: "shortens both", maxAge: 45, sMaxAge: 10, age: "4", wantMaxAge: 41, wantSMaxAge: 6},
+		{name: "stale on arrival is zero", maxAge: 10, sMaxAge: -1, age: "30", wantMaxAge: 0, wantSMaxAge: -1},
+		{name: "absent lifetimes stay absent", maxAge: -1, sMaxAge: -1, age: "5", wantMaxAge: -1, wantSMaxAge: -1},
+		{name: "invalid age is ignored", maxAge: 10, sMaxAge: -1, age: "soon", wantMaxAge: 10, wantSMaxAge: -1},
+		{name: "age list uses the first member", maxAge: 45, sMaxAge: -1, age: "40, 5", wantMaxAge: 5, wantSMaxAge: -1},
+		{name: "no age", maxAge: 10, sMaxAge: -1, wantMaxAge: 10, wantSMaxAge: -1},
+		{name: "overflowing age is stale", maxAge: 10, sMaxAge: -1, age: "99999999999999999999", wantMaxAge: 0, wantSMaxAge: -1},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			dir := &cachedirective.ResponseCacheDirectives{MaxAge: tc.maxAge, SMaxAge: tc.sMaxAge}
+			subtractAge(dir, tc.age)
+			assert.Equal(t, tc.wantMaxAge, dir.MaxAge)
+			assert.Equal(t, tc.wantSMaxAge, dir.SMaxAge)
+		})
+	}
+}
+
+func TestExpiresAsMaxAge(t *testing.T) {
+	t.Parallel()
+
+	date := time.Date(2026, 10, 21, 12, 0, 0, 0, time.UTC)
+	at := func(d time.Duration) string { return date.Add(d).Format(http.TimeFormat) }
+
+	for _, tc := range []struct {
+		name            string
+		maxAge, sMaxAge cachedirective.DeltaSeconds
+		expires         []string
+		wantMaxAge      cachedirective.DeltaSeconds
+	}{
+		{name: "expires less date", maxAge: -1, sMaxAge: -1, expires: []string{at(time.Minute)}, wantMaxAge: 60},
+		{name: "past expires", maxAge: -1, sMaxAge: -1, expires: []string{at(-time.Minute)}, wantMaxAge: 0},
+		{name: "invalid expires", maxAge: -1, sMaxAge: -1, expires: []string{"0"}, wantMaxAge: 0},
+		{name: "max-age wins", maxAge: 10, sMaxAge: -1, expires: []string{at(time.Minute)}, wantMaxAge: 10},
+		{name: "s-maxage keeps expires for private caches", maxAge: -1, sMaxAge: 300, expires: []string{at(time.Minute)}, wantMaxAge: 60},
+		{name: "s-maxage keeps invalid expires", maxAge: -1, sMaxAge: 300, expires: []string{"0"}, wantMaxAge: 0},
+		{name: "no expires", maxAge: -1, sMaxAge: -1, wantMaxAge: -1},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			header := http.Header{"Date": {at(0)}}
+			if tc.expires != nil {
+				header["Expires"] = tc.expires
+			}
+			dir := &cachedirective.ResponseCacheDirectives{MaxAge: tc.maxAge, SMaxAge: tc.sMaxAge}
+			expiresAsMaxAge(dir, header)
+			assert.Equal(t, tc.wantMaxAge, dir.MaxAge)
+		})
+	}
+}
+
+func TestMarkStale(t *testing.T) {
+	t.Parallel()
+
+	dir, err := cachedirective.ParseResponseCacheControl(`max-age=10, no-cache="Set-Cookie"`)
+	require.NoError(t, err)
+	subtractAge(dir, "30")
+	markStale(dir)
+	_, header := createMostRestrictivePolicy([]*cachedirective.Object{{RespDirectives: dir}})
+	require.Equal(t, "no-cache", header, "a stale response is bare no-cache, not field-specific")
+}

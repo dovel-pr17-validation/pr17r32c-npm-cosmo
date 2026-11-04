@@ -1,0 +1,12 @@
+/router
+__debug_bin
+__schemas/config.json
+access.log
+config.yaml
+
+# debug vscode
+__debug_bin*
+
+# Router plugins
+/plugins
+__schemas/manifest/

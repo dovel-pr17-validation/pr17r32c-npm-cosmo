@@ -1,0 +1,144 @@
+name: Controlplane CI
+on:
+  pull_request:
+    paths:
+      - 'pnpm-lock.yaml'
+      - 'controlplane/**/*'
+      - 'connect/**/*'
+      - 'composition/**/*'
+      - 'shared/**/*'
+      - '.github/workflows/controlplane-ci.yaml'
+      - '.github/compose/controlplane-ci.yaml'
+      - '.github/scripts/setup-keycloak.sh'
+
+concurrency:
+  group: ${{github.workflow}}-${{github.head_ref}}
+  cancel-in-progress: true
+
+env:
+  CI: true
+  DO_NOT_TRACK: '1'
+
+jobs:
+  test_shard:
+    timeout-minutes: 20
+    strategy:
+      matrix:
+        shard: [1, 2, 3]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: write
+    env:
+      DOCKER_CREDENTIALS_AVAILABLE: ${{ secrets.DOCKER_USERNAME != '' && secrets.DOCKER_PASSWORD != '' }}
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Log in to Docker Hub
+        if: env.DOCKER_CREDENTIALS_AVAILABLE == 'true'
+        uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKER_USERNAME }}
+          password: ${{ secrets.DOCKER_PASSWORD }}
+
+      - name: Start service containers
+        run: docker compose --project-name controlplane-ci --file .github/compose/controlplane-ci.yaml up --detach --wait --wait-timeout 60
+
+      - uses: pnpm/setup@84cb39b217b10273981911c288cd62326dc7c6d2 # v2
+        with:
+          cache: true
+          install: false
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Generate code
+        run: pnpm buf generate --template buf.ts.gen.yaml
+
+      - name: Install react-email
+        run: pnpm add -g react-email
+
+      - name: Generate email templates
+        run: pnpm run --filter ./controlplane/emails build
+
+      - name: Lint & format
+        run: pnpm run --filter ./controlplane/ lint:fix
+
+      - uses: ./.github/actions/git-dirty-check
+        with:
+          package-name: controlplane
+
+      - name: Build
+        run: pnpm run --filter ./controlplane --filter ./connect --filter ./shared --filter ./composition --filter ./protographic build
+
+      - name: Check `dist` directory structure
+        run: |
+          if [ ! -f "controlplane/dist/index.js" ]; then
+            exit 1
+          fi
+        shell: bash
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: 'zulu'
+          java-version: '20.0.2'
+
+      - name: Setup Keycloak
+        run: nohup .github/scripts/setup-keycloak.sh &
+
+      - name: Test
+        run: |
+          pnpm --filter controlplane exec tsc -p tsconfig.test.json
+          pnpm --filter controlplane exec vitest run --reporter=default --reporter=hanging-process --coverage --shard=${{ matrix.shard }}/3
+        env:
+          DB_URL: 'postgresql://postgres:changeme@localhost:5432/controlplane'
+
+      - name: Upload Coverage to Codecov
+        uses: ./.github/actions/codecov-upload-pr
+        with:
+          artifact-name: controlplane-tests-coverage-${{ matrix.shard }}
+          coverage-path: |
+            controlplane/coverage/clover.xml
+            controlplane/coverage/coverage-final.json
+          retention-days: 14
+          codecov-token: ${{ secrets.CODECOV_TOKEN }}
+
+      - name: Stop service containers
+        if: always()
+        continue-on-error: true
+        run: docker compose --project-name controlplane-ci --file .github/compose/controlplane-ci.yaml down --volumes --remove-orphans
+
+  build_test:
+    name: build_test
+    needs: [test_shard]
+    if: ${{ always() }}
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check test shards
+        run: |
+          if [ "${{ needs.test_shard.result }}" != "success" ]; then
+            echo "Test shards did not all succeed."
+            exit 1
+          fi
+
+  build_push_image:
+    # This is a limitation of GitHub. Only organization members can push to GitHub Container Registry
+    # For now, we will disable the push to the GitHub Container Registry for external contributors
+    if: github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: ./.github/actions/build-push-image
+        with:
+          docker_username: ${{secrets.DOCKER_USERNAME}}
+          docker_password: ${{secrets.DOCKER_PASSWORD}}
+          docker_context: .
+          dockerfile: controlplane/Dockerfile
+          token: ${{secrets.GITHUB_TOKEN}}
+          image_name: controlplane
+          image_description: 'Cosmo Controlplane'

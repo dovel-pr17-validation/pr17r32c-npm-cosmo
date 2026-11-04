@@ -1,0 +1,122 @@
+package config
+
+import (
+	"fmt"
+	"os"
+	"regexp"
+	"strconv"
+	"strings"
+
+	"github.com/dustin/go-humanize"
+)
+
+type RegExArray []*regexp.Regexp
+
+func (b *RegExArray) UnmarshalText(value []byte) error {
+
+	// Reset the array to not merge environment variables
+	*b = nil
+
+	if len(value) == 0 {
+		return nil
+	}
+
+	text := string(value)
+
+	regStrings := strings.SplitSeq(text, ",")
+
+	for regString := range regStrings {
+		reg, err := regexp.Compile(regString)
+		if err != nil {
+			return fmt.Errorf("could not compile regex string: %w", err)
+		}
+		*b = append(*b, reg)
+	}
+
+	return nil
+}
+
+func (p *JWTOnError) UnmarshalYAML(unmarshal func(any) error) error {
+	// Decode the scalar before assigning to the named string type so invalid
+	// YAML types produce a configuration error instead of a decoder panic.
+	var value any
+	if err := unmarshal(&value); err != nil {
+		return err
+	}
+	policy, ok := value.(string)
+	if !ok {
+		return fmt.Errorf("authentication.jwt.on_error must be a string")
+	}
+	if JWTOnError(policy) != JWTOnErrorReject && JWTOnError(policy) != JWTOnErrorContinue {
+		return fmt.Errorf("authentication.jwt.on_error must be reject or continue, got %q", policy)
+	}
+	*p = JWTOnError(policy)
+	return nil
+}
+
+func (b *RegExArray) UnmarshalYAML(unmarshal func(any) error) error {
+	var s []string
+	if err := unmarshal(&s); err != nil {
+		return err
+	}
+	return b.UnmarshalText([]byte(strings.Join(s, ",")))
+}
+
+func (b RegExArray) MarshalYAML() (any, error) {
+	var s []string
+	for _, reg := range b {
+		s = append(s, reg.String())
+	}
+	return s, nil
+
+}
+
+type BytesString uint64
+
+func (b BytesString) Uint64() uint64 {
+	return uint64(b)
+}
+
+func (b *BytesString) UnmarshalText(value []byte) error {
+	decoded, err := humanize.ParseBytes(string(value))
+	if err != nil {
+		return fmt.Errorf("could not parse bytes string: %w", err)
+	}
+
+	*b = BytesString(decoded)
+
+	return nil
+}
+
+func (b *BytesString) UnmarshalYAML(unmarshal func(any) error) error {
+	var s string
+	if err := unmarshal(&s); err != nil {
+		return err
+	}
+	return b.UnmarshalText([]byte(s))
+}
+
+func (b BytesString) MarshalYAML() (any, error) {
+	return humanize.Bytes(uint64(b)), nil
+}
+
+type FileMode os.FileMode
+
+func (b *FileMode) UnmarshalText(value []byte) error {
+	decoded, err := strconv.ParseUint(string(value), 8, 32)
+	if err != nil {
+		return fmt.Errorf("could not parse file mode: %w", err)
+	}
+
+	*b = FileMode(decoded)
+
+	return nil
+}
+
+func (b *FileMode) UnmarshalYAML(unmarshal func(any) error) error {
+	var s string
+	if err := unmarshal(&s); err != nil {
+		return err
+	}
+	return b.UnmarshalText([]byte(s))
+}

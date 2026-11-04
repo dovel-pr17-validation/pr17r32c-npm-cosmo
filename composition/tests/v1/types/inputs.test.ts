@@ -1,0 +1,737 @@
+import {
+  duplicateInputFieldDefinitionError,
+  incompatibleInputValueDefaultValueTypeError,
+  INPUT_OBJECT,
+  type InputValueData,
+  invalidNamedTypeError,
+  invalidRequiredInputValueError,
+  noInputValueDefinitionsError,
+  type ObjectDefinitionData,
+  parse,
+  ROUTER_COMPATIBILITY_VERSION_ONE,
+  type Subgraph,
+  subgraphValidationError,
+} from '../../../src';
+import { describe, expect, test } from 'vitest';
+import { SCHEMA_QUERY_DEFINITION, stringToTypeNode, TAG_DIRECTIVE } from '../utils/utils';
+import {
+  federateSubgraphsFailure,
+  federateSubgraphsSuccess,
+  normalizeString,
+  normalizeSubgraphFailure,
+  normalizeSubgraphSuccess,
+  schemaToSortedNormalizedString,
+} from '../../utils/utils';
+import { Kind } from 'graphql';
+
+describe('Input tests', () => {
+  describe('Normalization tests', () => {
+    test('that an Input Object extension orphan is valid', () => {
+      const { schema } = normalizeSubgraphSuccess(subgraphM, ROUTER_COMPATIBILITY_VERSION_ONE);
+      expect(schemaToSortedNormalizedString(schema)).toBe(
+        normalizeString(
+          `
+          input Input {
+            name: String!
+          }
+        `,
+        ),
+      );
+    });
+
+    test('that an Input Object can be extended #1', () => {
+      const { schema } = normalizeSubgraphSuccess(subgraphN, ROUTER_COMPATIBILITY_VERSION_ONE);
+      expect(schemaToSortedNormalizedString(schema)).toBe(
+        normalizeString(
+          `
+          input Input {
+            age: Int!
+            name: String!
+          }
+        `,
+        ),
+      );
+    });
+
+    test('that an Input Object can be extended #2', () => {
+      const { schema } = normalizeSubgraphSuccess(subgraphO, ROUTER_COMPATIBILITY_VERSION_ONE);
+      expect(schemaToSortedNormalizedString(schema)).toBe(
+        normalizeString(
+          `
+          input Input {
+            age: Int!
+            name: String!
+          }
+        `,
+        ),
+      );
+    });
+
+    test('that an Input Object stub can be extended #1', () => {
+      const { schema } = normalizeSubgraphSuccess(subgraphP, ROUTER_COMPATIBILITY_VERSION_ONE);
+      expect(schemaToSortedNormalizedString(schema)).toBe(
+        normalizeString(
+          `
+          input Input {
+            name: String!
+          }
+        `,
+        ),
+      );
+    });
+
+    test('that an Input Object stub can be extended #2', () => {
+      const { schema } = normalizeSubgraphSuccess(subgraphQ, ROUTER_COMPATIBILITY_VERSION_ONE);
+      expect(schemaToSortedNormalizedString(schema)).toBe(
+        normalizeString(
+          `
+          input Input {
+            name: String!
+          }
+        `,
+        ),
+      );
+    });
+
+    test('that an Input Object stub can be extended #3', () => {
+      const { schema } = normalizeSubgraphSuccess(subgraphR, ROUTER_COMPATIBILITY_VERSION_ONE);
+      expect(schemaToSortedNormalizedString(schema)).toBe(
+        normalizeString(
+          TAG_DIRECTIVE +
+            `
+          input Input @tag(name: "name") {
+            name: String!
+          }
+        `,
+        ),
+      );
+    });
+
+    test('that an Input Object stub can be extended #4', () => {
+      const { schema } = normalizeSubgraphSuccess(subgraphS, ROUTER_COMPATIBILITY_VERSION_ONE);
+      expect(schemaToSortedNormalizedString(schema)).toBe(
+        normalizeString(
+          TAG_DIRECTIVE +
+            `
+          input Input @tag(name: "name") {
+            name: String!
+          }
+        `,
+        ),
+      );
+    });
+
+    test('that an Input Object stub can be extended #5', () => {
+      const { schema } = normalizeSubgraphSuccess(subgraphT, ROUTER_COMPATIBILITY_VERSION_ONE);
+      expect(schemaToSortedNormalizedString(schema)).toBe(
+        normalizeString(
+          TAG_DIRECTIVE +
+            `
+          input Input @tag(name: "name") {
+            name: String!
+          }
+        `,
+        ),
+      );
+    });
+
+    test('that an Input Object can be extended with just a directive #1', () => {
+      const { schema } = normalizeSubgraphSuccess(subgraphU, ROUTER_COMPATIBILITY_VERSION_ONE);
+      expect(schemaToSortedNormalizedString(schema)).toBe(
+        normalizeString(
+          TAG_DIRECTIVE +
+            `
+          input Input @tag(name: "name") {
+            name: String!
+          }
+        `,
+        ),
+      );
+    });
+
+    test('that an Input Object can be extended with just a directive #2', () => {
+      const { schema } = normalizeSubgraphSuccess(subgraphV, ROUTER_COMPATIBILITY_VERSION_ONE);
+      expect(schemaToSortedNormalizedString(schema)).toBe(
+        normalizeString(
+          TAG_DIRECTIVE +
+            `
+          input Input @tag(name: "name") {
+            name: String!
+          }
+        `,
+        ),
+      );
+    });
+
+    test('that an Input Object extension can be extended with just a directive #1', () => {
+      const { schema } = normalizeSubgraphSuccess(subgraphW, ROUTER_COMPATIBILITY_VERSION_ONE);
+      expect(schemaToSortedNormalizedString(schema)).toBe(
+        normalizeString(
+          TAG_DIRECTIVE +
+            `
+          input Input @tag(name: "name") {
+            name: String!
+          }
+        `,
+        ),
+      );
+    });
+
+    test('that an Input Object extension can be extended with just a directive #2', () => {
+      const { schema } = normalizeSubgraphSuccess(subgraphX, ROUTER_COMPATIBILITY_VERSION_ONE);
+      expect(schemaToSortedNormalizedString(schema)).toBe(
+        normalizeString(
+          TAG_DIRECTIVE +
+            `
+          input Input @tag(name: "name") {
+            name: String!
+          }
+        `,
+        ),
+      );
+    });
+
+    test('that an error is returned if a final Input Object does not define any values', () => {
+      const { errors } = normalizeSubgraphFailure(subgraphE, ROUTER_COMPATIBILITY_VERSION_ONE);
+      expect(errors).toHaveLength(1);
+      expect(errors[0]).toStrictEqual(noInputValueDefinitionsError('Input'));
+    });
+
+    test('that an error is returned if a final Input Object extension does not define values', () => {
+      const { errors } = normalizeSubgraphFailure(subgraphF, ROUTER_COMPATIBILITY_VERSION_ONE);
+      expect(errors).toHaveLength(1);
+      expect(errors[0]).toStrictEqual(noInputValueDefinitionsError('Input'));
+    });
+
+    test('that an error is returned if a final extended Input Object does not define any values #1', () => {
+      const { errors } = normalizeSubgraphFailure(subgraphG, ROUTER_COMPATIBILITY_VERSION_ONE);
+      expect(errors).toHaveLength(1);
+      expect(errors[0]).toStrictEqual(noInputValueDefinitionsError('Input'));
+    });
+
+    test('that an error is returned if a final extended Input Object does not define any values #2', () => {
+      const { errors } = normalizeSubgraphFailure(subgraphH, ROUTER_COMPATIBILITY_VERSION_ONE);
+      expect(errors).toHaveLength(1);
+      expect(errors[0]).toStrictEqual(noInputValueDefinitionsError('Input'));
+    });
+
+    test('that an error is returned if a an Input Object defines a duplicate value', () => {
+      const { errors } = normalizeSubgraphFailure(subgraphI, ROUTER_COMPATIBILITY_VERSION_ONE);
+      expect(errors).toHaveLength(1);
+      expect(errors[0]).toStrictEqual(duplicateInputFieldDefinitionError('Input', 'name'));
+    });
+
+    test('that an error is returned if a an Input Object extension defines a duplicate value #1', () => {
+      const { errors } = normalizeSubgraphFailure(subgraphJ, ROUTER_COMPATIBILITY_VERSION_ONE);
+      expect(errors).toHaveLength(1);
+      expect(errors[0]).toStrictEqual(duplicateInputFieldDefinitionError('Input', 'name'));
+    });
+
+    test('that an error is returned if a an extended Input Object defines a duplicate value #1', () => {
+      const { errors } = normalizeSubgraphFailure(subgraphK, ROUTER_COMPATIBILITY_VERSION_ONE);
+      expect(errors).toHaveLength(1);
+      expect(errors[0]).toStrictEqual(duplicateInputFieldDefinitionError('Input', 'name'));
+    });
+
+    test('that an error is returned if a an extended Input Object defines a duplicate value #2', () => {
+      const { errors } = normalizeSubgraphFailure(subgraphL, ROUTER_COMPATIBILITY_VERSION_ONE);
+      expect(errors).toHaveLength(1);
+      expect(errors[0]).toStrictEqual(duplicateInputFieldDefinitionError('Input', 'name'));
+    });
+
+    test('that an error is returned if an Input field returns an output node type', () => {
+      const { errors } = normalizeSubgraphFailure(naa, ROUTER_COMPATIBILITY_VERSION_ONE);
+      expect(errors).toHaveLength(1);
+      expect(errors[0]).toStrictEqual(
+        invalidNamedTypeError({
+          data: {
+            kind: Kind.INPUT_VALUE_DEFINITION,
+            originalCoords: 'Input.field',
+            type: stringToTypeNode('EntityInterface!'),
+          } as InputValueData,
+          namedTypeData: { kind: Kind.OBJECT_TYPE_DEFINITION, name: 'EntityInterface' } as ObjectDefinitionData,
+          nodeType: 'Input Object field',
+        }),
+      );
+    });
+  });
+
+  describe('Federation tests', () => {
+    test('that Input Objects merge by intersection if the removed values are nullable', () => {
+      const { federatedGraphSchema } = federateSubgraphsSuccess(
+        [subgraphA, subgraphB],
+        ROUTER_COMPATIBILITY_VERSION_ONE,
+      );
+      expect(schemaToSortedNormalizedString(federatedGraphSchema)).toBe(
+        normalizeString(
+          SCHEMA_QUERY_DEFINITION +
+            `
+            type Query {
+              dummy: String!
+            }
+
+            input TechnicalMachine {
+              move: String!
+              number: Int!
+            }
+          `,
+        ),
+      );
+    });
+
+    test('that a required Input Object value that is omitted from the federated graph returns an error', () => {
+      const { errors } = federateSubgraphsFailure([subgraphA, subgraphC], ROUTER_COMPATIBILITY_VERSION_ONE);
+      expect(errors).toHaveLength(1);
+      expect(errors[0]).toStrictEqual(
+        invalidRequiredInputValueError(
+          INPUT_OBJECT,
+          'TechnicalMachine',
+          [
+            { inputValueName: 'move', missingSubgraphs: ['subgraph-c'], requiredSubgraphs: ['subgraph-a'] },
+            { inputValueName: 'number', missingSubgraphs: ['subgraph-c'], requiredSubgraphs: ['subgraph-a'] },
+          ],
+          false,
+        ),
+      );
+    });
+
+    test('that @deprecated is persisted on an Input field', () => {
+      const { federatedGraphSchema } = federateSubgraphsSuccess([subgraphD], ROUTER_COMPATIBILITY_VERSION_ONE);
+      expect(schemaToSortedNormalizedString(federatedGraphSchema)).toBe(
+        normalizeString(
+          SCHEMA_QUERY_DEFINITION +
+            `
+            input Input {
+              id: ID
+              name: String @deprecated(reason: "use id")
+            }
+
+            type Query {
+              dummy: String!
+            }
+          `,
+        ),
+      );
+    });
+
+    test('that Float Input field accept integer default values', () => {
+      const { federatedGraphSchema } = federateSubgraphsSuccess(
+        [subgraphWithInputField('subgraph', 'Float = 1')],
+        ROUTER_COMPATIBILITY_VERSION_ONE,
+      );
+      expect(schemaToSortedNormalizedString(federatedGraphSchema)).toBe(
+        normalizeString(
+          SCHEMA_QUERY_DEFINITION +
+            `
+            input Input {
+              field: Float = 1
+            }
+
+            type Query {
+              dummy: String!
+            }
+          `,
+        ),
+      );
+    });
+
+    test('that an error is returned if a required Input field uses a null default value', () => {
+      const { errors } = federateSubgraphsFailure(
+        [subgraphWithInputField('subgraph', 'String! = null')],
+        ROUTER_COMPATIBILITY_VERSION_ONE,
+      );
+      expect(errors).toHaveLength(1);
+      expect(errors[0]).toStrictEqual(
+        subgraphValidationError('subgraph', [
+          incompatibleInputValueDefaultValueTypeError('Input field "field"', 'Input.field', 'String!', 'null'),
+        ]),
+      );
+    });
+
+    test.skip('that an error is returned if a required Input field uses an object default value', () => {
+      const { errors } = federateSubgraphsFailure(
+        [subgraphWithInputField('subgraph', 'String! = { field: "value" }')],
+        ROUTER_COMPATIBILITY_VERSION_ONE,
+      );
+      expect(errors).toHaveLength(1);
+      expect(errors[0]).toStrictEqual(
+        subgraphValidationError('subgraph', [
+          incompatibleInputValueDefaultValueTypeError('Input field "name"', 'Input.name', 'String!', 'null'),
+        ]),
+      );
+    });
+
+    // @TODO a String input should coerce a default value string without quotations into a string
+    test.skip('that an error is returned if a required Input field uses an enum default value', () => {
+      const { errors } = federateSubgraphsFailure(
+        [subgraphWithInputField('subgraph', 'String! = VALUE')],
+        ROUTER_COMPATIBILITY_VERSION_ONE,
+      );
+      expect(errors).toHaveLength(1);
+      expect(errors[0]).toStrictEqual(
+        subgraphValidationError('subgraph', [
+          incompatibleInputValueDefaultValueTypeError('Input field "field"', 'Input.field', 'String!', 'VALUE'),
+        ]),
+      );
+    });
+
+    test('that an error is returned if a required argument uses a null default value', () => {
+      const { errors } = federateSubgraphsFailure(
+        [subgraphWithInputField('subgraph', 'Boolean! = null')],
+        ROUTER_COMPATIBILITY_VERSION_ONE,
+      );
+      expect(errors).toHaveLength(1);
+      expect(errors[0]).toStrictEqual(
+        subgraphValidationError('subgraph', [
+          incompatibleInputValueDefaultValueTypeError('Input field "field"', 'Input.field', 'Boolean!', 'null'),
+        ]),
+      );
+    });
+
+    test('that an error is returned if a required argument defines an incompatible default value', () => {
+      const { errors } = federateSubgraphsFailure(
+        [subgraphWithInputField('subgraph', 'Int = "test"')],
+        ROUTER_COMPATIBILITY_VERSION_ONE,
+      );
+      expect(errors).toHaveLength(1);
+      expect(errors[0]).toStrictEqual(
+        subgraphValidationError('subgraph', [
+          incompatibleInputValueDefaultValueTypeError('Input field "field"', 'Input.field', 'Int', '"test"'),
+        ]),
+      );
+    });
+
+    test('that an error is returned if an Int input receives a float default value', () => {
+      const { errors } = federateSubgraphsFailure(
+        [subgraphWithInputField('subgraph', 'Int = 1.0')],
+        ROUTER_COMPATIBILITY_VERSION_ONE,
+      );
+      expect(errors).toHaveLength(1);
+      expect(errors[0]).toStrictEqual(
+        subgraphValidationError('subgraph', [
+          incompatibleInputValueDefaultValueTypeError('Input field "field"', 'Input.field', 'Int', '1.0'),
+        ]),
+      );
+    });
+  });
+});
+
+function subgraphWithInputField(name: string, typeName: string): Subgraph {
+  return {
+    name,
+    url: '',
+    definitions: parse(`
+      type Query {
+        dummy: String!
+      }
+
+      input Input {
+        field: ${typeName}
+      }
+    `),
+  };
+}
+
+const subgraphA: Subgraph = {
+  name: 'subgraph-a',
+  url: '',
+  definitions: parse(`
+    type Query {
+      dummy: String!
+    }
+
+    input TechnicalMachine {
+      move: String!
+      number: Int!
+      name: String
+    }
+  `),
+};
+
+const subgraphB: Subgraph = {
+  name: 'subgraph-b',
+  url: '',
+  definitions: parse(`
+    input TechnicalMachine {
+      move: String
+      number: Int
+      cost: Float
+      reusable: Boolean
+    }
+  `),
+};
+
+const subgraphC: Subgraph = {
+  name: 'subgraph-c',
+  url: '',
+  definitions: parse(`
+    input TechnicalMachine {
+      name: String!
+    }
+  `),
+};
+
+const subgraphD: Subgraph = {
+  name: 'subgraph-d',
+  url: '',
+  definitions: parse(`
+    type Query {
+      dummy: String!
+    }
+
+    input Input {
+      name: String @deprecated(reason: "use id")
+      id: ID
+    }
+  `),
+};
+
+const subgraphE: Subgraph = {
+  name: 'subgraph-e',
+  url: '',
+  definitions: parse(`
+    input Input
+  `),
+};
+
+const subgraphF: Subgraph = {
+  name: 'subgraph-f',
+  url: '',
+  definitions: parse(`
+    extend input Input @tag(name: "test")
+  `),
+};
+
+const subgraphG: Subgraph = {
+  name: 'subgraph-g',
+  url: '',
+  definitions: parse(`
+    input Input
+    extend input Input @tag(name: "test")
+  `),
+};
+
+const subgraphH: Subgraph = {
+  name: 'subgraph-h',
+  url: '',
+  definitions: parse(`
+    extend input Input @tag(name: "test")
+    input Input
+  `),
+};
+
+const subgraphI: Subgraph = {
+  name: 'subgraph-i',
+  url: '',
+  definitions: parse(`
+    input Input {
+      name: String!
+      name: String!
+    }
+  `),
+};
+
+const subgraphJ: Subgraph = {
+  name: 'subgraph-j',
+  url: '',
+  definitions: parse(`
+    extend input Input {
+      name: String!
+      name: String!
+    }
+  `),
+};
+
+const subgraphK: Subgraph = {
+  name: 'subgraph-k',
+  url: '',
+  definitions: parse(`
+    input Input {
+      name: String!
+    }
+    
+    extend input Input {
+      name: String!
+    }
+  `),
+};
+
+const subgraphL: Subgraph = {
+  name: 'subgraph-l',
+  url: '',
+  definitions: parse(`
+    extend input Input {
+      name: String!
+    }
+    
+    input Input {
+      name: String!
+    }
+  `),
+};
+
+const subgraphM: Subgraph = {
+  name: 'subgraph-m',
+  url: '',
+  definitions: parse(`
+    extend input Input {
+      name: String!
+    }
+  `),
+};
+
+const subgraphN: Subgraph = {
+  name: 'subgraph-n',
+  url: '',
+  definitions: parse(`
+    input Input {
+      age: Int!  
+    }
+    
+    extend input Input {
+      name: String!
+    }
+  `),
+};
+
+const subgraphO: Subgraph = {
+  name: 'subgraph-o',
+  url: '',
+  definitions: parse(`
+    extend input Input {
+      name: String!
+    }
+    
+    input Input {
+      age: Int!  
+    }
+  `),
+};
+
+const subgraphP: Subgraph = {
+  name: 'subgraph-p',
+  url: '',
+  definitions: parse(`
+    input Input
+    
+    extend input Input {
+      name: String!
+    }
+  `),
+};
+
+const subgraphQ: Subgraph = {
+  name: 'subgraph-q',
+  url: '',
+  definitions: parse(`
+    extend input Input {
+      name: String!
+    }
+    
+    input Input
+  `),
+};
+
+const subgraphR: Subgraph = {
+  name: 'subgraph-r',
+  url: '',
+  definitions: parse(`
+    input Input
+    
+    extend input Input {
+      name: String!
+    }
+    
+    extend input Input @tag(name: "name")
+  `),
+};
+
+const subgraphS: Subgraph = {
+  name: 'subgraph-s',
+  url: '',
+  definitions: parse(`
+    extend input Input {
+      name: String!
+    }
+    
+    input Input
+    
+    extend input Input @tag(name: "name")
+  `),
+};
+
+const subgraphT: Subgraph = {
+  name: 'subgraph-t',
+  url: '',
+  definitions: parse(`
+    extend input Input @tag(name: "name")
+    
+    extend input Input {
+      name: String!
+    }
+    
+    input Input
+  `),
+};
+
+const subgraphU: Subgraph = {
+  name: 'subgraph-u',
+  url: '',
+  definitions: parse(`
+    input Input {
+      name: String!
+    }
+    
+    extend input Input @tag(name: "name")
+  `),
+};
+
+const subgraphV: Subgraph = {
+  name: 'subgraph-v',
+  url: '',
+  definitions: parse(`
+    extend input Input @tag(name: "name")
+    
+    input Input {
+      name: String!
+    }
+  `),
+};
+
+const subgraphW: Subgraph = {
+  name: 'subgraph-w',
+  url: '',
+  definitions: parse(`
+    extend input Input {
+      name: String!
+    }
+
+    extend input Input @tag(name: "name")
+  `),
+};
+
+const subgraphX: Subgraph = {
+  name: 'subgraph-x',
+  url: '',
+  definitions: parse(`
+    extend input Input @tag(name: "name")
+    
+    extend input Input {
+      name: String!
+    }
+  `),
+};
+
+const naa: Subgraph = {
+  name: 'naa',
+  url: '',
+  definitions: parse(`
+    type EntityInterface @key(fields: "id") @interfaceObject {
+      id: ID!
+    }
+    
+    input Input {
+      field: EntityInterface!
+    }
+  `),
+};

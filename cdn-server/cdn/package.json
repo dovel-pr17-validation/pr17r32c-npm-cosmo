@@ -1,0 +1,38 @@
+{
+  "name": "@wundergraph/cosmo-cdn",
+  "version": "0.15.6",
+  "author": {
+    "name": "WunderGraph Maintainers",
+    "email": "info@wundergraph.com"
+  },
+  "publishConfig": {
+    "access": "public"
+  },
+  "repository": {
+    "url": "https://github.com/wundergraph/cosmo"
+  },
+  "license": "Apache-2.0",
+  "scripts": {
+    "dev": "tsc --watch",
+    "build": "rm -rf dist && tsc",
+    "test:watch": "vitest test",
+    "test": "vitest run",
+    "lint": "eslint --cache && prettier -c src test",
+    "format:fix": "prettier --write -c src test"
+  },
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "files": [
+    "dist"
+  ],
+  "dependencies": {
+    "hono": "catalog:",
+    "jose": "^5.2.4"
+  },
+  "devDependencies": {
+    "eslint": "catalog:",
+    "eslint-config-unjs": "catalog:",
+    "typescript": "catalog:",
+    "vitest": "catalog:"
+  }
+}

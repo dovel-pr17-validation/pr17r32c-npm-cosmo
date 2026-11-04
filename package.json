@@ -1,0 +1,81 @@
+{
+  "private": true,
+  "version": "0.0.1",
+  "name": "wundergraph-cosmo",
+  "license": "Apache-2.0",
+  "author": {
+    "name": "WunderGraph Maintainers",
+    "email": "info@wundergraph.com"
+  },
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "repository": {
+    "type": "https",
+    "url": "https://github.com/wundergraph/cosmo"
+  },
+  "bin": {
+    "wgc": "./dist/index.js"
+  },
+  "homepage": "https://wundergraph.com",
+  "scripts": {
+    "build": "pnpm -r run build",
+    "test": "pnpm run -r --parallel test",
+    "generate": "pnpm buf generate --path proto/wg/cosmo/platform --path proto/wg/cosmo/notifications --path proto/wg/cosmo/common --path proto/wg/cosmo/node --path proto/wg/cosmo/ai --template buf.ts.gen.yaml && pnpm -r run --filter './connect' build",
+    "generate:ptq": "pnpm buf generate --path yoko --include-imports --template ./buf.ptq.gen.yaml ssh://git@github.com/wundergraph/yoko.git#ref=bbc10383ae99fefb579ee38a55930193c8314398,subdir=proto && pnpm -r run --filter './connect' build",
+    "husky": "husky install",
+    "lint:fix": "pnpm run -r --parallel lint:fix",
+    "format": "pnpm run -r --parallel format",
+    "clean": "rm -rf node_modules **/node_modules dist **/dist gen **/gen .next **/.next tsconfig.tsbuildinfo **/tsconfig.tsbuildinfo .eslintcache **/.eslintcache",
+    "release-preview": "lerna publish --ignore-scripts --dry-run",
+    "release:version": "lerna version --yes",
+    "release:publish": "lerna publish from-package --yes",
+    "wgc": "DO_NOT_TRACK=1 pnpm -r run --filter './cli' wgc"
+  },
+  "files": [
+    "dist"
+  ],
+  "engines": {
+    "node": "22.23.4",
+    "pnpm": "11"
+  },
+  "devEngines": {
+    "runtime": {
+      "name": "node",
+      "version": "22.23.4",
+      "onFail": "download"
+    }
+  },
+  "lint-staged": {
+    "**/*.go": [
+      "sh -c 'for file in \"$@\"; do case \"$file\" in */gen/*|*/vendor/*) ;; *) gofmt -w \"$file\" ;; esac; done' --"
+    ],
+    "*.{js,jsx,ts,tsx,md,mdx,yml,yaml,css,json,graphql,gql}": [
+      "prettier --write"
+    ]
+  },
+  "dependencies": {
+    "@graphiql/plugin-explorer": "^3.1.0",
+    "@graphiql/react": "^0.22.4",
+    "@graphiql/toolkit": "^0.9.1",
+    "graphiql": "^3.3.2"
+  },
+  "devDependencies": {
+    "@bufbuild/buf": "^1.34.0",
+    "@bufbuild/protoc-gen-es": "catalog:",
+    "@commitlint/cli": "19.8.0",
+    "@commitlint/config-conventional": "19.8.0",
+    "@connectrpc/connect-query": "catalog:",
+    "@connectrpc/protoc-gen-connect-query": "catalog:",
+    "@lerna-lite/cli": "4.11.4",
+    "@lerna-lite/publish": "4.11.4",
+    "@lerna-lite/version": "4.11.4",
+    "conventional-changelog-conventionalcommits": "9.1.0",
+    "husky": "^8.0.3",
+    "lint-staged": "^15.2.10",
+    "prettier": "catalog:",
+    "ts-node": "^10.9.2",
+    "typescript": "catalog:",
+    "vitest": "catalog:"
+  },
+  "packageManager": "pnpm@11.25.0+sha512.5cde925b4f075f725eb71fbae18a42ffe784524789f19b61c731cb8721ec28aaee160e01a8d5af4fedb2a42cdbf300efe23db356b0d4a17b4d63e11f8ab7c956"
+}

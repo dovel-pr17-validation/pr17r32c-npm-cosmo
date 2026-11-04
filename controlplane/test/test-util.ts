@@ -1,0 +1,1121 @@
+import { createHash, randomUUID, UUID } from 'node:crypto';
+import { join, resolve } from 'node:path';
+import fs from 'node:fs';
+import { createClient, Client } from '@connectrpc/connect';
+import { fastifyConnectPlugin } from '@connectrpc/connect-fastify';
+import { createConnectTransport } from '@connectrpc/connect-node';
+import { EnumStatusCode } from '@wundergraph/cosmo-connect/dist/common/common_pb';
+import { NodeService } from '@wundergraph/cosmo-connect/dist/node/v1/node_pb';
+import { PlatformService } from '@wundergraph/cosmo-connect/dist/platform/v1/platform_pb';
+import { formatISO, startOfTomorrow, startOfYear } from 'date-fns';
+import { drizzle, PostgresJsDatabase } from 'drizzle-orm/postgres-js';
+import Fastify from 'fastify';
+import { pino } from 'pino';
+import postgres from 'postgres';
+import { afterEach, beforeAll, beforeEach, describe, expect, vi } from 'vitest';
+import { AIService } from '@wundergraph/cosmo-connect/dist/ai/v1/ai_pb';
+import { BlobNotFoundError, BlobObject, BlobStorage } from '../src/core/blobstorage/index.js';
+import { ClickHouseClient } from '../src/core/clickhouse/index.js';
+import ScimController from '../src/core/controllers/scim.js';
+import database from '../src/core/plugins/database.js';
+import fastifyRedis from '../src/core/plugins/redis.js';
+import { ApiKeyRepository } from '../src/core/repositories/ApiKeyRepository.js';
+import { BillingRepository, billingSchema } from '../src/core/repositories/BillingRepository.js';
+import { NamespaceLoginMethodRepository } from '../src/core/repositories/NamespaceLoginMethodRepository.js';
+import { OrganizationRepository } from '../src/core/repositories/OrganizationRepository.js';
+import { UserRepository } from '../src/core/repositories/UserRepository.js';
+import { RBACEvaluator } from '../src/core/services/RBACEvaluator.js';
+import routes from '../src/core/routes.js';
+import ApiKeyAuthenticator from '../src/core/services/ApiKeyAuthenticator.js';
+import { Authorization } from '../src/core/services/Authorization.js';
+import Keycloak from '../src/core/services/Keycloak.js';
+import Mailer from '../src/core/services/Mailer.js';
+import {
+  createTestAuthenticator,
+  createTestContext,
+  seedTest,
+  TestAuthenticator,
+  TestAuthenticatorOptions,
+  UserTestData,
+} from '../src/core/test-util.js';
+import { MockPlatformWebhookService } from '../src/core/webhooks/PlatformWebhookService.js';
+import { AIGraphReadmeQueue } from '../src/core/workers/AIGraphReadmeWorker.js';
+import { DeleteOrganizationQueue } from '../src/core/workers/DeleteOrganizationWorker.js';
+import * as schema from '../src/db/schema.js';
+import { AuthContext, FeatureIds, Label, LoginMethod } from '../src/types/index.js';
+import { NewBillingPlan, OrganizationRole } from '../src/db/models.js';
+import { DeactivateOrganizationQueue } from '../src/core/workers/DeactivateOrganizationWorker.js';
+import { DeleteUserQueue } from '../src/core/workers/DeleteUserQueue.js';
+import { ReactivateOrganizationQueue } from '../src/core/workers/ReactivateOrganizationWorker.js';
+import { DeleteOrganizationAuditLogsQueue } from '../src/core/workers/DeleteOrganizationAuditLogsWorker.js';
+import { retryWithBackoff } from '../src/core/util/timers.js';
+import { DeleteBatchPublishJobDetailsQueue } from '../src/core/workers/DeleteBatchPublishJobDetailsWorker.js';
+import {
+  isAlreadyExistsError,
+  isRealmNotReadyError,
+  keycloakClientOptions,
+  TEST_REALM,
+} from './keycloak-test-utils.js';
+
+export const DEFAULT_ROUTER_URL = 'http://localhost:3002';
+export const DEFAULT_SUBGRAPH_URL_ONE = 'http://localhost:4001';
+export const DEFAULT_SUBGRAPH_URL_TWO = 'http://localhost:4002';
+export const DEFAULT_SUBGRAPH_URL_THREE = 'http://localhost:4003';
+export const DEFAULT_GRPC_SUBGRAPH_URL_ONE = 'localhost:4001';
+export const DEFAULT_GRPC_SUBGRAPH_URL_TWO = 'localhost:4002';
+export const DEFAULT_GRPC_SUBGRAPH_URL_THREE = 'localhost:4003';
+export const DEFAULT_NAMESPACE = 'default';
+
+const getKeycloakGroups = async (realm: string, keycloak: Keycloak, groupId: string | undefined) => {
+  if (!groupId) {
+    return [];
+  }
+
+  const subgroups = await keycloak.fetchAllSubGroups({ realm, kcGroupId: groupId });
+  return subgroups.map((group) => ({
+    id: group.id!,
+    name: group.name!,
+  }));
+};
+
+export const SetupTest = async function ({
+  dbname,
+  chClient,
+  enabledFeatures,
+  enableMultiUsers,
+  createScimKey,
+  setupBilling,
+  organizationId,
+  enableSplitConfigLoadingByDefault = true,
+}: {
+  dbname: string;
+  chClient?: ClickHouseClient;
+  enableMultiUsers?: boolean;
+  createScimKey?: boolean;
+  enabledFeatures?: FeatureIds[];
+  setupBilling?: {
+    plan: 'developer@1' | 'launch@1' | 'scale@1' | 'enterprise';
+  };
+  organizationId?: UUID;
+  enableSplitConfigLoadingByDefault?: boolean;
+}) {
+  const log = pino();
+  const databaseConnectionUrl = `postgresql://postgres:changeme@localhost:5432/${dbname}`;
+  const server = Fastify({
+    loggerInstance: log,
+  });
+
+  await server.register(database, {
+    databaseConnectionUrl,
+    debugSQL: false,
+    runMigration: true,
+  });
+
+  const companyAOrganizationId = organizationId || randomUUID();
+  const aliceContext = createTestContext('company-a', companyAOrganizationId);
+
+  const users: TestAuthenticatorOptions = {
+    adminAliceCompanyA: aliceContext,
+  };
+
+  if (enableMultiUsers) {
+    users.adminBobCompanyA = createTestContext('company-a', companyAOrganizationId);
+    users.devJoeCompanyA = createTestContext('company-a', companyAOrganizationId, ['organization-developer']);
+    users.keyManagerSmithCompanyA = createTestContext('company-a', companyAOrganizationId, [
+      'organization-apikey-manager',
+    ]);
+    users.viewerTimCompanyA = createTestContext('company-a', companyAOrganizationId, ['organization-viewer']);
+    users.adminJimCompanyB = createTestContext('company-b', randomUUID());
+  }
+
+  const realm = TEST_REALM;
+  const apiUrl = keycloakClientOptions.apiUrl;
+  const webBaseUrl = 'http://localhost:3000';
+
+  const authenticator = createTestAuthenticator(users, apiUrl, realm);
+  const keycloakClient = new Keycloak({ ...keycloakClientOptions, logger: log });
+
+  const platformWebhooks = new MockPlatformWebhookService();
+  const mailerClient = new Mailer({
+    smtpHost: '',
+    smtpPassword: '',
+    smtpPort: 0,
+    smtpRequireTls: false,
+    smtpSecure: false,
+    smtpUsername: '',
+  });
+
+  await server.register(fastifyRedis, {
+    host: 'localhost',
+    port: 6379,
+  });
+
+  const readmeQueue = new AIGraphReadmeQueue(log, server.redisForQueue);
+  const deleteOrganizationQueue = new DeleteOrganizationQueue(log, server.redisForQueue);
+  const deleteOrganizationAuditLogsQueue = new DeleteOrganizationAuditLogsQueue(log, server.redisForQueue);
+  const deactivateOrganizationQueue = new DeactivateOrganizationQueue(log, server.redisForQueue);
+  const deleteUserQueue = new DeleteUserQueue(log, server.redisForQueue);
+  const reactivateOrganizationQueue = new ReactivateOrganizationQueue(log, server.redisForQueue);
+  const deleteBatchPublishJobDetailsQueue = new DeleteBatchPublishJobDetailsQueue(log, server.redisForQueue);
+
+  const blobStorage = new InMemoryBlobStorage();
+  await server.register(fastifyConnectPlugin, {
+    routes: routes({
+      chClient,
+      db: server.db,
+      logger: pino(),
+      authenticator,
+      jwtSecret: 'secret',
+      keycloakRealm: realm,
+      keycloakClient,
+      platformWebhooks,
+      webBaseUrl,
+      slack: {
+        clientID: '1',
+        clientSecret: 'test',
+      },
+      cdnBaseUrl: 'http://localhost:11000',
+      admissionWebhookJWTSecret: 'secret',
+      keycloakApiUrl: apiUrl,
+      blobStorage,
+      mailerClient,
+      authorizer: new Authorization(log),
+      queues: {
+        readmeQueue,
+        deleteOrganizationQueue,
+        deleteOrganizationAuditLogsQueue,
+        deactivateOrganizationQueue,
+        reactivateOrganizationQueue,
+        deleteUserQueue,
+        deleteBatchPublishJobDetailsQueue,
+      },
+      lockAdapter: server.lockAdapter,
+    }),
+  });
+
+  const organizationRepository = new OrganizationRepository(log, server.db, '');
+  const userRepository = new UserRepository(log, server.db);
+  const apiKeyRepository = new ApiKeyRepository(server.db);
+  const billingRepository = new BillingRepository(server.db);
+  const apiKeyAuth = new ApiKeyAuthenticator(server.db, organizationRepository);
+  await server.register(ScimController, {
+    organizationRepository,
+    userRepository,
+    apiKeyRepository,
+    authenticator: apiKeyAuth,
+    prefix: '/scim/v2',
+    db: server.db,
+    keycloakClient,
+    keycloakRealm: realm,
+  });
+
+  const addr = await server.listen({
+    port: 0,
+  });
+
+  const queryConnection = postgres(databaseConnectionUrl);
+
+  const [id, kcRootGroupId] = await SetupKeycloak({
+    keycloakClient,
+    realmName: realm,
+    userTestData: {
+      userId: users.adminAliceCompanyA.userId,
+      organizationId: users.adminAliceCompanyA.organizationId,
+      organizationName: users.adminAliceCompanyA.organizationName,
+      organizationSlug: users.adminAliceCompanyA.organizationSlug,
+      email: users.adminAliceCompanyA.email,
+      apiKey: users.adminAliceCompanyA.apiKey,
+      roles: ['organization-admin'],
+    },
+  });
+
+  users.adminAliceCompanyA.userId = id;
+  await seedTest(
+    queryConnection,
+    users.adminAliceCompanyA,
+    createScimKey,
+    kcRootGroupId,
+    await getKeycloakGroups(realm, keycloakClient, kcRootGroupId),
+    enableSplitConfigLoadingByDefault,
+  );
+
+  if (enableMultiUsers) {
+    if (users.adminBobCompanyA) {
+      const [id, rootGroupId] = await addKeycloakUser({
+        keycloakClient,
+        realmName: realm,
+        userTestData: {
+          userId: users.adminBobCompanyA.userId,
+          organizationId: users.adminBobCompanyA.organizationId,
+          organizationName: users.adminBobCompanyA.organizationName,
+          organizationSlug: users.adminBobCompanyA.organizationSlug,
+          email: users.adminBobCompanyA.email,
+          apiKey: users.adminBobCompanyA.apiKey,
+          roles: ['organization-admin'],
+        },
+      });
+      users.adminBobCompanyA.userId = id;
+      await seedTest(
+        queryConnection,
+        users.adminBobCompanyA,
+        createScimKey,
+        rootGroupId,
+        await getKeycloakGroups(realm, keycloakClient, rootGroupId),
+        enableSplitConfigLoadingByDefault,
+      );
+    }
+
+    if (users.devJoeCompanyA) {
+      const [id, rootGroupId] = await addKeycloakUser({
+        keycloakClient,
+        realmName: realm,
+        userTestData: {
+          userId: users.devJoeCompanyA.userId,
+          organizationId: users.devJoeCompanyA.organizationId,
+          organizationName: users.devJoeCompanyA.organizationName,
+          organizationSlug: users.devJoeCompanyA.organizationSlug,
+          email: users.devJoeCompanyA.email,
+          apiKey: users.devJoeCompanyA.apiKey,
+          roles: ['organization-developer'],
+        },
+      });
+      users.devJoeCompanyA.userId = id;
+      await seedTest(
+        queryConnection,
+        users.devJoeCompanyA,
+        undefined,
+        rootGroupId,
+        await getKeycloakGroups(realm, keycloakClient, rootGroupId),
+        enableSplitConfigLoadingByDefault,
+      );
+    }
+
+    if (users.viewerTimCompanyA) {
+      const [id, rootGroupId] = await addKeycloakUser({
+        keycloakClient,
+        realmName: realm,
+        userTestData: {
+          userId: users.viewerTimCompanyA.userId,
+          organizationId: users.viewerTimCompanyA.organizationId,
+          organizationName: users.viewerTimCompanyA.organizationName,
+          organizationSlug: users.viewerTimCompanyA.organizationSlug,
+          email: users.viewerTimCompanyA.email,
+          apiKey: users.viewerTimCompanyA.apiKey,
+          roles: ['organization-developer'],
+        },
+      });
+      users.viewerTimCompanyA.userId = id;
+      await seedTest(
+        queryConnection,
+        users.viewerTimCompanyA,
+        undefined,
+        rootGroupId,
+        await getKeycloakGroups(realm, keycloakClient, rootGroupId),
+        enableSplitConfigLoadingByDefault,
+      );
+    }
+
+    if (users.adminJimCompanyB) {
+      const [id, rootGroupId] = await addKeycloakUser({
+        keycloakClient,
+        realmName: realm,
+        userTestData: {
+          userId: users.adminJimCompanyB.userId,
+          organizationId: users.adminJimCompanyB.organizationId,
+          organizationName: users.adminJimCompanyB.organizationName,
+          organizationSlug: users.adminJimCompanyB.organizationSlug,
+          email: users.adminJimCompanyB.email,
+          apiKey: users.adminJimCompanyB.apiKey,
+          roles: ['organization-admin'],
+        },
+      });
+      users.adminJimCompanyB.userId = id;
+      await seedTest(
+        queryConnection,
+        users.adminJimCompanyB,
+        createScimKey,
+        rootGroupId,
+        await getKeycloakGroups(realm, keycloakClient, rootGroupId),
+        enableSplitConfigLoadingByDefault,
+      );
+    }
+  }
+
+  if (setupBilling) {
+    await seedBilling(queryConnection);
+    await billingRepository.insertPlan(setupBilling.plan, users.adminAliceCompanyA.organizationId);
+  }
+
+  await queryConnection.end({
+    timeout: 1,
+  });
+
+  if (enabledFeatures) {
+    for (const feature of enabledFeatures) {
+      await organizationRepository.updateFeature({
+        organizationId: users.adminAliceCompanyA.organizationId,
+        id: feature,
+        enabled: true,
+      });
+      if (enableMultiUsers) {
+        if (users.adminBobCompanyA) {
+          await organizationRepository.updateFeature({
+            organizationId: users.adminBobCompanyA.organizationId,
+            id: feature,
+            enabled: true,
+          });
+        }
+        if (users.adminJimCompanyB) {
+          await organizationRepository.updateFeature({
+            organizationId: users.adminJimCompanyB.organizationId,
+            id: feature,
+            enabled: true,
+          });
+        }
+      }
+    }
+  }
+
+  const transport = createConnectTransport({
+    httpVersion: '1.1',
+    baseUrl: addr,
+    interceptors: [
+      // Interceptor to handle cosmo-cli user-agent
+      (next) => (req) => {
+        // Check if x-cosmo-client header is set to cosmo-cli
+        const cosmoClient = req.header.get('x-cosmo-client');
+
+        if (cosmoClient === 'cosmo-cli' || cosmoClient === 'cosmo-hub') {
+          const modifiedHeaders = new Headers(req.header);
+          modifiedHeaders.set('user-agent', cosmoClient);
+          // Remove the temporary header
+          modifiedHeaders.delete('x-cosmo-client');
+
+          const modifiedReq = {
+            ...req,
+            header: modifiedHeaders,
+          };
+
+          return next(modifiedReq);
+        }
+
+        // Otherwise, proceed normally
+        return next(req);
+      },
+    ],
+  });
+
+  const platformClient = createClient(PlatformService, transport);
+  const nodeClient = createClient(NodeService, transport);
+  const aiClient = createClient(AIService, transport);
+
+  return {
+    client: platformClient,
+    nodeClient,
+    aiClient,
+    server,
+    users,
+    blobStorage,
+    baseAddress: addr,
+    keycloakClient,
+    platformWebhooks,
+    authenticator,
+    mailerClient,
+    realm,
+    queues: {
+      readmeQueue,
+      deleteOrganizationQueue,
+      deleteOrganizationAuditLogsQueue,
+      deactivateOrganizationQueue,
+      deleteUserQueue,
+      reactivateOrganizationQueue,
+      deleteBatchPublishJobDetailsQueue,
+    },
+  };
+};
+
+export const SetupKeycloak = async ({
+  keycloakClient,
+  userTestData,
+  realmName,
+}: {
+  keycloakClient: Keycloak;
+  userTestData: UserTestData;
+  realmName: string;
+}) => {
+  await keycloakClient.authenticateClient();
+
+  try {
+    await keycloakClient.client.realms.create({
+      realm: realmName,
+      enabled: true,
+      displayName: realmName,
+      registrationEmailAsUsername: true,
+    });
+  } catch (e: unknown) {
+    // Ignore an existing realm (e.g. created by global setup).
+    if (!isAlreadyExistsError(e)) {
+      const message = e instanceof Error ? e.message : String(e);
+      throw new Error(`Failed to create keycloak realm: ${realmName}. ${message}`, { cause: e });
+    }
+  }
+
+  return addKeycloakUser({
+    keycloakClient,
+    userTestData,
+    realmName,
+  });
+};
+
+export async function createOrganizationGroup(
+  client: Client<typeof PlatformService>,
+  name: string,
+  ...rules: { role: OrganizationRole; namespaces?: string[]; resources?: string[] }[]
+) {
+  const createGroupResponse = await client.createOrganizationGroup({
+    name,
+    description: '',
+  });
+
+  expect(createGroupResponse.response?.code).toBe(EnumStatusCode.OK);
+  expect(createGroupResponse.group).toBeDefined();
+
+  if (rules.length === 0) {
+    // We don't need to update the group
+    return createGroupResponse.group!;
+  }
+
+  // Update the group with all the provided roles
+  const updateGroupResponse = await client.updateOrganizationGroup({
+    groupId: createGroupResponse.group!.groupId,
+    description: createGroupResponse.group!.description,
+    rules,
+  });
+
+  expect(updateGroupResponse.response?.code).toBe(EnumStatusCode.OK);
+
+  // Retrieve the group with the updated roles
+  const getGroupsResponse = await client.getOrganizationGroups({});
+  expect(getGroupsResponse.response?.code).toBe(EnumStatusCode.OK);
+
+  return getGroupsResponse.groups.find((group) => group.name === name) ?? createGroupResponse.group!;
+}
+
+export const addKeycloakUser = async ({
+  keycloakClient,
+  userTestData,
+  realmName,
+}: {
+  keycloakClient: Keycloak;
+  userTestData: UserTestData;
+  realmName: string;
+}): Promise<[string, string | undefined]> => {
+  await keycloakClient.authenticateClient();
+
+  let id: string;
+  try {
+    // Keycloak's caches can briefly lag behind the realm created in global setup ("Realm not found"),
+    // and the exact-match lookup below can likewise lag behind a conflicting write — both are transient.
+    id = await retryWithBackoff(
+      async () => {
+        try {
+          return await keycloakClient.addKeycloakUser({
+            email: userTestData.email,
+            firstName: 'Test',
+            lastName: 'User',
+            realm: realmName,
+            isPasswordTemp: false,
+            password: 'wunder@123',
+            id: userTestData.userId,
+          });
+        } catch (e: unknown) {
+          if (!isAlreadyExistsError(e)) {
+            throw e;
+          }
+
+          const existingUser = await keycloakClient.findUserByEmail({
+            realm: realmName,
+            email: userTestData.email,
+          });
+
+          if (existingUser?.id) {
+            return existingUser.id;
+          }
+
+          throw new Error(
+            `Keycloak reported a duplicate user for ${userTestData.email}, but no exact match was readable yet`,
+          );
+        }
+      },
+      {
+        attempts: 5,
+        baseInterval: 200,
+        maxInterval: 1000,
+        shouldRetry: (e) => {
+          const message = e instanceof Error ? e.message : String(e);
+          return isRealmNotReadyError(e) || /no exact match was readable/i.test(message);
+        },
+      },
+    );
+  } catch (e: unknown) {
+    const message = e instanceof Error ? e.message : String(e);
+    throw new Error(`Failed to add keycloak user: ${userTestData.email}. ${message}`, { cause: e });
+  }
+
+  let kcRootGroupId: string | undefined;
+  try {
+    const [rootGroupId] = await keycloakClient.seedGroup({
+      realm: realmName,
+      userID: id,
+      organizationSlug: userTestData.organizationSlug,
+    });
+
+    kcRootGroupId = rootGroupId;
+  } catch (e: unknown) {
+    // Ignore an already-seeded group.
+    if (!isAlreadyExistsError(e)) {
+      const message = e instanceof Error ? e.message : String(e);
+      throw new Error(`Failed to seed group: ${userTestData.organizationSlug}. ${message}`, { cause: e });
+    }
+  }
+
+  return [id, kcRootGroupId];
+};
+
+export const removeKeycloakSetup = async ({
+  keycloakClient,
+  realmName,
+}: {
+  keycloakClient: Keycloak;
+  realmName: string;
+}) => {
+  await keycloakClient.client.realms.del({
+    realm: realmName,
+  });
+};
+
+export const createThenPublishSubgraph = async (
+  client: Client<typeof PlatformService>,
+  name: string,
+  namespace: string,
+  schemaSDL: string,
+  labels: Label[],
+  routingUrl: string,
+) => {
+  const createRes = await client.createFederatedSubgraph({
+    name,
+    namespace,
+    labels,
+    routingUrl,
+  });
+  expect(createRes.response?.code).toBe(EnumStatusCode.OK);
+  const publishResp = await client.publishFederatedSubgraph({
+    name,
+    namespace,
+    schema: schemaSDL,
+  });
+  expect(publishResp.response?.code).toBe(EnumStatusCode.OK);
+
+  return publishResp;
+};
+
+export const createAndPublishSubgraph = async (
+  client: Client<typeof PlatformService>,
+  name: string,
+  namespace: string,
+  schemaSDL: string,
+  labels: Label[],
+  routingUrl: string,
+) => {
+  const publishResp = await client.publishFederatedSubgraph({
+    name,
+    namespace,
+    labels,
+    routingUrl,
+    schema: schemaSDL,
+  });
+  expect(publishResp.response?.code).toBe(EnumStatusCode.OK);
+
+  return publishResp;
+};
+
+export const createThenPublishFeatureSubgraph = async (
+  client: Client<typeof PlatformService>,
+  name: string,
+  baseSubgraphName: string,
+  namespace: string,
+  schemaSDL: string,
+  labels: Label[],
+  routingUrl: string,
+) => {
+  const createRes = await client.createFederatedSubgraph({
+    name,
+    namespace,
+    labels,
+    routingUrl,
+    isFeatureSubgraph: true,
+    baseSubgraphName,
+  });
+  expect(createRes.response?.code).toBe(EnumStatusCode.OK);
+  const publishResp = await client.publishFederatedSubgraph({
+    name,
+    namespace,
+    schema: schemaSDL,
+  });
+  expect(publishResp.response?.code).toBe(EnumStatusCode.OK);
+
+  return publishResp;
+};
+
+export const createFederatedGraph = async (
+  client: Client<typeof PlatformService>,
+  name: string,
+  namespace: string,
+  labelMatchers: string[],
+  routingUrl: string,
+) => {
+  const createFedGraphRes = await client.createFederatedGraph({
+    name,
+    namespace,
+    routingUrl,
+    labelMatchers,
+  });
+  expect(createFedGraphRes.response?.code).toBe(EnumStatusCode.OK);
+  return createFedGraphRes;
+};
+
+/**
+ * Simulates authenticating as the given login method for the supplied user.
+ *
+ * The mocked test authenticator returns a static context, so the part of
+ * `Authentication.authenticate()` that derives the IdP gate from the session's
+ * idp_alias never runs. This reproduces exactly that step — resolving the
+ * allowed-namespace set via the same `NamespaceLoginMethodRepository` the real
+ * code uses — and injects the result into the auth context's RBACEvaluator so
+ * every RPC enforces the gate. Pass `base = users.<someUser>` as the identity.
+ */
+export async function loginAs({
+  authenticator,
+  db,
+  base,
+  loginMethod,
+}: {
+  authenticator: TestAuthenticator;
+  db: PostgresJsDatabase<typeof schema>;
+  base: UserTestData & AuthContext;
+  loginMethod: LoginMethod;
+}) {
+  const ssoMappingRepo = new NamespaceLoginMethodRepository(db);
+  const namespaceAccess = await ssoMappingRepo.allowedNamespaces({
+    organizationId: base.organizationId,
+    loginMethod,
+  });
+  const rbac = new RBACEvaluator(base.rbac.groups, base.userId, loginMethod.type === 'api-key', namespaceAccess);
+  authenticator.changeUserWithSuppliedContext({ ...base, loginMethod, rbac });
+  return { namespaceAccess, rbac };
+}
+
+export class InMemoryBlobStorage implements BlobStorage {
+  private objects: Map<string, Buffer> = new Map();
+
+  keys() {
+    return [...this.objects.keys()];
+  }
+
+  putObject<Metadata extends Record<string, string>>({
+    key,
+    body,
+  }: {
+    key: string;
+    body: Buffer;
+    abortSignal?: AbortSignal;
+    contentType: string;
+    metadata?: Metadata;
+  }): Promise<void> {
+    this.objects.set(key, body);
+    return Promise.resolve();
+  }
+
+  getObject(data: { key: string; abortSignal?: AbortSignal }): Promise<BlobObject> {
+    const obj = this.objects.get(data.key);
+    if (!obj) {
+      return Promise.reject(new BlobNotFoundError(`Object with key ${data.key} not found`));
+    }
+    const stream = new ReadableStream({
+      start(controller) {
+        controller.enqueue(obj);
+        controller.close();
+      },
+    });
+    return Promise.resolve({
+      stream,
+    });
+  }
+
+  deleteObject(data: { key: string; abortSignal?: AbortSignal }): Promise<void> {
+    this.objects.delete(data.key);
+    return Promise.resolve();
+  }
+
+  removeDirectory(data: { key: string; abortSignal?: AbortSignal }): Promise<number> {
+    let count = 0;
+    for (const objectKey of this.objects.keys()) {
+      if (objectKey.startsWith(data.key)) {
+        this.objects.delete(objectKey);
+        count++;
+      }
+    }
+    return Promise.resolve(count);
+  }
+}
+
+export async function createEventDrivenGraph(client: Client<typeof PlatformService>, name: string) {
+  const response = await client.createFederatedSubgraph({
+    name,
+    namespace: DEFAULT_NAMESPACE,
+    isEventDrivenGraph: true,
+  });
+
+  expect(response.response?.code).toBe(EnumStatusCode.OK);
+}
+
+export async function createSubgraph(
+  client: Client<typeof PlatformService>,
+  name: string,
+  routingUrl: string,
+  namespace = DEFAULT_NAMESPACE,
+  labels: Label[] = [],
+) {
+  const response = await client.createFederatedSubgraph({
+    name,
+    namespace,
+    routingUrl,
+    labels,
+  });
+  expect(response.response?.code).toBe(EnumStatusCode.OK);
+}
+
+export async function createBaseAndFeatureSubgraph(
+  client: Client<typeof PlatformService>,
+  baseSubgraphName: string,
+  featureSubgraphName: string,
+  baseSubgraphRoutingUrl: string,
+  featureSubgraphRoutingUrl: string,
+  namespace = DEFAULT_NAMESPACE,
+) {
+  await createSubgraph(client, baseSubgraphName, baseSubgraphRoutingUrl, namespace);
+
+  const featureSubgraphResponse = await client.createFederatedSubgraph({
+    name: featureSubgraphName,
+    namespace,
+    routingUrl: featureSubgraphRoutingUrl,
+    isFeatureSubgraph: true,
+    baseSubgraphName,
+  });
+
+  expect(featureSubgraphResponse.response?.code).toBe(EnumStatusCode.OK);
+}
+
+export const eventDrivenGraphSDL = `
+  type Subscription {
+    a: Entity! @edfs__natsSubscribe(subjects: ["a.1"])
+  }
+  
+  type Entity @key(fields: "id", resolvable: false) {
+    id: Int! @external
+  }
+  
+  input edfs__NatsStreamConfiguration {
+    consumerName: String!
+     streamName: String!
+  }
+`;
+
+export const subgraphSDL = `
+  type Query {
+    dummy: String!
+  }
+`;
+
+export const yearStartDate = startOfYear(2024);
+export const tomorrowDate = startOfTomorrow();
+
+type IntegrationSubgraph = {
+  name: string;
+  hasFeatureSubgraph: boolean;
+};
+export async function featureFlagIntegrationTestSetUp(
+  client: Client<typeof PlatformService>,
+  subgraphNames: Array<IntegrationSubgraph>,
+  federatedGraphName: string,
+  labels: Array<Label> = [],
+  namespace = DEFAULT_NAMESPACE,
+  subgraphLabelsOverride?: Array<Label>,
+) {
+  let port = 4001;
+  for (const { name, hasFeatureSubgraph } of subgraphNames) {
+    await createAndPublishSubgraph(
+      client,
+      name,
+      namespace,
+      fs.readFileSync(join(process.cwd(), `test/test-data/feature-flags/${name}.graphql`)).toString(),
+      subgraphLabelsOverride || labels,
+      `http://localhost:${port}`,
+    );
+    port += 1;
+    if (!hasFeatureSubgraph) {
+      continue;
+    }
+    const featureSubgraphName = `${name}-feature`;
+    await createThenPublishFeatureSubgraph(
+      client,
+      featureSubgraphName,
+      name,
+      namespace,
+      fs.readFileSync(join(process.cwd(), `test/test-data/feature-flags/${featureSubgraphName}.graphql`)).toString(),
+      labels,
+      `http://localhost:${port + 100}`,
+    );
+  }
+
+  const federatedGraphLabels = labels.map(({ key, value }) => `${key}=${value}`);
+  await createFederatedGraph(client, federatedGraphName, namespace, federatedGraphLabels, DEFAULT_ROUTER_URL);
+  const federatedGraphResponse = await client.getFederatedGraphByName({
+    name: federatedGraphName,
+    namespace,
+  });
+  expect(federatedGraphResponse.response?.code).toBe(EnumStatusCode.OK);
+  return federatedGraphResponse;
+}
+
+export async function createNamespace(client: Client<typeof PlatformService>, name: string) {
+  // The server enforces lowercase namespace names, so normalize once here
+  // and return the normalized name for callers to use in subsequent queries.
+  const normalizedName = name.toLowerCase();
+  const createNamespaceResponse = await client.createNamespace({
+    name: normalizedName,
+  });
+  expect(createNamespaceResponse.response?.code).toBe(EnumStatusCode.OK);
+  return normalizedName;
+}
+
+export async function createFeatureFlag(
+  client: Client<typeof PlatformService>,
+  name: string,
+  labels: Array<Label>,
+  featureSubgraphNames: Array<string>,
+  namespace = DEFAULT_NAMESPACE,
+  isEnabled = false,
+) {
+  const createFeatureFlagResponse = await client.createFeatureFlag({
+    name,
+    featureSubgraphNames,
+    labels,
+    namespace,
+    isEnabled,
+  });
+  expect(createFeatureFlagResponse.response?.code).toBe(EnumStatusCode.OK);
+}
+
+export async function assertNumberOfCompositions(
+  client: Client<typeof PlatformService>,
+  federatedGraphName: string,
+  numberOfCompositions: number,
+  namespace = DEFAULT_NAMESPACE,
+  expectedEnumStatusCode = EnumStatusCode.OK,
+  excludeFeatureFlagCompositions = false,
+) {
+  const getCompositionsResponse = await client.getCompositions({
+    fedGraphName: federatedGraphName,
+    startDate: formatISO(yearStartDate),
+    endDate: formatISO(tomorrowDate),
+    namespace,
+    excludeFeatureFlagCompositions,
+  });
+  expect(getCompositionsResponse.response?.code).toBe(expectedEnumStatusCode);
+  expect(getCompositionsResponse.compositions).toHaveLength(numberOfCompositions);
+}
+
+export async function assertFeatureFlagExecutionConfig(
+  blobStorage: InMemoryBlobStorage,
+  key: string,
+  hasFeatureFlagExecutionConfig: boolean,
+) {
+  const blob = await blobStorage.getObject({ key });
+  const routerExecutionConfig = await blob.stream
+    .getReader()
+    .read()
+    .then((result) => JSON.parse(result.value.toString()));
+  if (hasFeatureFlagExecutionConfig) {
+    expect(routerExecutionConfig.featureFlagConfigs).toBeDefined();
+  } else {
+    expect(routerExecutionConfig.featureFlagConfigs).toBeUndefined();
+  }
+}
+
+export async function assertExecutionConfigSubgraphNames(
+  blobStorage: InMemoryBlobStorage,
+  key: string,
+  subgraphIds: Set<string>,
+) {
+  const blob = await blobStorage.getObject({ key });
+  const routerExecutionConfig = await blob.stream
+    .getReader()
+    .read()
+    .then((result) => JSON.parse(result.value.toString()));
+  expect(subgraphIds.size).toBe(routerExecutionConfig.subgraphs.length);
+  for (const subgraph of routerExecutionConfig.subgraphs) {
+    expect(subgraphIds.has(subgraph.id)).toBe(true);
+  }
+}
+export async function assertMapperContentIsCorrect(
+  blobStorage: InMemoryBlobStorage,
+  expectedMapperKeysCount: number,
+  expectedNumberOfFeatureFlags = 1,
+) {
+  const blobKeys = blobStorage.keys();
+  const existingMappers = blobKeys.filter((key) => key.endsWith('mapper.json'));
+  expect(existingMappers).toHaveLength(expectedMapperKeysCount);
+
+  let numberOfRouterConfigsInBlobStorage = 0;
+  for (const mapperKey of existingMappers) {
+    const mapperBlob = await blobStorage.getObject({ key: mapperKey });
+    const mapper = await mapperBlob.stream
+      .getReader()
+      .read()
+      .then((result) => JSON.parse(result.value.toString()));
+
+    const keyPrefix = mapperKey.split('/').slice(0, -1).join('/');
+    const mapperEntries = Object.entries(mapper);
+
+    /**
+     * The mapper should always contain the number of expected feature flags plus one (the federated graph.
+     *
+     * If the expected number of feature flags is `-1`, we are skipping this check.
+     */
+    if (expectedNumberOfFeatureFlags !== -1) {
+      expect(mapperEntries).toHaveLength(expectedNumberOfFeatureFlags + 1);
+    }
+
+    for (const [featureFlagName, hash] of mapperEntries) {
+      const key =
+        featureFlagName === '' ? `${keyPrefix}/latest.json` : `${keyPrefix}/feature-flags/${featureFlagName}.json`;
+
+      expect(blobKeys).include(key);
+
+      const blob = await blobStorage.getObject({ key });
+      const blobContent = await blob.stream
+        .getReader()
+        .read()
+        .then((result) => result.value.toString());
+
+      const actualHash = createHash('sha256').update(blobContent).digest('hex');
+      expect(hash).toBe(actualHash);
+
+      numberOfRouterConfigsInBlobStorage++;
+    }
+  }
+
+  /**
+   * The number of elements in the blob storage should be the number of expected mappers plus the number
+   * of valid hashes in each mapper file
+   */
+  expect(blobKeys).toHaveLength(numberOfRouterConfigsInBlobStorage + expectedMapperKeysCount);
+}
+
+export async function toggleFeatureFlag(
+  client: Client<typeof PlatformService>,
+  name: string,
+  enabled: boolean,
+  namespace = DEFAULT_NAMESPACE,
+) {
+  const enableFeatureFlagResponse = await client.enableFeatureFlag({
+    name,
+    enabled,
+    namespace,
+  });
+  expect(enableFeatureFlagResponse.response?.code).toBe(EnumStatusCode.OK);
+}
+
+export async function deleteFeatureFlag(
+  client: Client<typeof PlatformService>,
+  name: string,
+  namespace = DEFAULT_NAMESPACE,
+) {
+  const deleteFeatureFlagResponse = await client.deleteFeatureFlag({
+    name,
+    namespace,
+  });
+  expect(deleteFeatureFlagResponse.response?.code).toBe(EnumStatusCode.OK);
+}
+
+export function getDebugTestOptions(isDebugMode: boolean) {
+  if (!isDebugMode) {
+    return {};
+  }
+  return {
+    timeout: 2_000_000,
+  };
+}
+
+export type GraphNameAndKey = {
+  key: string;
+  name: string;
+};
+
+export async function seedBilling(queryConnection: postgres.Sql) {
+  const db = drizzle(queryConnection, { schema: { ...schema } });
+
+  const configPath = resolve(process.cwd(), './src/bin/billing.json');
+
+  const data = fs.readFileSync(configPath, 'utf8');
+  const json = billingSchema.parse(JSON.parse(data));
+
+  const entries = Object.entries(json.plans);
+
+  for (const [id, plan] of entries) {
+    const values: NewBillingPlan = {
+      id,
+      name: plan.name,
+      price: plan.price,
+      active: plan.active,
+      weight: plan.weight,
+      stripePriceId: 'stripePriceId' in plan ? plan.stripePriceId : undefined,
+      features: plan.features.map((feature) => ({
+        ...feature,
+        id: feature.id as FeatureIds,
+      })),
+    };
+
+    await db
+      .insert(schema.billingPlans)
+      .values(values)
+      .onConflictDoUpdate({
+        target: schema.billingPlans.id,
+        set: values,
+      })
+      .execute();
+  }
+}
+
+export async function readBlob(blobStorage: BlobStorage, key: string): Promise<string> {
+  const blob = await blobStorage.getObject({ key });
+  const result = await blob.stream.getReader().read();
+  return result.value.toString();
+}
+
+export const resolvabilitySDLOne = `
+  type Object {
+    id: ID!
+  }
+  
+  type Query {
+    object: Object!
+  }
+`;
+
+export const resolvabilitySDLTwo = `
+  type Object {
+    name: String!
+  }
+`;

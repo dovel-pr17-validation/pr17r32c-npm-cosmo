@@ -1,0 +1,66 @@
+import { useCallback } from 'react';
+import { parseAsArrayOf, parseAsBoolean, parseAsString, parseAsStringLiteral, useQueryStates } from 'nuqs';
+import { OperationsFetchBasedOn } from '@wundergraph/cosmo-connect/dist/platform/v1/platform_pb';
+
+const fetchBasedOnValues = ['requests', 'latency', 'errors'] as const;
+
+type FetchBasedOn = (typeof fetchBasedOnValues)[number];
+
+const fetchBasedOnEnum = {
+  requests: OperationsFetchBasedOn.REQUESTS,
+  latency: OperationsFetchBasedOn.LATENCY,
+  errors: OperationsFetchBasedOn.ERRORS,
+} as const satisfies Record<FetchBasedOn, OperationsFetchBasedOn>;
+
+const fetchBasedOnString = {
+  [OperationsFetchBasedOn.REQUESTS]: 'requests',
+  [OperationsFetchBasedOn.LATENCY]: 'latency',
+  [OperationsFetchBasedOn.ERRORS]: 'errors',
+} as const satisfies Record<OperationsFetchBasedOn, FetchBasedOn>;
+
+export const operationsFilterParams = {
+  includeOperationsWithDeprecatedFieldsOnly: parseAsBoolean.withDefault(false),
+  operationHash: parseAsString,
+  operationName: parseAsString,
+  clientNames: parseAsArrayOf(parseAsString).withDefault([]),
+  searchQuery: parseAsString.withDefault(''),
+  fetchBasedOn: parseAsStringLiteral(fetchBasedOnValues).withDefault('requests'),
+  sortDirection: parseAsString.withDefault('desc'),
+};
+
+/**
+ * The operations page's URL state: the filters, the sort and the selected operation. Changing a
+ * filter clears the selection, because the operation it names may not survive the new filter.
+ */
+export const useOperationsFilters = () => {
+  const [filters, setFilters] = useQueryStates(operationsFilterParams);
+
+  const applyDeprecatedFieldsFilter = useCallback(
+    (includeOperationsWithDeprecatedFieldsOnly: boolean) => {
+      setFilters({
+        includeOperationsWithDeprecatedFieldsOnly,
+        // Enabling the filter can hide the selected operation, so the selection goes with it.
+        ...(includeOperationsWithDeprecatedFieldsOnly ? { operationHash: null, operationName: null } : {}),
+      });
+    },
+    [setFilters],
+  );
+
+  const applySorting = useCallback(
+    (fetchBasedOn: OperationsFetchBasedOn, sortDirection: string) => {
+      setFilters({ fetchBasedOn: fetchBasedOnString[fetchBasedOn], sortDirection: sortDirection || null });
+    },
+    [setFilters],
+  );
+
+  return {
+    applyDeprecatedFieldsFilter,
+    applySorting,
+    includeOperationsWithDeprecatedFieldsOnly: filters.includeOperationsWithDeprecatedFieldsOnly,
+    clientNames: filters.clientNames,
+    searchQuery: filters.searchQuery,
+    fetchBasedOn: fetchBasedOnEnum[filters.fetchBasedOn],
+    fetchBasedOnStr: filters.fetchBasedOn,
+    sortDirection: filters.sortDirection,
+  };
+};

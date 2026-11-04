@@ -1,0 +1,477 @@
+import { JWTVerifyResult, jwtVerify } from 'jose';
+import { Context, Env, Hono, Next, Schema } from 'hono';
+
+export const signatureSha256Header = 'X-Signature-SHA256';
+
+const routerCompatibilityVersionPattern = /^1$/;
+
+export interface BlobObject {
+  metadata?: Partial<Record<'version' | 'signature-sha256', string>>;
+  stream: ReadableStream;
+}
+
+export interface BlobStorage {
+  getObject({
+    context,
+    key,
+    cacheControl,
+  }: {
+    context: Context;
+    abortSignal?: AbortSignal;
+    key: string;
+    cacheControl?: string;
+  }): Promise<BlobObject>;
+
+  headObject({
+    context,
+    key,
+    version,
+  }: {
+    context: Context;
+    abortSignal?: AbortSignal;
+    key: string;
+    version: string;
+  }): Promise<boolean>;
+}
+
+export class BlobNotFoundError extends Error {
+  constructor(message: string, cause?: Error) {
+    super(message, cause);
+    Object.setPrototypeOf(this, BlobNotFoundError.prototype);
+  }
+}
+
+interface CdnOptions {
+  authJwtSecret: string | ((c: Context) => string);
+  authAdmissionJwtSecret: string | ((c: Context) => string);
+  blobStorage: BlobStorage;
+}
+
+declare module 'hono' {
+  interface ContextVariableMap {
+    authenticatedOrganizationId: string;
+    authenticatedFederatedGraphId: string;
+    authenticatedFeatures: string[];
+  }
+}
+
+const jwtMiddleware = (secret: string | ((c: Context) => string)) => {
+  return async (c: Context, next: Next) => {
+    const authHeader = c.req.header('Authorization');
+    const queryToken = c.req.query('token');
+    if (!authHeader && !queryToken) {
+      return c.text('Unauthorized - No token provided', 401);
+    }
+
+    let jwt = '';
+    if (queryToken) {
+      jwt = queryToken;
+    } else if (authHeader) {
+      const [type, token] = authHeader.split(' ');
+      if (type !== 'Bearer' || !token) {
+        return c.text('Unauthorized - Invalid token scheme', 401);
+      }
+      jwt = token;
+    } else {
+      return c.text('Unauthorized - No token provided', 401);
+    }
+
+    let result: JWTVerifyResult;
+    const secretKey = new TextEncoder().encode(typeof secret === 'function' ? secret(c) : secret);
+    try {
+      result = await jwtVerify(jwt, secretKey);
+    } catch (e: any) {
+      if (
+        e instanceof Error &&
+        (e.name === 'JWSSignatureVerificationFailed' || e.name === 'JWSInvalid' || e.name === 'JWTExpired')
+      ) {
+        return c.text('Unauthorized - Invalid token', 401);
+      }
+      throw e;
+    }
+
+    const organizationId = result.payload.organization_id;
+    const federatedGraphId = result.payload.federated_graph_id;
+    if (!organizationId) {
+      return c.text('Unauthorized - Malformed token', 403);
+    }
+    c.set('authenticatedOrganizationId', organizationId as string);
+
+    if (federatedGraphId) {
+      // Only assign the federated graph id when it was provided
+      c.set('authenticatedFederatedGraphId', federatedGraphId as string);
+    }
+
+    const features = result.payload.features;
+    c.set('authenticatedFeatures', Array.isArray(features) ? (features as string[]) : []);
+
+    await next();
+  };
+};
+
+const requireFeature = (feature: string) => {
+  return async (c: Context, next: Next) => {
+    const features = c.get('authenticatedFeatures');
+    if (!features || !features.includes(feature)) {
+      return c.text('Forbidden - Missing required feature', 403);
+    }
+    await next();
+  };
+};
+
+// Deprecated: Individual persisted operation lookups via CDN are deprecated.
+// The router now downloads all operations at once via the PQL manifest, avoiding
+// per-request latency. This handler is kept for backward compatibility with older routers.
+const persistedOperation = (storage: BlobStorage) => {
+  return async (c: Context) => {
+    const organizationId = c.get('authenticatedOrganizationId');
+    const federatedGraphId = c.get('authenticatedFederatedGraphId');
+
+    if (organizationId !== c.req.param('organization_id') || federatedGraphId !== c.req.param('federated_graph_id')) {
+      return c.text('Bad Request', 400);
+    }
+
+    const clientId = c.req.param('client_id');
+    const operation = c.req.param('operation');
+    if (!operation || !operation.endsWith('.json')) {
+      return c.notFound();
+    }
+
+    const key = `${organizationId}/${federatedGraphId}/operations/${clientId}/${operation}`;
+    let blobObject: BlobObject;
+
+    try {
+      blobObject = await storage.getObject({ context: c, key });
+    } catch (e: any) {
+      if (e instanceof BlobNotFoundError) {
+        return c.notFound();
+      }
+      throw e;
+    }
+
+    return c.body(blobObject.stream);
+  };
+};
+
+const latestValidRouterConfig = (storage: BlobStorage) => {
+  return async (c: Context) => {
+    const organizationId = c.get('authenticatedOrganizationId');
+    const federatedGraphId = c.get('authenticatedFederatedGraphId');
+
+    if (organizationId !== c.req.param('organization_id') || federatedGraphId !== c.req.param('federated_graph_id')) {
+      return c.text('Bad Request', 400);
+    }
+    const compatibilityVersion = c.req.param('compatibility_version');
+    let key = `${organizationId}/${federatedGraphId}/routerconfigs/latest.json`;
+    // An empty string means v1, which takes the original un-versioned path.
+    if (compatibilityVersion) {
+      if (!routerCompatibilityVersionPattern.test(compatibilityVersion)) {
+        return c.text(`Invalid router compatibility version "${compatibilityVersion}".`, 400);
+      }
+      key = `${organizationId}/${federatedGraphId}/routerconfigs/v${compatibilityVersion}/latest.json`;
+    }
+
+    const body = await c.req.json();
+
+    let isModified = true;
+
+    // Only check if version is specified otherwise we assume the router
+    // starts for the first time, and we need to return a config anyway.
+    if (body?.version) {
+      try {
+        isModified = await storage.headObject({ context: c, key, version: body.version });
+      } catch (e: any) {
+        if (e instanceof BlobNotFoundError) {
+          return c.notFound();
+        }
+        throw e;
+      }
+    }
+
+    if (!isModified) {
+      return c.body(null, 304);
+    }
+
+    let blobObject: BlobObject;
+
+    try {
+      blobObject = await storage.getObject({ context: c, key, cacheControl: 'no-cache' });
+
+      if (blobObject.metadata && blobObject.metadata['signature-sha256']) {
+        c.header(signatureSha256Header, blobObject.metadata['signature-sha256']);
+      }
+    } catch (e: any) {
+      if (e instanceof BlobNotFoundError) {
+        return c.notFound();
+      }
+      throw e;
+    }
+
+    c.header('Content-Type', 'application/json; charset=UTF-8');
+
+    return c.body(blobObject.stream);
+  };
+};
+
+const draftRouterConfig = (storage: BlobStorage) => {
+  return async (c: Context) => {
+    const organizationId = c.get('authenticatedOrganizationId');
+    const federatedGraphId = c.get('authenticatedFederatedGraphId');
+
+    if (organizationId !== c.req.param('organization_id') || federatedGraphId !== c.req.param('federated_graph_id')) {
+      return c.text('Bad Request', 400);
+    }
+
+    const key = `${organizationId}/${federatedGraphId}/routerconfigs/draft.json`;
+
+    let blobObject: BlobObject;
+
+    try {
+      blobObject = await storage.getObject({ context: c, key, cacheControl: 'no-cache' });
+    } catch (e: any) {
+      if (e instanceof BlobNotFoundError) {
+        return c.notFound();
+      }
+      throw e;
+    }
+
+    c.header('Content-Type', 'application/json; charset=UTF-8');
+    c.header('Cache-Control', 'no-cache, no-store, must-revalidate');
+
+    return c.body(blobObject.stream);
+  };
+};
+
+const cacheOperations = (storage: BlobStorage) => {
+  return async (c: Context) => {
+    const organizationId = c.get('authenticatedOrganizationId');
+    const federatedGraphId = c.get('authenticatedFederatedGraphId');
+
+    if (organizationId !== c.req.param('organization_id') || federatedGraphId !== c.req.param('federated_graph_id')) {
+      return c.text('Bad Request', 400);
+    }
+
+    const key = `${organizationId}/${federatedGraphId}/cache_warmup/operations.json`;
+    let blobObject: BlobObject;
+
+    try {
+      blobObject = await storage.getObject({ context: c, key, cacheControl: 'no-cache' });
+    } catch (e: any) {
+      if (e instanceof BlobNotFoundError) {
+        return c.notFound();
+      }
+      throw e;
+    }
+
+    c.header('Content-Type', 'application/json; charset=UTF-8');
+    c.header('Cache-Control', 'no-cache, no-store, must-revalidate');
+
+    return c.body(blobObject.stream);
+  };
+};
+
+const persistedOperationsManifest = (storage: BlobStorage) => {
+  return async (c: Context) => {
+    const organizationId = c.get('authenticatedOrganizationId');
+    const federatedGraphId = c.get('authenticatedFederatedGraphId');
+
+    if (organizationId !== c.req.param('organization_id') || federatedGraphId !== c.req.param('federated_graph_id')) {
+      return c.text('Bad Request', 400);
+    }
+
+    const key = `${organizationId}/${federatedGraphId}/operations/manifest.json`;
+
+    const ifNoneMatch = c.req.header('If-None-Match');
+    const clientVersion = ifNoneMatch?.replace(/^"(.*)"$/, '$1') || null;
+
+    let isModified = true;
+
+    if (clientVersion) {
+      try {
+        isModified = await storage.headObject({ context: c, key, version: clientVersion });
+      } catch (e: any) {
+        if (e instanceof BlobNotFoundError) {
+          return c.notFound();
+        }
+        throw e;
+      }
+    }
+
+    if (!isModified) {
+      c.header('ETag', `"${clientVersion}"`);
+      return c.body(null, 304);
+    }
+
+    let blobObject: BlobObject;
+
+    try {
+      blobObject = await storage.getObject({ context: c, key, cacheControl: 'no-cache' });
+    } catch (e: any) {
+      if (e instanceof BlobNotFoundError) {
+        return c.notFound();
+      }
+      throw e;
+    }
+
+    if (blobObject.metadata?.version) {
+      c.header('ETag', `"${blobObject.metadata.version}"`);
+    }
+    c.header('Content-Type', 'application/json; charset=UTF-8');
+
+    return c.body(blobObject.stream);
+  };
+};
+
+const subgraphChecks = (storage: BlobStorage) => {
+  return async (c: Context) => {
+    const organizationId = c.get('authenticatedOrganizationId');
+
+    if (organizationId !== c.req.param('organization_id')) {
+      return c.text('Bad Request', 400);
+    }
+
+    const uniqueId = c.req.param('uniqueid');
+    if (!uniqueId || !uniqueId.endsWith('.json')) {
+      return c.notFound();
+    }
+
+    const key = `${organizationId}/subgraph_checks/${uniqueId}`;
+    let blobObject: BlobObject;
+
+    try {
+      blobObject = await storage.getObject({ context: c, key, cacheControl: 'no-cache' });
+    } catch (e: any) {
+      if (e instanceof BlobNotFoundError) {
+        return c.notFound();
+      }
+      throw e;
+    }
+
+    c.header('Content-Type', 'application/json; charset=UTF-8');
+    c.header('Cache-Control', 'no-cache, no-store, must-revalidate');
+
+    return c.body(blobObject.stream);
+  };
+};
+
+const manifestBlob = (storage: BlobStorage, keyBuilder: (orgId: string, graphId: string, c: Context) => string) => {
+  return async (c: Context) => {
+    const organizationId = c.get('authenticatedOrganizationId');
+    const federatedGraphId = c.get('authenticatedFederatedGraphId');
+
+    if (organizationId !== c.req.param('organization_id') || federatedGraphId !== c.req.param('federated_graph_id')) {
+      return c.text('Bad Request', 400);
+    }
+
+    const key = keyBuilder(organizationId, federatedGraphId, c);
+
+    const body = await c.req.json();
+
+    let isModified = true;
+
+    if (body?.version) {
+      try {
+        isModified = await storage.headObject({ context: c, key, version: body.version });
+      } catch (e: any) {
+        if (e instanceof BlobNotFoundError) {
+          return c.notFound();
+        }
+        throw e;
+      }
+    }
+
+    if (!isModified) {
+      return c.body(null, 304);
+    }
+
+    let blobObject: BlobObject;
+
+    try {
+      blobObject = await storage.getObject({ context: c, key, cacheControl: 'no-cache' });
+
+      if (blobObject.metadata && blobObject.metadata['signature-sha256']) {
+        c.header(signatureSha256Header, blobObject.metadata['signature-sha256']);
+      }
+    } catch (e: any) {
+      if (e instanceof BlobNotFoundError) {
+        return c.notFound();
+      }
+      throw e;
+    }
+
+    c.header('Content-Type', 'application/json; charset=UTF-8');
+
+    return c.body(blobObject.stream);
+  };
+};
+
+// eslint-disable-next-line @typescript-eslint/ban-types
+export const cdn = <E extends Env, S extends Schema = {}, BasePath extends string = '/'>(
+  hono: Hono<E, S, BasePath>,
+  opts: CdnOptions,
+) => {
+  const manifestPath = '/:organization_id/:federated_graph_id/operations/manifest.json';
+  hono
+    .use(manifestPath, jwtMiddleware(opts.authJwtSecret))
+    .get(manifestPath, persistedOperationsManifest(opts.blobStorage));
+
+  const operations = '/:organization_id/:federated_graph_id/operations/:client_id/:operation{.+\\.json$}';
+  const latestValidRouterConfigs = '/:organization_id/:federated_graph_id/routerconfigs/latest.json';
+  hono.use(operations, jwtMiddleware(opts.authJwtSecret)).get(operations, persistedOperation(opts.blobStorage));
+
+  hono
+    .use(latestValidRouterConfigs, jwtMiddleware(opts.authJwtSecret))
+    .post(latestValidRouterConfigs, latestValidRouterConfig(opts.blobStorage));
+
+  const draftRouterConfigs = '/:organization_id/:federated_graph_id/routerconfigs/draft.json';
+  hono
+    .use(draftRouterConfigs, jwtMiddleware(opts.authAdmissionJwtSecret))
+    .get(draftRouterConfigs, draftRouterConfig(opts.blobStorage));
+
+  const latestValidVersionedRouterConfigs =
+    '/:organization_id/:federated_graph_id/routerconfigs/:compatibility_version/latest.json';
+  hono
+    .use(latestValidVersionedRouterConfigs, jwtMiddleware(opts.authJwtSecret))
+    .post(latestValidVersionedRouterConfigs, latestValidRouterConfig(opts.blobStorage));
+
+  const cacheOperationsPath = '/:organization_id/:federated_graph_id/cache_warmup/operations.json';
+  hono
+    .use(cacheOperationsPath, jwtMiddleware(opts.authJwtSecret))
+    .get(cacheOperationsPath, cacheOperations(opts.blobStorage));
+
+  const subgraphChecksPath = '/:organization_id/subgraph_checks/:uniqueid{.+\\.json$}';
+  hono
+    .use(subgraphChecksPath, jwtMiddleware(opts.authJwtSecret))
+    .get(subgraphChecksPath, subgraphChecks(opts.blobStorage));
+
+  const manifestMapperPath = '/:organization_id/:federated_graph_id/manifest/mapper.json';
+  hono
+    .use(manifestMapperPath, jwtMiddleware(opts.authJwtSecret))
+    .use(manifestMapperPath, requireFeature('split-config-loading'))
+    .post(
+      manifestMapperPath,
+      manifestBlob(opts.blobStorage, (orgId, graphId) => `${orgId}/${graphId}/manifest/mapper.json`),
+    );
+
+  const manifestLatestPath = '/:organization_id/:federated_graph_id/manifest/latest.json';
+  hono
+    .use(manifestLatestPath, jwtMiddleware(opts.authJwtSecret))
+    .use(manifestLatestPath, requireFeature('split-config-loading'))
+    .post(
+      manifestLatestPath,
+      manifestBlob(opts.blobStorage, (orgId, graphId) => `${orgId}/${graphId}/manifest/latest.json`),
+    );
+
+  const manifestFeatureFlagPath =
+    '/:organization_id/:federated_graph_id/manifest/feature-flags/:feature_flag_name{.+\\.json$}';
+  hono
+    .use(manifestFeatureFlagPath, jwtMiddleware(opts.authJwtSecret))
+    .use(manifestFeatureFlagPath, requireFeature('split-config-loading'))
+    .post(
+      manifestFeatureFlagPath,
+      manifestBlob(
+        opts.blobStorage,
+        (orgId, graphId, c) => `${orgId}/${graphId}/manifest/feature-flags/${c.req.param('feature_flag_name')}`,
+      ),
+    );
+};

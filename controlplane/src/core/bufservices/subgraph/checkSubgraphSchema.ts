@@ -1,0 +1,542 @@
+import { HandlerContext } from '@connectrpc/connect';
+import { buildASTSchema } from '@wundergraph/composition';
+import { EnumStatusCode } from '@wundergraph/cosmo-connect/dist/common/common_pb';
+import {
+  CheckSubgraphSchemaRequest,
+  CheckSubgraphSchemaResponse,
+} from '@wundergraph/cosmo-connect/dist/platform/v1/platform_pb';
+import { GraphQLSchema, parse } from 'graphql';
+import { PlainMessage, COMPOSITION_IGNORE_EXTERNAL_KEYS_FEATURE_ID } from '../../../types/index.js';
+import { buildSchema } from '../../composition/composition.js';
+import { UnauthorizedError } from '../../errors/errors.js';
+import { FederatedGraphRepository } from '../../repositories/FederatedGraphRepository.js';
+import { GitHubRepository } from '../../repositories/GitHubRepository.js';
+import { DefaultNamespace, NamespaceRepository } from '../../repositories/NamespaceRepository.js';
+import { OrganizationRepository } from '../../repositories/OrganizationRepository.js';
+import { SchemaCheckRepository } from '../../repositories/SchemaCheckRepository.js';
+import { SubgraphRepository } from '../../repositories/SubgraphRepository.js';
+import type { RouterOptions } from '../../routes.js';
+import {
+  clamp,
+  enrichLogger,
+  getFederatedGraphRouterCompatibilityVersion,
+  getLogger,
+  handleError,
+  isValidGraphName,
+  isValidLabels,
+  limitCombinedArrays,
+} from '../../util.js';
+import { OrganizationWebhookService } from '../../webhooks/OrganizationWebhookService.js';
+import { maxRowLimitForChecks, defaultRetentionLimitInDays } from '../../constants.js';
+
+export function checkSubgraphSchema(
+  opts: RouterOptions,
+  req: CheckSubgraphSchemaRequest,
+  ctx: HandlerContext,
+): Promise<PlainMessage<CheckSubgraphSchemaResponse>> {
+  let logger = getLogger(ctx, opts.logger);
+
+  return handleError<PlainMessage<CheckSubgraphSchemaResponse>>(ctx, logger, async () => {
+    const authContext = await opts.authenticator.authenticate(ctx.requestHeader);
+    logger = enrichLogger(ctx, logger, authContext);
+
+    const fedGraphRepo = new FederatedGraphRepository(logger, opts.db, authContext.organizationId);
+    const subgraphRepo = new SubgraphRepository(logger, opts.db, authContext.organizationId);
+    const orgRepo = new OrganizationRepository(logger, opts.db, opts.billingDefaultPlanId);
+    const namespaceRepo = new NamespaceRepository(opts.db, authContext.organizationId);
+    const schemaCheckRepo = new SchemaCheckRepository(opts.db);
+
+    req.namespace = req.namespace || DefaultNamespace;
+
+    if (authContext.organizationDeactivated) {
+      throw new UnauthorizedError();
+    }
+
+    const org = await orgRepo.byId(authContext.organizationId);
+    if (!org) {
+      return {
+        response: {
+          code: EnumStatusCode.ERR_NOT_FOUND,
+          details: `Organization not found`,
+        },
+        breakingChanges: [],
+        nonBreakingChanges: [],
+        composedSchemaBreakingChanges: [],
+        compositionErrors: [],
+        checkId: '',
+        checkedFederatedGraphs: [],
+        lintWarnings: [],
+        lintErrors: [],
+        graphPruneWarnings: [],
+        graphPruneErrors: [],
+        compositionWarnings: [],
+      };
+    }
+
+    const namespace = await namespaceRepo.byName(req.namespace);
+    if (!namespace) {
+      return {
+        response: {
+          code: EnumStatusCode.ERR_NOT_FOUND,
+          details: `Namespace '${req.namespace}' not found`,
+        },
+        breakingChanges: [],
+        nonBreakingChanges: [],
+        composedSchemaBreakingChanges: [],
+        compositionErrors: [],
+        checkId: '',
+        checkedFederatedGraphs: [],
+        lintWarnings: [],
+        lintErrors: [],
+        graphPruneWarnings: [],
+        graphPruneErrors: [],
+        compositionWarnings: [],
+      };
+    }
+
+    const subgraph = await subgraphRepo.byName(req.subgraphName, req.namespace);
+
+    const webhookService = new OrganizationWebhookService(
+      opts.db,
+      authContext.organizationId,
+      opts.logger,
+      opts.billingDefaultPlanId,
+      opts.webhookProxyUrl,
+    );
+
+    let linkedSubgraph:
+      | {
+          id: string;
+          name: string;
+          namespace: string;
+        }
+      | undefined;
+    if (subgraph) {
+      const linkedSubgraphResult = await subgraphRepo.getLinkedSubgraph({ sourceSubgraphId: subgraph.id });
+      if (linkedSubgraphResult) {
+        linkedSubgraph = {
+          id: linkedSubgraphResult.targetSubgraphId,
+          name: linkedSubgraphResult.targetSubgraphName,
+          namespace: linkedSubgraphResult.targetSubgraphNamespace,
+        };
+      }
+    }
+
+    if (subgraph && !authContext.rbac.hasSubGraphCheckAccess(subgraph)) {
+      throw new UnauthorizedError();
+    } else if (!subgraph) {
+      if (!authContext.rbac.canCreateSubGraph(namespace)) {
+        throw new UnauthorizedError();
+      }
+
+      if (!isValidLabels(req.labels)) {
+        return {
+          response: {
+            code: EnumStatusCode.ERR_INVALID_LABELS,
+            details: `One or more labels were found to be invalid`,
+          },
+          breakingChanges: [],
+          nonBreakingChanges: [],
+          composedSchemaBreakingChanges: [],
+          compositionErrors: [],
+          checkId: '',
+          checkedFederatedGraphs: [],
+          lintWarnings: [],
+          lintErrors: [],
+          graphPruneWarnings: [],
+          graphPruneErrors: [],
+          compositionWarnings: [],
+        };
+      } else if (!isValidGraphName(req.subgraphName)) {
+        return {
+          response: {
+            code: EnumStatusCode.ERR_INVALID_NAME,
+            details: `The name of the subgraph is invalid. Name should start and end with an alphanumeric character. Only '.', '_', '@', '/', and '-' are allowed as separators in between and must be between 1 and 100 characters in length.`,
+          },
+          breakingChanges: [],
+          nonBreakingChanges: [],
+          composedSchemaBreakingChanges: [],
+          compositionErrors: [],
+          checkId: '',
+          checkedFederatedGraphs: [],
+          lintWarnings: [],
+          lintErrors: [],
+          graphPruneWarnings: [],
+          graphPruneErrors: [],
+          compositionWarnings: [],
+        };
+      }
+    }
+
+    const subgraphName = subgraph?.name || req.subgraphName;
+    const ignoreExternalKeys =
+      (
+        await orgRepo.getFeature({
+          organizationId: authContext.organizationId,
+          featureId: COMPOSITION_IGNORE_EXTERNAL_KEYS_FEATURE_ID,
+        })
+      )?.enabled ?? false;
+
+    const federatedGraphs = await fedGraphRepo.bySubgraphLabels({
+      labels: subgraph ? subgraph.labels : req.labels,
+      namespaceId: namespace.id,
+    });
+    /*
+     * If there are any federated graphs for which the subgraph is a constituent, the subgraph will be validated
+     * against the first router compatibility version encountered.
+     * If no federated graphs have yet been created, the subgraph will be validated against the latest router
+     * compatibility version.
+     */
+    const routerCompatibilityVersion = getFederatedGraphRouterCompatibilityVersion(federatedGraphs);
+    const newSchemaSDL = req.delete ? '' : new TextDecoder().decode(req.schema);
+    let newGraphQLSchema: GraphQLSchema | undefined;
+    if (newSchemaSDL) {
+      try {
+        /* Here we check if the schema is valid as a subgraph SDL
+         * `buildSchema` only calls normalization in isolation.
+         * The `disableResolvabilityChecks` flag is only used in the federation step.
+         * The `ignoreExternalKeys` flag is propagated in normalization but only used in the federation step.
+         * Consequently, there is currently no reason to propagate the options within `buildSchema`.
+         */
+        const result = buildSchema(newSchemaSDL, true, routerCompatibilityVersion);
+        if (!result.success) {
+          return {
+            response: {
+              code: EnumStatusCode.ERR_INVALID_SUBGRAPH_SCHEMA,
+              details: result.errors.map((e) => e.toString()).join('\n'),
+            },
+            breakingChanges: [],
+            nonBreakingChanges: [],
+            composedSchemaBreakingChanges: [],
+            compositionErrors: [],
+            checkId: '',
+            checkedFederatedGraphs: [],
+            lintWarnings: [],
+            lintErrors: [],
+            graphPruneWarnings: [],
+            graphPruneErrors: [],
+            compositionWarnings: [],
+          };
+        }
+        if (namespace.enableGraphPruning) {
+          const parsedSchema = parse(newSchemaSDL);
+          // this new GraphQL schema contains the location info
+          newGraphQLSchema = buildASTSchema(parsedSchema, { assumeValid: true, assumeValidSDL: true });
+        }
+      } catch (e: any) {
+        return {
+          response: {
+            code: EnumStatusCode.ERR_INVALID_SUBGRAPH_SCHEMA,
+            details: e.message,
+          },
+          breakingChanges: [],
+          nonBreakingChanges: [],
+          composedSchemaBreakingChanges: [],
+          compositionErrors: [],
+          checkId: '',
+          checkedFederatedGraphs: [],
+          lintWarnings: [],
+          lintErrors: [],
+          graphPruneWarnings: [],
+          graphPruneErrors: [],
+          compositionWarnings: [],
+        };
+      }
+    }
+
+    const changeRetention = await orgRepo.getFeature({
+      organizationId: authContext.organizationId,
+      featureId: 'breaking-change-retention',
+    });
+
+    let limit = changeRetention?.limit ?? defaultRetentionLimitInDays;
+    limit = clamp(namespace?.checksTimeframeInDays ?? limit, 1, limit);
+
+    // If req.limit is not provided, we return all rows
+    const returnLimit = req.limit === undefined ? null : clamp(req.limit, 1, maxRowLimitForChecks);
+
+    const checkResult = await subgraphRepo.performSchemaCheck({
+      actorId: authContext.userId,
+      blobStorage: opts.blobStorage,
+      admissionConfig: { cdnBaseUrl: opts.cdnBaseUrl, jwtSecret: opts.jwtSecret },
+      organizationSlug: authContext.organizationSlug,
+      namespace,
+      subgraphName,
+      newSchemaSDL,
+      subgraph,
+      federatedGraphs,
+      skipTrafficCheck: req.skipTrafficCheck,
+      vcsContext: req.vcsContext,
+      isDeleted: !!req.delete,
+      labels: req.labels,
+      isTargetCheck: false,
+      limit,
+      chClient: opts.chClient,
+      newGraphQLSchema,
+      compositionOptions: {
+        disableResolvabilityValidation: req.disableResolvabilityValidation,
+        ignoreExternalKeys,
+      },
+      webhookService,
+      webhookProxyUrl: opts.webhookProxyUrl,
+    });
+
+    // Extract variables from checkResult
+    const {
+      response,
+      checkId: schemaCheckID,
+      operationUsageStats,
+      proposalMatchMessage,
+      featureSubgraphCheckMessage,
+      hasClientTraffic,
+      checkedFederatedGraphs,
+      isCheckExtensionSkipped,
+      checkExtensionErrorMessage,
+    } = checkResult;
+
+    const compositionErrors =
+      returnLimit == null ? checkResult.compositionErrors : checkResult.compositionErrors.slice(0, returnLimit);
+    const compositionWarnings =
+      returnLimit == null ? checkResult.compositionWarnings : checkResult.compositionWarnings.slice(0, returnLimit);
+
+    const [breakingChanges, nonBreakingChanges] = limitCombinedArrays(
+      [checkResult.breakingChanges, checkResult.nonBreakingChanges],
+      returnLimit,
+    );
+
+    const [lintErrors, lintWarnings] = limitCombinedArrays(
+      [checkResult.lintErrors, checkResult.lintWarnings],
+      returnLimit,
+    );
+
+    const [graphPruneErrors, graphPruneWarnings] = limitCombinedArrays(
+      [checkResult.graphPruneErrors, checkResult.graphPruneWarnings],
+      returnLimit,
+    );
+
+    const composedSchemaBreakingChanges =
+      returnLimit == null
+        ? checkResult.composedSchemaBreakingChanges
+        : checkResult.composedSchemaBreakingChanges.slice(0, returnLimit);
+
+    const counts = {
+      lintWarnings: checkResult.lintWarnings.length,
+      lintErrors: checkResult.lintErrors.length,
+      breakingChanges: checkResult.breakingChanges.length,
+      nonBreakingChanges: checkResult.nonBreakingChanges.length,
+      compositionErrors: checkResult.compositionErrors.length,
+      compositionWarnings: checkResult.compositionWarnings.length,
+      graphPruneErrors: checkResult.graphPruneErrors.length,
+      graphPruneWarnings: checkResult.graphPruneWarnings.length,
+      composedSchemaBreakingChanges: checkResult.composedSchemaBreakingChanges.length,
+    };
+
+    if (response && response.code !== EnumStatusCode.OK) {
+      return {
+        response: {
+          code: response.code,
+          details: response.details,
+        },
+        breakingChanges,
+        nonBreakingChanges,
+        composedSchemaBreakingChanges,
+        operationUsageStats,
+        compositionErrors,
+        checkId: schemaCheckID,
+        checkedFederatedGraphs,
+        lintWarnings,
+        lintErrors,
+        graphPruneWarnings,
+        graphPruneErrors,
+        clientTrafficCheckSkipped: req.skipTrafficCheck,
+        compositionWarnings,
+        proposalMatchMessage,
+        featureSubgraphCheckMessage,
+        counts,
+      };
+    }
+
+    let isLinkedTrafficCheckFailed = false;
+    let isLinkedPruningCheckFailed = false;
+
+    if (linkedSubgraph) {
+      const targetSubgraph = await subgraphRepo.byName(linkedSubgraph.name, linkedSubgraph.namespace);
+      if (!targetSubgraph) {
+        return {
+          response: {
+            code: EnumStatusCode.ERR_NOT_FOUND,
+            details: `The target subgraph "${linkedSubgraph.name}" was not found.`,
+          },
+          breakingChanges,
+          nonBreakingChanges,
+          composedSchemaBreakingChanges,
+          operationUsageStats,
+          compositionErrors,
+          checkId: schemaCheckID,
+          checkedFederatedGraphs,
+          lintWarnings,
+          lintErrors,
+          graphPruneWarnings,
+          graphPruneErrors,
+          clientTrafficCheckSkipped: req.skipTrafficCheck,
+          compositionWarnings,
+          proposalMatchMessage,
+          featureSubgraphCheckMessage,
+          isLinkedTrafficCheckFailed: false,
+          isLinkedPruningCheckFailed: false,
+          counts,
+        };
+      }
+
+      const targetFederatedGraphs = await fedGraphRepo.bySubgraphLabels({
+        labels: targetSubgraph.labels,
+        namespaceId: targetSubgraph.namespaceId,
+      });
+
+      const targetNamespace = await namespaceRepo.byId(targetSubgraph.namespaceId);
+      if (!targetNamespace) {
+        return {
+          response: {
+            code: EnumStatusCode.ERR_NOT_FOUND,
+            details: `The target namespace "${targetSubgraph.namespaceId}" was not found.`,
+          },
+          breakingChanges,
+          nonBreakingChanges,
+          composedSchemaBreakingChanges,
+          operationUsageStats,
+          compositionErrors,
+          checkId: schemaCheckID,
+          checkedFederatedGraphs,
+          lintWarnings,
+          lintErrors,
+          graphPruneWarnings,
+          graphPruneErrors,
+          clientTrafficCheckSkipped: req.skipTrafficCheck,
+          compositionWarnings,
+          proposalMatchMessage,
+          featureSubgraphCheckMessage,
+          isLinkedTrafficCheckFailed: false,
+          isLinkedPruningCheckFailed: false,
+          counts,
+        };
+      }
+
+      let targetLimit = changeRetention?.limit ?? defaultRetentionLimitInDays;
+      targetLimit = clamp(targetNamespace?.checksTimeframeInDays ?? targetLimit, 1, targetLimit);
+
+      let targetNewGraphQLSchema = newGraphQLSchema;
+      // If the graph pruning is disabled in the source namespace, the graphql schema is not computed,
+      // so here we need to check if the target subgraph has graph pruning enabled and if so, we need to compute the graphql schema
+      if (!targetNewGraphQLSchema && targetNamespace.enableGraphPruning && newSchemaSDL) {
+        const parsedSchema = parse(newSchemaSDL);
+        // this new GraphQL schema contains the location info
+        targetNewGraphQLSchema = buildASTSchema(parsedSchema, { assumeValid: true, assumeValidSDL: true });
+      }
+
+      const targetCheckResult = await subgraphRepo.performSchemaCheck({
+        actorId: authContext.userId,
+        blobStorage: opts.blobStorage,
+        admissionConfig: { cdnBaseUrl: opts.cdnBaseUrl, jwtSecret: opts.admissionWebhookJWTSecret },
+        organizationSlug: authContext.organizationSlug,
+        namespace: targetNamespace,
+        subgraphName: targetSubgraph.name,
+        newSchemaSDL,
+        subgraph: targetSubgraph,
+        federatedGraphs: targetFederatedGraphs,
+        skipTrafficCheck: req.skipTrafficCheck,
+        isDeleted: !!req.delete,
+        isTargetCheck: true,
+        limit: targetLimit,
+        chClient: opts.chClient,
+        newGraphQLSchema: targetNewGraphQLSchema,
+        compositionOptions: {
+          disableResolvabilityValidation: req.disableResolvabilityValidation,
+          ignoreExternalKeys,
+        },
+        webhookService,
+        webhookProxyUrl: opts.webhookProxyUrl,
+      });
+
+      await schemaCheckRepo.addLinkedSchemaCheck({
+        schemaCheckID,
+        linkedSchemaCheckID: targetCheckResult.checkId,
+      });
+
+      if (targetCheckResult.response && targetCheckResult.response.code !== EnumStatusCode.OK) {
+        return {
+          response: {
+            code: targetCheckResult.response.code,
+            details: targetCheckResult.response.details,
+          },
+          breakingChanges,
+          nonBreakingChanges,
+          composedSchemaBreakingChanges,
+          operationUsageStats,
+          compositionErrors,
+          checkId: schemaCheckID,
+          checkedFederatedGraphs,
+          lintWarnings,
+          lintErrors,
+          graphPruneWarnings,
+          graphPruneErrors,
+          clientTrafficCheckSkipped: req.skipTrafficCheck,
+          compositionWarnings,
+          proposalMatchMessage,
+          featureSubgraphCheckMessage,
+          isLinkedTrafficCheckFailed: false,
+          isLinkedPruningCheckFailed: false,
+          counts,
+        };
+      }
+
+      isLinkedTrafficCheckFailed = targetCheckResult.hasClientTraffic;
+      isLinkedPruningCheckFailed = targetCheckResult.graphPruneErrors.length > 0;
+    }
+
+    if (req.gitInfo && opts.githubApp) {
+      try {
+        const githubRepo = new GitHubRepository(opts.db, opts.githubApp);
+        await githubRepo.createCommitCheck({
+          namespace: namespace.name,
+          schemaCheckID,
+          gitInfo: req.gitInfo,
+          compositionErrors,
+          breakingChangesCount: breakingChanges.length,
+          hasClientTraffic: hasClientTraffic || isLinkedTrafficCheckFailed,
+          subgraphName,
+          organizationSlug: org.slug,
+          webBaseUrl: opts.webBaseUrl,
+          composedGraphs: checkedFederatedGraphs.map((c) => c.name),
+        });
+      } catch (e) {
+        logger.warn(e, 'Error creating commit check');
+      }
+    }
+
+    return {
+      response: {
+        code: EnumStatusCode.OK,
+      },
+      breakingChanges,
+      nonBreakingChanges,
+      composedSchemaBreakingChanges,
+      operationUsageStats,
+      compositionErrors,
+      checkId: schemaCheckID,
+      checkedFederatedGraphs,
+      lintWarnings,
+      lintErrors,
+      graphPruneWarnings,
+      graphPruneErrors,
+      clientTrafficCheckSkipped: req.skipTrafficCheck,
+      compositionWarnings,
+      proposalMatchMessage,
+      featureSubgraphCheckMessage,
+      isLinkedTrafficCheckFailed,
+      isLinkedPruningCheckFailed,
+      isCheckExtensionSkipped,
+      checkExtensionErrorMessage,
+      counts,
+    };
+  });
+}

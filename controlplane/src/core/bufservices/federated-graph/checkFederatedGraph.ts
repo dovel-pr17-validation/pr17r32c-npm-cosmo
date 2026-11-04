@@ -1,0 +1,194 @@
+import { HandlerContext } from '@connectrpc/connect';
+import { EnumStatusCode } from '@wundergraph/cosmo-connect/dist/common/common_pb';
+import {
+  CheckFederatedGraphRequest,
+  CheckFederatedGraphResponse,
+  CompositionError,
+  CompositionWarning,
+  Subgraph,
+} from '@wundergraph/cosmo-connect/dist/platform/v1/platform_pb';
+import { COMPOSITION_IGNORE_EXTERNAL_KEYS_FEATURE_ID, PlainMessage } from '../../../types/index.js';
+import { composeGraphsInWorker } from '../../composition/composeGraphs.pool.js';
+import { FederatedGraphRepository } from '../../repositories/FederatedGraphRepository.js';
+import { DefaultNamespace } from '../../repositories/NamespaceRepository.js';
+import { OrganizationRepository } from '../../repositories/OrganizationRepository.js';
+import { SubgraphRepository } from '../../repositories/SubgraphRepository.js';
+import type { RouterOptions } from '../../routes.js';
+import {
+  clamp,
+  convertToSubgraphType,
+  enrichLogger,
+  getLogger,
+  handleError,
+  isValidLabelMatchers,
+} from '../../util.js';
+import { UnauthorizedError } from '../../errors/errors.js';
+import { maxRowLimitForChecks } from '../../constants.js';
+
+export function checkFederatedGraph(
+  opts: RouterOptions,
+  req: CheckFederatedGraphRequest,
+  ctx: HandlerContext,
+): Promise<PlainMessage<CheckFederatedGraphResponse>> {
+  let logger = getLogger(ctx, opts.logger);
+
+  return handleError<PlainMessage<CheckFederatedGraphResponse>>(ctx, logger, async () => {
+    const authContext = await opts.authenticator.authenticate(ctx.requestHeader);
+    logger = enrichLogger(ctx, logger, authContext);
+
+    const fedGraphRepo = new FederatedGraphRepository(logger, opts.db, authContext.organizationId);
+    const subgraphRepo = new SubgraphRepository(logger, opts.db, authContext.organizationId);
+    const orgRepo = new OrganizationRepository(logger, opts.db, opts.billingDefaultPlanId);
+
+    req.namespace = req.namespace || DefaultNamespace;
+
+    if (authContext.organizationDeactivated) {
+      throw new UnauthorizedError();
+    }
+
+    const federatedGraph = await fedGraphRepo.byName(req.name, req.namespace, {
+      supportsFederation: true,
+    });
+    if (!federatedGraph) {
+      return {
+        response: {
+          code: EnumStatusCode.ERR_NOT_FOUND,
+          details: `Federated graph '${req.name}' not found`,
+        },
+        compositionErrors: [],
+        subgraphs: [],
+        compositionWarnings: [],
+      };
+    }
+
+    // Only check for permission when we are not supposed to use the legacy flow
+    if (!authContext.rbac.hasFederatedGraphWriteAccess(federatedGraph)) {
+      throw new UnauthorizedError();
+    }
+
+    if (!isValidLabelMatchers(req.labelMatchers)) {
+      return {
+        response: {
+          code: EnumStatusCode.ERR_INVALID_LABELS,
+          details: `One or more labels in the matcher were found to be invalid`,
+        },
+        compositionErrors: [],
+        subgraphs: [],
+        compositionWarnings: [],
+      };
+    }
+
+    const subgraphs = await subgraphRepo.byGraphLabelMatchers({
+      labelMatchers: req.labelMatchers,
+      namespaceId: federatedGraph.namespaceId,
+    });
+
+    const subgraphsUsedForComposition = subgraphs.filter((s) => !!s.schemaSDL);
+
+    const subgraphsDetails = subgraphsUsedForComposition.map((s) => ({
+      id: s.id,
+      name: s.name,
+      routingURL: s.routingUrl,
+      labels: s.labels,
+      lastUpdatedAt: s.lastUpdatedAt,
+      targetId: s.targetId,
+      isEventDrivenGraph: s.isEventDrivenGraph,
+      subscriptionUrl: s.subscriptionUrl,
+      subscriptionProtocol: s.subscriptionProtocol,
+      namespace: s.namespace,
+      websocketSubprotocol: s.websocketSubprotocol || '',
+      isFeatureSubgraph: s.isFeatureSubgraph,
+      type: convertToSubgraphType(s.type),
+    }));
+
+    const ignoreExternalKeysFeature = await orgRepo.getFeature({
+      organizationId: authContext.organizationId,
+      featureId: COMPOSITION_IGNORE_EXTERNAL_KEYS_FEATURE_ID,
+    });
+
+    const { results } = await composeGraphsInWorker({
+      federatedGraph,
+      subgraphsToCompose: [
+        {
+          subgraphs: subgraphsUsedForComposition,
+          isFeatureFlagComposition: false,
+          featureFlagName: '',
+          featureFlagId: '',
+        },
+      ],
+      tagOptionsByContractName: [],
+      compositionOptions: {
+        disableResolvabilityValidation: req.disableResolvabilityValidation,
+        ignoreExternalKeys: ignoreExternalKeysFeature?.enabled ?? false,
+      },
+      skipRouterConfig: true,
+    });
+
+    const compositionResult = results[0].base;
+
+    // If req.limit is not provided, we return all rows
+    const returnLimit = req.limit === undefined ? null : clamp(req.limit, 1, maxRowLimitForChecks);
+
+    const counts = {
+      compositionErrors: 0,
+      compositionWarnings: 0,
+      lintWarnings: 0,
+      lintErrors: 0,
+      breakingChanges: 0,
+      nonBreakingChanges: 0,
+      graphPruneErrors: 0,
+      graphPruneWarnings: 0,
+      composedSchemaBreakingChanges: 0,
+    };
+
+    const compositionWarnings: PlainMessage<CompositionWarning>[] = [];
+    counts.compositionWarnings = compositionResult.warnings.length;
+
+    const clampedWarnings = returnLimit ? compositionResult.warnings.slice(0, returnLimit) : compositionResult.warnings;
+    for (const warning of clampedWarnings) {
+      compositionWarnings.push({
+        message: warning.message,
+        federatedGraphName: req.name,
+        namespace: federatedGraph.namespace,
+        featureFlag: '',
+      });
+    }
+
+    if (!compositionResult.success) {
+      const compositionErrors: PlainMessage<CompositionError>[] = [];
+      counts.compositionErrors = compositionResult.errors.length;
+
+      const clampedErrors = returnLimit ? compositionResult.errors.slice(0, returnLimit) : compositionResult.errors;
+      for (const error of clampedErrors) {
+        compositionErrors.push({
+          message: error,
+          federatedGraphName: req.name,
+          namespace: federatedGraph.namespace,
+          featureFlag: '',
+        });
+      }
+
+      if (compositionErrors.length > 0) {
+        return {
+          response: {
+            code: EnumStatusCode.ERR_SUBGRAPH_COMPOSITION_FAILED,
+          },
+          compositionErrors,
+          subgraphs: subgraphsDetails,
+          compositionWarnings,
+          counts,
+        };
+      }
+    }
+
+    return {
+      response: {
+        code: EnumStatusCode.OK,
+      },
+      compositionErrors: [],
+      subgraphs: subgraphsDetails,
+      compositionWarnings,
+      counts,
+    };
+  });
+}

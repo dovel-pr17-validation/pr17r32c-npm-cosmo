@@ -1,0 +1,370 @@
+name: Query Planner CI
+on:
+  pull_request:
+    types:
+      - opened
+      - synchronize
+      - reopened
+      - labeled
+      - unlabeled
+
+    paths:
+      # This workflow should run every time router-ci and cli-ci runs
+      - '.github/workflows/cli-ci.yaml'
+      - '.github/workflows/router-ci.yaml'
+      - '.github/workflows/query-planner-ci.yaml'
+      - 'cli/**/*'
+      - 'connect/**/*'
+      - 'router/**/*'
+      - 'pnpm-lock.yaml'
+env:
+  CI: true
+  DO_NOT_TRACK: '1'
+permissions:
+  pull-requests: write
+  contents: read
+  packages: write
+concurrency:
+  group: ${{github.workflow}}-${{github.head_ref}}
+  cancel-in-progress: true
+jobs:
+  check-labels-and-engine-changes:
+    runs-on: ubuntu-latest
+    outputs:
+      has_skip_label: ${{ steps.check_label_skip.outputs.has_label }}
+      # The celestial check runs for a query-planner label or an engine bump, unless skipped by label.
+      run_query_planner: ${{ (steps.check_label.outputs.has_label == 'true' || steps.check_engine_changes.outputs.engine_changed == 'true') && steps.check_label_skip.outputs.has_label != 'true' }}
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: router/go.mod
+          cache: true
+      - name: Check for query-planner label
+        id: check_label
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const labels = await github.rest.issues.listLabelsOnIssue({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: context.issue.number
+            });
+            const hasLabel = labels.data.some(label => label.name === 'query-planner');
+            core.setOutput('has_label', hasLabel ? 'true' : 'false');
+      - name: Check for query-planner-skip label
+        id: check_label_skip
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const labels = await github.rest.issues.listLabelsOnIssue({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: context.issue.number
+            });
+            const hasLabel = labels.data.some(label => label.name === 'query-planner-skip');
+            core.setOutput('has_label', hasLabel ? 'true' : 'false');
+      - name: Check for version bump in graphql-go-tools (engine)
+        id: check_engine_changes
+        working-directory: router
+        env:
+          PR_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          current_engine_version=$(go list -f '{{.Version}}' -m github.com/wundergraph/graphql-go-tools/v2)
+          # The checkout is the PR head merged into the base branch tip:
+          # HEAD^2 is the PR head, HEAD^1 is that tip.
+          merged_head=$(git rev-parse --quiet --verify HEAD^2 || true)
+          if [ -z "$PR_HEAD_SHA" ] || [ "$merged_head" != "$PR_HEAD_SHA" ]; then
+            echo "::error::Expected the checkout to be the PR head merged into the base branch tip."
+            exit 1
+          fi
+          git show HEAD^1:router/go.mod > base.go.mod
+          previous_engine_version=$(go list -f '{{.Version}}' -modfile base.go.mod -m github.com/wundergraph/graphql-go-tools/v2)
+          if [ "$current_engine_version" != "$previous_engine_version" ]; then
+            echo "engine_changed=true" >> $GITHUB_OUTPUT
+            echo "Engine has been changed from $previous_engine_version to $current_engine_version"
+          else
+            echo "engine_changed=false" >> $GITHUB_OUTPUT
+            echo "Engine has not been changed"
+          fi
+
+  filter-changes:
+    runs-on: ubuntu-latest
+    outputs:
+      router_changed: ${{ steps.filter.outputs.router }}
+      cli_changed: ${{ steps.filter.outputs.cli }}
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+      - name: Filter Changes
+        id: filter
+        uses: dorny/paths-filter@v2
+        with:
+          filters: |
+            router:
+              - 'demo/**/*'
+              - 'router/**/*'
+              - 'router-tests/**/*'
+              - 'connect/**/*'
+              - '.github/workflows/router-ci.yaml'
+            cli:
+              - 'cli/**/*'
+              - 'connect/**/*'
+              - '.github/workflows/cli-ci.yaml'
+  build-router:
+    needs: [filter-changes, check-labels-and-engine-changes]
+    # This is a limitation of GitHub. Only organization members can push to GitHub Container Registry
+    # For now, we will disable the push to the GitHub Container Registry for external contributor
+    if: ${{ needs.filter-changes.outputs.router_changed == 'true' && github.event.pull_request.head.repo.full_name == github.repository && needs.check-labels-and-engine-changes.outputs.has_skip_label != 'true'}}
+    runs-on: ubuntu-latest
+    outputs:
+      image_ref: ${{ steps.build_push_image.outputs.image_ref }}
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: ./.github/actions/build-push-image
+        id: build_push_image
+        with:
+          docker_username: ${{secrets.DOCKER_USERNAME}}
+          docker_password: ${{secrets.DOCKER_PASSWORD}}
+          docker_context: router
+          dockerfile: router/Dockerfile
+          token: ${{secrets.GITHUB_TOKEN}}
+          image_name: router-qp
+          image_description: 'Cosmo Router Query Planner'
+          image_platforms: linux/amd64
+  build-cli:
+    needs: [filter-changes, check-labels-and-engine-changes]
+    if: ${{ needs.filter-changes.outputs.cli_changed == 'true' && needs.check-labels-and-engine-changes.outputs.has_skip_label != 'true'}}
+    runs-on: ubuntu-latest
+    outputs:
+      wgc: ${{ steps.cli-build.outputs.artifact-url }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: ./.github/actions/cli-build
+        id: cli-build
+        with:
+          github-sha: ${{ github.sha }}
+          target: bun-linux-x64
+  cli-release-url:
+    needs: [filter-changes, check-labels-and-engine-changes]
+    runs-on: ubuntu-latest
+    if: ${{ needs.filter-changes.outputs.cli_changed != 'true' && needs.check-labels-and-engine-changes.outputs.has_skip_label != 'true'}}
+    env:
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+    steps:
+      - id: release-url
+        run: |
+          url=`gh api -H "Accept: application/vnd.github+json" -H "X-GitHub-Api-Version: 2022-11-28" /repos/wundergraph/cosmo/releases --jq '.[] | select(.name | startswith("wgc@")) | .assets[] | select(.name | endswith("-bun-linux-x64.gz")) | .browser_download_url' | head -n 1`
+          echo "wgc=$url" >> $GITHUB_OUTPUT
+    outputs:
+      wgc: ${{ steps.release-url.outputs.wgc }}
+  build_test: # This job is use to lock the merge of the PR if anything fails in the query planner
+    runs-on: ubuntu-latest
+    if: ${{ always() }}
+    needs: [build-router, build-cli, cli-release-url, check-labels-and-engine-changes]
+    outputs:
+      workflow_url: ${{ steps.trigger_workflow.outputs.workflow_url }}
+      workflow_id: ${{ steps.trigger_workflow.outputs.workflow_id }}
+      build_failed: ${{ steps.builds.outputs.failed }}
+    steps:
+      # Without the labels and the engine version it is unknown whether celestial must run,
+      # so the merge stays blocked until a re-run succeeds. The query-planner-skip label still skips it.
+      - name: Check labels and engine changes
+        if: ${{ needs.check-labels-and-engine-changes.result == 'failure' && needs.check-labels-and-engine-changes.outputs.has_skip_label != 'true' }}
+        run: |
+          echo "::error::Checking the labels or the engine version failed, Query Planner CI was not started."
+          exit 1
+
+      # A failed build still outputs the image tag, so celestial would fail later on a missing image.
+      - name: Check router and wgc builds
+        id: builds
+        if: ${{ needs.check-labels-and-engine-changes.outputs.run_query_planner == 'true' && (needs.build-router.result == 'failure' || needs.build-cli.result == 'failure') }}
+        run: |
+          echo "failed=true" >> $GITHUB_OUTPUT
+          echo "::error::The router image or the wgc binary failed to build, Query Planner CI was not started."
+          exit 1
+
+      - uses: actions/create-github-app-token@v3
+        if: ${{ needs.check-labels-and-engine-changes.outputs.run_query_planner == 'true' }}
+        id: app-token
+        name: Authenticate
+        with:
+          client-id: ${{ secrets.APP_CLIENT_ID }}
+          private-key: ${{ secrets.APP_PRIVATE_KEY }}
+          repositories: |
+            cosmo
+            cosmo-celestial
+          permission-actions: write
+          permission-contents: write
+          permission-pull-requests: write
+          permission-statuses: write
+          permission-workflows: write
+
+      - uses: convictional/trigger-workflow-and-wait@v1.6.5
+        if: ${{ needs.check-labels-and-engine-changes.outputs.run_query_planner == 'true' }}
+        id: trigger_workflow
+        name: Trigger Query Planner CI
+        with:
+          owner: wundergraph
+          repo: cosmo-celestial
+          ref: master
+          github_token: ${{ steps.app-token.outputs.token }}
+          propagate_failure: true
+          workflow_file_name: 'query-planner-tester.yaml'
+          client_payload: >-
+            {
+              "branch": "query-plan/pr-${{ github.event.pull_request.number }}",
+              "router": "${{ needs.build-router.outputs.image_ref || 'ghcr.io/wundergraph/cosmo/router:latest' }}",
+              "wgc": "${{ needs.build-cli.outputs.wgc || needs.cli-release-url.outputs.wgc }}"
+            }
+  get_pr_url:
+    needs: [build_test, check-labels-and-engine-changes]
+    runs-on: ubuntu-latest
+    if: ${{ always() && needs.check-labels-and-engine-changes.outputs.run_query_planner == 'true' }}
+    outputs:
+      pullrequest_url: ${{ steps.get_url.outputs.pr_url }}
+    steps:
+      - name: Authenticate
+        id: app-token
+        uses: actions/create-github-app-token@v3
+        with:
+          client-id: ${{ secrets.APP_CLIENT_ID }}
+          private-key: ${{ secrets.APP_PRIVATE_KEY }}
+          repositories: |
+            cosmo
+            cosmo-celestial
+          permission-actions: write
+          permission-contents: write
+          permission-pull-requests: write
+          permission-statuses: write
+          permission-workflows: write
+
+      - name: Download PR info artifact
+        id: download
+        uses: actions/github-script@v7
+        with:
+          github-token: ${{ steps.app-token.outputs.token }}
+          retries: 3
+          script: |
+            const fs = require('fs');
+            const runId = '${{ needs.build_test.outputs.workflow_id }}';
+            if (!runId) {
+              core.info('No query planner run was triggered, nothing to look up.');
+              core.setOutput('found', 'false');
+              return;
+            }
+            const artifacts = await github.rest.actions.listWorkflowRunArtifacts({
+              owner: 'wundergraph',
+              repo: 'cosmo-celestial',
+              run_id: runId
+            });
+            const artifact = artifacts.data.artifacts.find(a => a.name === 'pull-request-info');
+            if (!artifact) {
+              // Celestial uploads this artifact only when the query plans changed and it opened a PR.
+              // Unchanged plans are a pass, so leave the URL empty instead of failing the job.
+              core.info('No pull-request-info artifact, celestial did not open a pull request.');
+              core.setOutput('found', 'false');
+              return;
+            }
+            const download = await github.rest.actions.downloadArtifact({
+              owner: 'wundergraph',
+              repo: 'cosmo-celestial',
+              artifact_id: artifact.id,
+              archive_format: 'zip'
+            });
+            fs.writeFileSync('artifact.zip', Buffer.from(download.data));
+            core.setOutput('found', 'true');
+
+      - name: Unzip artifact
+        if: steps.download.outputs.found == 'true'
+        run: unzip artifact.zip
+
+      - name: Get PR URL
+        id: get_url
+        if: steps.download.outputs.found == 'true'
+        run: |
+          pr_url=$(cat pr-url.txt)
+          echo "pr_url=$pr_url" >> $GITHUB_OUTPUT
+  comment-on-failure:
+    needs: [build_test, get_pr_url, check-labels-and-engine-changes]
+    if: ${{ needs.check-labels-and-engine-changes.outputs.run_query_planner == 'true' && failure() }}
+    runs-on: ubuntu-latest
+    env:
+      # The first matching case wins, so exactly one step below posts a comment.
+      OUTCOME: >-
+        ${{ needs.build_test.outputs.build_failed == 'true' && 'build_failed'
+        || needs.get_pr_url.outputs.pullrequest_url != '' && 'celestial_failed'
+        || needs.build_test.result == 'success' && needs.get_pr_url.result == 'failure' && 'unreadable'
+        || 'failed_to_run' }}
+    steps:
+      - name: Comment PR on build failure
+        if: ${{ env.OUTCOME == 'build_failed' }}
+        uses: mshick/add-pr-comment@v2
+        with:
+          # All Query Planner comments share this id, so each result replaces the previous one.
+          message-id: query-planner
+          message: |
+            :x: Query Planner CI did not run, the router image or the wgc binary failed to build.
+      - name: Comment PR on failure
+        if: ${{ env.OUTCOME == 'failed_to_run' }}
+        uses: mshick/add-pr-comment@v2
+        with:
+          message-id: query-planner
+          message: |
+            :x: Query Planner CI failed to run.
+            ${{ needs.build_test.outputs.workflow_url != '' && format('If you are part of the WunderGraph organization, you can [see the celestial run logs]({0}).', needs.build_test.outputs.workflow_url) || '' }}
+      - name: Comment PR on unreadable result
+        if: ${{ env.OUTCOME == 'unreadable' }}
+        uses: mshick/add-pr-comment@v2
+        with:
+          message-id: query-planner
+          message: |
+            :x: The Internal Query Planner CI has passed in the celestial repository, but its result could not be read.
+            Re-run the failed jobs of this workflow to update the result.
+
+            If you are part of the WunderGraph organization, you can [see the celestial run logs](${{ needs.build_test.outputs.workflow_url }}).
+      - name: Comment PR on celestial CI failure
+        if: ${{ env.OUTCOME == 'celestial_failed' }}
+        uses: mshick/add-pr-comment@v2
+        with:
+          message-id: query-planner
+          message: |
+            ## Query Planner CI checks failed
+            :x: The Internal Query Planner CI has failed in the celestial repository, 
+            and this prevents the merge of this PR.
+
+            If you are part of the WunderGraph organization, you can [see the PR with more details](${{ needs.get_pr_url.outputs.pullrequest_url }}).
+  comment-on-success:
+    needs: [build_test, get_pr_url, check-labels-and-engine-changes]
+    # !cancelled() is used because success() is false when any upstream job was skipped.
+    # build-cli and cli-release-url exclude each other, so one of them is always skipped.
+    if: ${{ !cancelled() && needs.check-labels-and-engine-changes.outputs.run_query_planner == 'true' && needs.build_test.result == 'success' && needs.get_pr_url.result == 'success' }}
+    runs-on: ubuntu-latest
+    steps:
+      - name: Comment PR on success
+        if: ${{ needs.get_pr_url.outputs.pullrequest_url != '' }}
+        uses: mshick/add-pr-comment@v2
+        with:
+          message-id: query-planner
+          message: |
+            ## Query Planner CI has passed
+            :white_check_mark: The Internal Query Planner CI has passed in the celestial repository, 
+            and this does not prevent the merge of this PR.
+            
+            If you are part of the WunderGraph organization, you can [see the PR with more details](${{ needs.get_pr_url.outputs.pullrequest_url }}).
+      # Celestial opens no PR when no query plan changed.
+      # Only replace an earlier failure comment then, instead of commenting on every PR.
+      - name: Comment PR on success without changes
+        if: ${{ needs.get_pr_url.outputs.pullrequest_url == '' }}
+        uses: mshick/add-pr-comment@v2
+        with:
+          message-id: query-planner
+          update-only: true
+          message: |
+            ## Query Planner CI has passed
+            :white_check_mark: The Internal Query Planner CI has passed in the celestial repository, no query plans have changed.

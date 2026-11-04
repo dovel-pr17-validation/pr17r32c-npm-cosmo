@@ -1,0 +1,165 @@
+import { EnumStatusCode } from '@wundergraph/cosmo-connect/dist/common/common_pb';
+import { lru } from 'tiny-lru';
+import { FastifyBaseLogger } from 'fastify';
+import { AuthContext, UserInfoEndpointResponse } from '../../types/index.js';
+import { buildAuthState } from '../util.js';
+import { AuthenticationError } from '../errors/errors.js';
+import { OrganizationRepository } from '../repositories/OrganizationRepository.js';
+import { OidcRepository } from '../repositories/OidcRepository.js';
+import { NamespaceLoginMethodRepository } from '../repositories/NamespaceLoginMethodRepository.js';
+import { OrganizationLoginMethodRepository } from '../repositories/OrganizationLoginMethodRepository.js';
+import { traced } from '../tracing.js';
+import AccessTokenAuthenticator from './AccessTokenAuthenticator.js';
+import ApiKeyAuthenticator from './ApiKeyAuthenticator.js';
+import GraphApiTokenAuthenticator, { GraphKeyAuthContext } from './GraphApiTokenAuthenticator.js';
+import WebSessionAuthenticator from './WebSessionAuthenticator.js';
+
+// The maximum time to cache the user auth context for the web session authentication.
+const maxAuthCacheTtl = 30 * 1000; // 30 seconds
+
+export interface Authenticator {
+  authenticate(headers: Headers): Promise<AuthContext>;
+  authenticateRouter(headers: Headers): Promise<GraphKeyAuthContext>;
+  getUserInfo(token: string): Promise<UserInfoEndpointResponse | undefined>;
+}
+
+@traced
+export class Authentication implements Authenticator {
+  #cache = lru<AuthContext>(1000, maxAuthCacheTtl);
+
+  constructor(
+    private webAuth: WebSessionAuthenticator,
+    private keyAuth: ApiKeyAuthenticator,
+    private accessTokenAuth: AccessTokenAuthenticator,
+    private graphKeyAuth: GraphApiTokenAuthenticator,
+    private orgRepo: OrganizationRepository,
+    private oidcRepo: OidcRepository,
+    private namespaceLoginMethodRepo: NamespaceLoginMethodRepository,
+    private orgLoginMethodRepo: OrganizationLoginMethodRepository,
+    private logger: FastifyBaseLogger,
+  ) {}
+
+  /**
+   * Authenticate a user for an organization.
+   * The function will first check for the token in the `Authorization` header and if that is not found,
+   * it will check for the token in the `cosmo_user_session` cookie. In case of a cookie, the functions expects
+   * the `cosmo-org-id` header to be set and will validate that the user is a member of the organization.
+   * If none of these are found, an error is thrown.
+   */
+  public async authenticate(headers: Headers): Promise<AuthContext> {
+    try {
+      /**
+       * API keys are authenticated first.
+       * First check for the token in the `Authorization` header
+       */
+      const authorization = headers.get('authorization');
+      if (authorization) {
+        const token = authorization.replace(/^bearer\s+/i, '');
+        if (token.toLowerCase().startsWith('cosmo')) {
+          return await this.keyAuth.authenticate(token);
+        }
+        const organizationSlug = headers.get('cosmo-org-slug');
+        return await this.accessTokenAuth.authenticate(token, organizationSlug);
+      }
+
+      /**
+       * If no API key is found, check for the `cosmo_user_session` cookie which is used for web sessions.
+       * The `cosmo-org-id` header must be set.
+       */
+      const user = await this.webAuth.authenticate(headers);
+      const organization = await this.orgRepo.bySlug(user.organizationSlug);
+
+      if (!organization) {
+        throw new AuthenticationError(EnumStatusCode.ERROR_NOT_AUTHENTICATED, 'Organization not found');
+      }
+
+      // Cache key now includes sessionId so that re-login via a different IdP
+      // within the cache TTL invalidates cleanly.
+      const cacheKey = `${user.userId}:${organization.id}:${user.sessionId}`;
+      const cachedUserContext = this.#cache.get(cacheKey);
+
+      if (cachedUserContext) {
+        return cachedUserContext;
+      }
+
+      /**
+       * Validate that the user is a member of the organization.
+       */
+      const isMember = await this.orgRepo.isMemberOf({
+        userId: user.userId,
+        organizationId: organization.id,
+      });
+
+      if (!isMember) {
+        throw new AuthenticationError(
+          EnumStatusCode.ERROR_NOT_AUTHENTICATED,
+          'User is not a member of the organization',
+        );
+      }
+
+      const organizationDeactivated = !!organization.deactivation;
+
+      // Resolve the login method, IdP gate and RBAC from the session's idp_alias.
+      const { loginMethod, rbac } = await buildAuthState(
+        {
+          oidcRepo: this.oidcRepo,
+          orgRepo: this.orgRepo,
+          namespaceLoginMethodRepo: this.namespaceLoginMethodRepo,
+          orgLoginMethodRepo: this.orgLoginMethodRepo,
+        },
+        { organizationId: organization.id, userId: user.userId, idpAlias: user.idpAlias },
+      );
+
+      const userContext: AuthContext = {
+        auth: user.auth,
+        userId: user.userId,
+        organizationId: organization.id,
+        organizationSlug: organization.slug,
+        organizationDeactivated,
+        rbac,
+        userDisplayName: user.userDisplayName,
+        loginMethod,
+      };
+
+      this.#cache.set(cacheKey, userContext);
+
+      return userContext;
+    } catch (error: unknown) {
+      if (error instanceof AuthenticationError || (error instanceof Error && error.name === 'AuthenticationError')) {
+        // Just forward authentication errors to surface better error messages
+        throw error;
+      }
+
+      this.logger.error(error, 'Failed to authenticate request');
+      const authError = new AuthenticationError(EnumStatusCode.ERROR_NOT_AUTHENTICATED, 'Not authenticated');
+      authError.cause = error;
+
+      throw authError;
+    }
+  }
+
+  async authenticateRouter(headers: Headers): Promise<GraphKeyAuthContext> {
+    const authorization = headers.get('authorization');
+    if (authorization) {
+      try {
+        const token = authorization.replace(/^bearer\s+/i, '');
+        return await this.graphKeyAuth.authenticate(token);
+      } catch {
+        throw new AuthenticationError(EnumStatusCode.ERROR_NOT_AUTHENTICATED, 'Graph token is invalid');
+      }
+    }
+    throw new AuthenticationError(EnumStatusCode.ERROR_NOT_AUTHENTICATED, 'Graph token is missing');
+  }
+
+  async getUserInfo(token: string): Promise<UserInfoEndpointResponse | undefined> {
+    if (!token || token.trim().length === 0) {
+      return undefined;
+    }
+
+    try {
+      return token.toLowerCase().startsWith('cosmo') ? undefined : await this.accessTokenAuth.getUserInfo(token);
+    } catch {
+      throw new AuthenticationError(EnumStatusCode.ERROR_NOT_AUTHENTICATED, 'Not authenticated');
+    }
+  }
+}

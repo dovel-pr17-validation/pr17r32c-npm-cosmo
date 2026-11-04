@@ -1,0 +1,623 @@
+import KeycloakAdminClient, { NetworkError } from '@keycloak/keycloak-admin-client';
+import { RequiredActionAlias } from '@keycloak/keycloak-admin-client/lib/defs/requiredActionProviderRepresentation.js';
+import { EnumStatusCode } from '@wundergraph/cosmo-connect/dist/common/common_pb';
+import { uid } from 'uid';
+import { FastifyBaseLogger } from 'fastify';
+import { decodeJwt } from 'jose';
+import axios, { type AxiosInstance, isAxiosError, isCancel } from 'axios';
+import { HttpProxyAgent } from 'http-proxy-agent';
+import { HttpsProxyAgent } from 'https-proxy-agent';
+import { MemberRole } from '../../db/models.js';
+import { organizationRoleEnum } from '../../db/schema.js';
+import { AuthenticationError, PublicError } from '../errors/errors.js';
+import { isValidLocalhostOrSecureEndpoint } from '../util.js';
+import { traced } from '../tracing.js';
+
+interface ParsedOpenIdConfiguration {
+  issuer?: string;
+  userinfo_endpoint?: string;
+  token_endpoint?: string;
+  authorization_endpoint?: string;
+  end_session_endpoint?: string;
+  jwks_uri?: string;
+}
+
+@traced
+export default class Keycloak {
+  client: KeycloakAdminClient;
+  adminUser = '';
+  adminPassword = '';
+  clientId = '';
+  realm = '';
+  #httpClient: AxiosInstance;
+
+  private logger: FastifyBaseLogger;
+
+  constructor(options: {
+    apiUrl: string;
+    realm: string;
+    clientId: string;
+    adminUser: string;
+    adminPassword: string;
+    logger: FastifyBaseLogger;
+    webhookProxyUrl?: string;
+  }) {
+    this.client = new KeycloakAdminClient({
+      baseUrl: options.apiUrl,
+      realmName: options.realm,
+    });
+
+    this.realm = options.realm;
+    this.clientId = options.clientId;
+    this.adminUser = options.adminUser;
+    this.adminPassword = options.adminPassword;
+    this.logger = options.logger;
+
+    let httpAgent: HttpProxyAgent<string> | undefined;
+    let httpsAgent: HttpsProxyAgent<string> | undefined;
+    if (options.webhookProxyUrl) {
+      try {
+        httpAgent = new HttpProxyAgent(options.webhookProxyUrl, {});
+        httpsAgent = new HttpsProxyAgent(options.webhookProxyUrl, {});
+      } catch (e) {
+        this.logger.error(e, 'Failed to create proxy agent');
+      }
+    }
+
+    this.#httpClient = axios.create({
+      httpAgent,
+      httpsAgent,
+      proxy: false,
+      baseURL: options.apiUrl,
+    });
+  }
+
+  public async authenticateClient() {
+    if (this.client.accessToken) {
+      // We already have an access token, determine whether the token still valid before trying to authenticate again
+      try {
+        const { exp } = decodeJwt(this.client.accessToken);
+        if (exp && exp * 1000 > Date.now()) {
+          // The access token hasn't expired
+          return;
+        }
+
+        if (this.client.refreshToken) {
+          await this.client.auth({
+            grantType: 'refresh_token',
+            refreshToken: this.client.refreshToken,
+            clientId: 'admin-cli',
+          });
+
+          return;
+        }
+      } catch (error: unknown) {
+        this.logger.warn(error, 'Failed to refresh the existing access token, a new token will be requested');
+      }
+    }
+
+    try {
+      await this.client.auth({
+        grantType: 'password',
+        username: this.adminUser,
+        password: this.adminPassword,
+        clientId: 'admin-cli',
+      });
+    } catch (err: any) {
+      if (err instanceof NetworkError) {
+        throw new AuthenticationError(EnumStatusCode.ERROR_NOT_AUTHENTICATED, err.message);
+      }
+      throw err;
+    }
+  }
+
+  public async roleExists({ realm, roleName }: { realm?: string; roleName: string }): Promise<boolean> {
+    const role = await this.client.roles.findOneByName({
+      realm: realm || this.realm,
+      name: roleName,
+    });
+    return !!role;
+  }
+
+  // creates a user in keycloak and returns the id
+  public async addKeycloakUser({
+    email,
+    realm,
+    password,
+    isPasswordTemp,
+    groups,
+    firstName,
+    lastName,
+    id,
+  }: {
+    email: string;
+    realm?: string;
+    password?: string;
+    isPasswordTemp: boolean;
+    groups?: string[];
+    firstName?: string;
+    lastName?: string;
+    id?: string;
+  }): Promise<string> {
+    const createUserResp = await this.client.users.create({
+      email,
+      enabled: true,
+      emailVerified: true,
+      realm: realm || this.realm,
+      groups,
+      firstName,
+      lastName,
+      credentials: [
+        {
+          type: 'password',
+          // must follow the password policy on keycloak
+          value: password || uid(12) + '@123',
+          temporary: isPasswordTemp,
+        },
+      ],
+      id,
+    });
+    return createUserResp.id;
+  }
+
+  public async findUserByEmail({ email, realm }: { email: string; realm?: string }) {
+    const foundUsers = await this.client.users.find({
+      max: 1,
+      email,
+      realm: realm || this.realm,
+      exact: true,
+    });
+
+    return foundUsers.length === 1 ? foundUsers[0] : undefined;
+  }
+
+  public async getUserAttributes({
+    realm,
+    userID,
+  }: {
+    realm?: string;
+    userID: string;
+  }): Promise<Record<string, string[]>> {
+    const user = await this.client.users.findOne({ id: userID, realm: realm || this.realm });
+    return user?.attributes ?? {};
+  }
+
+  public async updateKeycloakUser({
+    realm,
+    id,
+    password,
+    firstName,
+    lastName,
+    groups,
+    enabled,
+  }: {
+    id: string;
+    realm?: string;
+    password?: string;
+    firstName?: string;
+    lastName?: string;
+    groups?: string[];
+    enabled?: boolean;
+  }) {
+    const payload: {
+      credentials?: { type: string; value: string; temporary: boolean }[];
+      firstName?: string;
+      lastName?: string;
+      groups?: string[];
+      enabled?: boolean;
+    } = {};
+    if (password) {
+      payload.credentials = [
+        {
+          type: 'password',
+          // must follow the password policy on keycloak
+          value: password,
+          temporary: false,
+        },
+      ];
+    }
+    if (firstName) {
+      payload.firstName = firstName;
+    }
+    if (lastName) {
+      payload.lastName = lastName;
+    }
+    if (enabled !== undefined) {
+      payload.enabled = enabled;
+    }
+    if (groups) {
+      payload.groups = groups;
+    }
+    await this.client.users.update({ id, realm: realm || this.realm }, payload);
+  }
+
+  public async createRole({ realm, roleName }: { realm?: string; roleName: string }) {
+    await this.client.roles.create({
+      name: roleName,
+      realm: realm || this.realm,
+      clientRole: false,
+    });
+  }
+
+  public async addRealmRoleMappings({
+    realm,
+    userID,
+    roles,
+  }: {
+    userID: string;
+    realm?: string;
+    roles: {
+      id: string;
+      clientRole: boolean;
+      name: string;
+    }[];
+  }) {
+    await this.client.users.addRealmRoleMappings({
+      realm: realm || this.realm,
+      id: userID,
+      roles,
+    });
+  }
+
+  public async executeActionsEmail({
+    realm,
+    userID,
+    redirectURI,
+  }: {
+    realm?: string;
+    userID: string;
+    redirectURI: string;
+  }) {
+    await this.client.users.executeActionsEmail({
+      id: userID,
+      actions: [RequiredActionAlias.UPDATE_PASSWORD],
+      redirectUri: redirectURI,
+      realm: realm || this.realm,
+      clientId: this.clientId,
+    });
+  }
+
+  public async getKeycloakSsoLoggedInUsers({ realm, alias }: { realm?: string; alias: string }) {
+    const users = await this.client.users.find({
+      exact: true,
+      idpAlias: alias,
+      realm: realm || this.realm,
+    });
+    return users;
+  }
+
+  public async getKeycloakUserGroups({ realm, userID }: { realm?: string; userID: string }) {
+    const groups = await this.client.users.listGroups({
+      id: userID,
+      realm: realm || this.realm,
+    });
+    return groups;
+  }
+
+  public async createOIDCProvider({
+    realm,
+    clientId,
+    clientSecret,
+    name,
+    alias,
+    discoveryEndpoint,
+    abortSignal,
+  }: {
+    realm?: string;
+    clientId: string;
+    clientSecret: string;
+    name: string;
+    alias: string;
+    discoveryEndpoint: string;
+    abortSignal?: AbortSignal;
+  }) {
+    const openIdConfiguration = await this.#fetchOpenIdConfiguration(discoveryEndpoint, abortSignal);
+    if (
+      typeof openIdConfiguration !== 'object' ||
+      typeof openIdConfiguration?.token_endpoint !== 'string' ||
+      !isValidLocalhostOrSecureEndpoint(openIdConfiguration.token_endpoint) ||
+      typeof openIdConfiguration.authorization_endpoint !== 'string' ||
+      !isValidLocalhostOrSecureEndpoint(openIdConfiguration.authorization_endpoint)
+    ) {
+      throw new PublicError(
+        EnumStatusCode.ERR,
+        'The provided OpenID configuration does not contain a valid token or authorization endpoint.',
+      );
+    }
+
+    await this.client.identityProviders.create({
+      alias,
+      displayName: name,
+      enabled: true,
+      config: {
+        clientId,
+        clientSecret,
+        hideOnLoginPage: true,
+        syncMode: 'FORCE',
+        validateSignature: 'true',
+        tokenUrl: openIdConfiguration.token_endpoint,
+        authorizationUrl: openIdConfiguration.authorization_endpoint,
+        jwksUrl: openIdConfiguration.jwks_uri,
+        logoutUrl: openIdConfiguration.end_session_endpoint,
+        userInfoUrl: openIdConfiguration.userinfo_endpoint,
+        issuer: openIdConfiguration.issuer,
+        useJwksUrl: 'true',
+        defaultScope: 'openid email profile',
+      },
+      realm: realm || this.realm,
+      providerId: 'oidc',
+    });
+  }
+
+  public async deleteOIDCProvider({ realm, alias }: { realm?: string; alias: string }) {
+    await this.client.identityProviders.del({ alias, realm: realm || this.realm });
+  }
+
+  public createIDPMapper({
+    realm,
+    claims,
+    alias,
+    keycloakGroupName,
+  }: {
+    realm?: string;
+    claims: string;
+    alias: string;
+    keycloakGroupName: string;
+  }) {
+    return this.client.identityProviders.createMapper({
+      alias,
+      realm: realm || this.realm,
+      identityProviderMapper: {
+        name: uid(10),
+        identityProviderMapper: 'oidc-advanced-group-idp-mapper',
+        identityProviderAlias: alias,
+        config: {
+          claims,
+          syncMode: 'INHERIT',
+          group: keycloakGroupName,
+          'are.claim.values.regex': true,
+        },
+      },
+    });
+  }
+
+  public async deleteGroupById({ realm, groupId }: { realm?: string; groupId: string }) {
+    try {
+      await this.client.groups.del({
+        realm: realm || this.realm,
+        id: groupId,
+      });
+    } catch (e: unknown) {
+      this.logger?.error(e, `Failed to delete group id "${groupId}" from Keycloak`);
+      throw e;
+    }
+  }
+
+  public seedRoles({ realm, organizationSlug }: { realm?: string; organizationSlug: string }) {
+    return Promise.all(
+      organizationRoleEnum.enumValues.map(async (role) => {
+        const roleName = `${organizationSlug}:${role}`;
+        if (!(await this.roleExists({ realm: realm || this.realm, roleName }))) {
+          await this.createRole({
+            realm: realm || this.realm,
+            roleName,
+          });
+        }
+      }),
+    );
+  }
+
+  public async seedGroup({
+    realm,
+    userID,
+    organizationSlug,
+  }: {
+    realm?: string;
+    userID: string;
+    organizationSlug: string;
+  }): Promise<[string, { id: string; name: string }[]]> {
+    const organizationGroup = await this.client.groups.create({
+      realm: realm || this.realm,
+      name: organizationSlug,
+    });
+
+    await this.seedRoles({ realm, organizationSlug });
+
+    const createdGroups: { id: string; name: string }[] = [];
+    for (const name of ['admin', 'developer', 'viewer']) {
+      const roleName = `${organizationSlug}:organization-${name}`;
+      const kcRole = await this.client.roles.findOneByName({
+        realm,
+        name: roleName,
+      });
+
+      const kcGroup = await this.client.groups.createChildGroup(
+        {
+          realm: realm || this.realm,
+          id: organizationGroup.id,
+        },
+        { name },
+      );
+
+      if (kcGroup && kcRole) {
+        await this.client.groups.addRealmRoleMappings({
+          realm,
+          id: kcGroup.id,
+          roles: [
+            {
+              id: kcRole.id!,
+              name: roleName,
+            },
+          ],
+        });
+
+        if (name === 'admin') {
+          await this.client.users.addToGroup({
+            id: userID,
+            realm: realm || this.realm,
+            groupId: kcGroup.id,
+          });
+        }
+
+        createdGroups.push({ id: kcGroup.id!, name });
+      }
+    }
+
+    return [organizationGroup.id, createdGroups];
+  }
+
+  public async createSubGroup({ realm, parentId, groupName }: { realm?: string; parentId: string; groupName: string }) {
+    const newGroup = await this.client.groups.createChildGroup(
+      { realm: realm || this.realm, id: parentId },
+      { name: groupName },
+    );
+
+    return newGroup?.id;
+  }
+
+  public fetchAllSubGroups({ realm, kcGroupId }: { realm?: string; kcGroupId: string }) {
+    return this.client.groups.listSubGroups({
+      parentId: kcGroupId,
+      realm: realm || this.realm,
+    });
+  }
+
+  public async fetchChildGroup({
+    realm,
+    orgSlug,
+    kcGroupId,
+    childGroupType,
+  }: {
+    realm?: string;
+    orgSlug: string;
+    kcGroupId: string;
+    childGroupType: MemberRole;
+  }) {
+    const orgGroups = await this.client.groups.listSubGroups({
+      search: childGroupType,
+      parentId: kcGroupId,
+      realm: realm || this.realm,
+    });
+
+    const childGroup = orgGroups?.find((group) => group.path === `/${orgSlug}/${childGroupType}`);
+    if (!childGroup) {
+      throw new Error(`Organization child group '/${orgSlug}/${childGroupType}' not found`);
+    }
+
+    return childGroup;
+  }
+
+  public async removeUserFromOrganization({
+    realm,
+    groupId,
+    userID,
+  }: {
+    realm?: string;
+    groupId: string;
+    userID: string;
+  }) {
+    // Delete from the root organization group
+    await this.client.users.delFromGroup({
+      id: userID,
+      groupId,
+      realm: realm || this.realm,
+    });
+
+    // And any subgroup
+    const subGroups = await this.fetchAllSubGroups({
+      realm: realm || this.realm,
+      kcGroupId: groupId,
+    });
+    for (const subGroup of subGroups) {
+      await this.client.users.delFromGroup({
+        id: userID,
+        groupId: subGroup.id!,
+        realm: realm || this.realm,
+      });
+    }
+  }
+
+  /**
+   * This method retrieves the OpenID Configuration from the provided discovery endpoint.
+   *
+   * The reason to introduce this method is to have more control over how we fetch the configuration, such as
+   * providing a custom cancellation signal and custom timeout so we try to minimize the workload sent to Keycloak,
+   * and we don't run into long wait times when the provided endpoint is a valid endpoint but unreachable.
+   *
+   * @param discoveryEndpoint The endpoint to fetch the OpenID Configuration from.
+   * @param signal AbortSignal to allow for cancellation of the request.
+   * @private
+   */
+  async #fetchOpenIdConfiguration(
+    discoveryEndpoint: string,
+    signal: AbortSignal | undefined,
+  ): Promise<ParsedOpenIdConfiguration> {
+    try {
+      const response = await this.#httpClient.get(discoveryEndpoint, {
+        signal,
+        timeout: 10_000,
+        maxBodyLength: 3 * 1024 * 1024, // ~3mb
+        validateStatus: (_) => true,
+      });
+
+      if (response.status !== 200) {
+        throw new PublicError(
+          EnumStatusCode.ERR,
+          `Unexpected status code received from discovery endpoint: ${response.status} ${response.statusText}`,
+        );
+      }
+
+      // Make sure that the discovery endpoint returned a valid JSON response
+      let data = response.data;
+      if (typeof data === 'object') {
+        // No need to parse the data
+      } else if (typeof data === 'string') {
+        try {
+          data = JSON.parse(data);
+        } catch {
+          // Failed to parse the response as JSON
+          throw new PublicError(
+            EnumStatusCode.ERR,
+            'Failed to parse response from the provided discovery endpoint as JSON.',
+          );
+        }
+      } else {
+        // Invalid response format
+        throw new PublicError(
+          EnumStatusCode.ERR,
+          'Failed to parse response from the provided discovery endpoint as JSON.',
+        );
+      }
+
+      // Cast the data to the expected type
+      return data as ParsedOpenIdConfiguration;
+    } catch (e: unknown) {
+      if (isCancel(e)) {
+        // The user canceled the request
+        throw new PublicError(EnumStatusCode.ERR, 'Request cancelled by user');
+      } else if (isAxiosError(e)) {
+        let message: string;
+        switch (e.code) {
+          case 'ECONNREFUSED': {
+            message =
+              'The discovery endpoint could not be reached. Please, make sure that the discovery endpoint is correct and reachable.';
+            break;
+          }
+          case 'ECONNABORTED': {
+            message =
+              'The discovery endpoint did not respond within the time limit. Please, make sure that he discovery endpoint is correct and reachable.';
+            break;
+          }
+          default: {
+            message = e.message;
+            break;
+          }
+        }
+
+        throw new PublicError(EnumStatusCode.ERR, message);
+      }
+
+      throw e;
+    }
+  }
+}

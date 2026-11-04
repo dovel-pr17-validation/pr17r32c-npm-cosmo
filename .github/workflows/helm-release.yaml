@@ -1,0 +1,100 @@
+---
+name: Helm Release
+run-name: helm-release
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - main
+    paths-ignore:
+      - 'docs-website/**'
+      - '*.md'
+      - '.github/CODEOWNERS'
+
+permissions:
+  contents: write
+  pull-requests: write
+  packages: write
+
+env:
+  CI: true
+  REGISTRY: ghcr.io
+  RELEASE_BRANCH: main
+
+jobs:
+  build_test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+
+    steps:
+      - name: Authenticate
+        id: app-token
+        uses: actions/create-github-app-token@v3
+        with:
+          client-id: ${{ secrets.APP_CLIENT_ID }}
+          private-key: ${{ secrets.APP_PRIVATE_KEY }}
+          repositories: |
+            cosmo
+          permission-actions: write
+          permission-contents: write
+          permission-issues: write
+          permission-pull-requests: write
+          permission-statuses: write
+
+      - name: checkout
+        uses: actions/checkout@v4
+
+      - uses: googleapis/release-please-action@v4
+        id: release
+        with:
+          # https://github.com/googleapis/release-please-action/issues/741
+          config-file: release-please-config.json
+          manifest-file: .release-please-manifest.json
+          target-branch: ${{ env.RELEASE_BRANCH }}
+          token: ${{ steps.app-token.outputs.token }}
+          skip-github-release: false
+          skip-github-pull-request: false
+
+      - name: Publish cosmo chart
+        uses: ./.github/actions/helm-release
+        if: ${{ steps.release.outputs['helm/cosmo--release_created'] }}
+        with:
+          working-directory: ./helm
+          registry: ${{ env.REGISTRY }}
+          registry-username: ${{ github.actor }}
+          registry-password: ${{ secrets.GITHUB_TOKEN }}
+          make-target: publish-cosmo-chart
+
+      - uses: ./.github/actions/helm-release
+        if: ${{ steps.release.outputs['helm/cosmo/charts/router--release_created'] }}
+        with:
+          working-directory: ./helm
+          registry: ${{ env.REGISTRY }}
+          registry-username: ${{ github.actor }}
+          registry-password: ${{ secrets.GITHUB_TOKEN }}
+          make-target: publish-router-chart
+
+      - name: Authenticate for cosmo-cloud
+        id: cloud-token
+        if: ${{ steps.release.outputs['helm/cosmo--release_created'] }}
+        uses: actions/create-github-app-token@v3
+        with:
+          client-id: ${{ secrets.APP_CLIENT_ID }}
+          private-key: ${{ secrets.APP_PRIVATE_KEY }}
+          repositories: |
+            cosmo-cloud
+          permission-contents: write
+
+      - name: Trigger cosmo-cloud deployment PR
+        if: ${{ steps.release.outputs['helm/cosmo--release_created'] }}
+        uses: peter-evans/repository-dispatch@v3
+        with:
+          token: ${{ steps.cloud-token.outputs.token }}
+          repository: wundergraph/cosmo-cloud
+          event-type: cosmo
+          client-payload: |-
+            {
+              "helm_version": ${{ toJSON(steps.release.outputs['helm/cosmo--version']) }},
+              "triggered_by": ${{ toJSON(format('{0} <{1}+{2}@users.noreply.github.com>', github.actor, github.actor_id, github.actor)) }}
+            }

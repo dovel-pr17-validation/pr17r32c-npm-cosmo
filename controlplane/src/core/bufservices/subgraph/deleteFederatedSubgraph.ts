@@ -1,0 +1,342 @@
+import { HandlerContext } from '@connectrpc/connect';
+import { EnumStatusCode } from '@wundergraph/cosmo-connect/dist/common/common_pb';
+import { OrganizationEventName } from '@wundergraph/cosmo-connect/dist/notifications/events_pb';
+import {
+  DeleteFederatedSubgraphRequest,
+  DeleteFederatedSubgraphResponse,
+} from '@wundergraph/cosmo-connect/dist/platform/v1/platform_pb';
+import { FeatureFlagDTO, PlainMessage } from '../../../types/index.js';
+import { UnauthorizedError } from '../../errors/errors.js';
+import { AuditLogRepository } from '../../repositories/AuditLogRepository.js';
+import { FeatureFlagRepository } from '../../repositories/FeatureFlagRepository.js';
+import { FederatedGraphRepository } from '../../repositories/FederatedGraphRepository.js';
+import { DefaultNamespace, NamespaceRepository } from '../../repositories/NamespaceRepository.js';
+import { ProposalRepository } from '../../repositories/ProposalRepository.js';
+import { SubgraphRepository } from '../../repositories/SubgraphRepository.js';
+import type { RouterOptions } from '../../routes.js';
+import { CompositionService } from '../../services/CompositionService.js';
+import { flushMapperIntoResponse, RouterConfigMapperUpdater } from '../../services/RouterConfigMapperUpdater.js';
+import { enrichLogger, getFederatedGraphRouterCompatibilityVersion, getLogger, handleError } from '../../util.js';
+import { OrganizationWebhookService } from '../../webhooks/OrganizationWebhookService.js';
+
+export function deleteFederatedSubgraph(
+  opts: RouterOptions,
+  req: DeleteFederatedSubgraphRequest,
+  ctx: HandlerContext,
+): Promise<PlainMessage<DeleteFederatedSubgraphResponse>> {
+  let logger = getLogger(ctx, opts.logger);
+
+  return handleError<PlainMessage<DeleteFederatedSubgraphResponse>>(ctx, logger, async () => {
+    const authContext = await opts.authenticator.authenticate(ctx.requestHeader);
+    logger = enrichLogger(ctx, logger, authContext);
+
+    const subgraphRepo = new SubgraphRepository(logger, opts.db, authContext.organizationId);
+    const proposalRepo = new ProposalRepository(opts.db, authContext.organizationId);
+    const namespaceRepo = new NamespaceRepository(opts.db, authContext.organizationId);
+    const fedGraphRepo = new FederatedGraphRepository(logger, opts.db, authContext.organizationId);
+    const orgWebhooks = new OrganizationWebhookService(
+      opts.db,
+      authContext.organizationId,
+      opts.logger,
+      opts.billingDefaultPlanId,
+      opts.webhookProxyUrl,
+    );
+
+    req.namespace = req.namespace || DefaultNamespace;
+    if (authContext.organizationDeactivated) {
+      throw new UnauthorizedError();
+    }
+
+    const namespace = await namespaceRepo.byName(req.namespace);
+    if (!namespace) {
+      return {
+        response: {
+          code: EnumStatusCode.ERR_NOT_FOUND,
+          details: `Could not find namespace ${req.namespace}`,
+        },
+        compositionErrors: [],
+        deploymentErrors: [],
+        compositionWarnings: [],
+      };
+    }
+
+    const subgraph = await subgraphRepo.byName(req.subgraphName, req.namespace);
+    if (!subgraph) {
+      return {
+        response: {
+          code: EnumStatusCode.ERR_NOT_FOUND,
+          details: `The subgraph "${req.subgraphName}" was not found.`,
+        },
+        compositionErrors: [],
+        deploymentErrors: [],
+        compositionWarnings: [],
+      };
+    }
+
+    // check if the user is authorized to perform the action
+    await opts.authorizer.authorize({
+      db: opts.db,
+      graph: {
+        targetId: subgraph.targetId,
+        targetType: 'subgraph',
+      },
+      headers: ctx.requestHeader,
+      authContext,
+      isDeleteOperation: true,
+    });
+
+    let proposalMatchMessage: string | undefined;
+    const matchedProposalEntities: {
+      proposalId: string;
+      proposalSubgraphId: string;
+    }[] = [];
+    if (namespace.enableProposals) {
+      const federatedGraphs = await fedGraphRepo.bySubgraphLabels({
+        labels: subgraph.labels,
+        namespaceId: namespace.id,
+      });
+      const proposalConfig = await proposalRepo.getProposalConfig({ namespaceId: namespace.id });
+      if (proposalConfig) {
+        const matches = await proposalRepo.matchSchemaWithProposals({
+          subgraphName: subgraph.name,
+          namespaceId: namespace.id,
+          schemaSDL: '',
+          routerCompatibilityVersion: getFederatedGraphRouterCompatibilityVersion(federatedGraphs),
+          isDeleted: true,
+          approvedOnly: true,
+        });
+        if (matches.length === 0) {
+          if (proposalConfig.publishSeverityLevel === 'warn') {
+            proposalMatchMessage = `The subgraph ${subgraph.name} is not proposed to be deleted in any of the approved proposals.`;
+          } else {
+            return {
+              response: {
+                code: EnumStatusCode.ERR_SCHEMA_MISMATCH_WITH_APPROVED_PROPOSAL,
+                details: `The subgraph ${subgraph.name} is not proposed to be deleted in any of the approved proposals.`,
+              },
+              compositionErrors: [],
+              deploymentErrors: [],
+              compositionWarnings: [],
+              proposalMatchMessage: `The subgraph ${subgraph.name} is not proposed to be deleted in any of the approved proposals.`,
+            };
+          }
+        }
+        matchedProposalEntities.push(...matches);
+      }
+    }
+
+    const mapperUpdater = new RouterConfigMapperUpdater(
+      opts.db,
+      opts.lockAdapter,
+      authContext.organizationId,
+      logger,
+      opts.blobStorage,
+    );
+
+    const { affectedFederatedGraphs, compositionErrors, deploymentErrors, compositionWarnings } =
+      await opts.db.transaction(async (tx) => {
+        const fedGraphRepo = new FederatedGraphRepository(logger, tx, authContext.organizationId);
+        const subgraphRepo = new SubgraphRepository(logger, tx, authContext.organizationId);
+        const featureFlagRepo = new FeatureFlagRepository(logger, tx, authContext.organizationId);
+        const auditLogRepo = new AuditLogRepository(tx);
+
+        const affectedFeatureFlags: FeatureFlagDTO[] = [];
+
+        let labels = subgraph.labels;
+        if (subgraph.isFeatureSubgraph) {
+          const baseSubgraph = await featureFlagRepo.getBaseSubgraphByFeatureSubgraphId({ id: subgraph.id });
+          if (baseSubgraph) {
+            labels = baseSubgraph.labels;
+            const enabledFeatureFlags = await featureFlagRepo.getFeatureFlagsByBaseSubgraphId({
+              baseSubgraphId: baseSubgraph.id,
+              namespaceId: namespace.id,
+              excludeDisabled: true,
+            });
+
+            for (const enabledFeatureFlag of enabledFeatureFlags) {
+              const featureFlag = await featureFlagRepo.getFeatureFlagById({
+                featureFlagId: enabledFeatureFlag.id,
+                namespaceId: namespace.id,
+              });
+
+              if (featureFlag) {
+                affectedFeatureFlags.push(featureFlag);
+              }
+            }
+          }
+        } else {
+          await featureFlagRepo.deleteFeatureSubgraphsByBaseSubgraphId({
+            subgraphId: subgraph.id,
+            namespaceId: subgraph.namespaceId,
+          });
+        }
+
+        // Collect all federated graphs that used this subgraph before deleting subgraph to include them in the composition
+        const affectedFederatedGraphs = await fedGraphRepo.bySubgraphLabels({
+          labels,
+          namespaceId: subgraph.namespaceId,
+          excludeContracts: true,
+        });
+
+        // Delete the subgraph
+        await subgraphRepo.delete(subgraph.targetId);
+
+        await auditLogRepo.addAuditLog({
+          organizationId: authContext.organizationId,
+          organizationSlug: authContext.organizationSlug,
+          auditAction: subgraph.isFeatureSubgraph ? 'feature_subgraph.deleted' : 'subgraph.deleted',
+          action: 'deleted',
+          actorId: authContext.userId,
+          auditableType: subgraph.isFeatureSubgraph ? 'feature_subgraph' : 'subgraph',
+          auditableDisplayName: subgraph.name,
+          actorDisplayName: authContext.userDisplayName,
+          apiKeyName: authContext.apiKeyName,
+          actorType: authContext.auth === 'api_key' ? 'api_key' : 'user',
+          targetNamespaceId: subgraph.namespaceId,
+          targetNamespaceDisplayName: subgraph.namespace,
+        });
+
+        // Recompose and deploy all affected federated graphs and their respective contracts.
+        // Collects all composition and deployment errors if any.
+        const compositionService = new CompositionService(
+          tx,
+          authContext.organizationId,
+          logger,
+          { cdnBaseUrl: opts.cdnBaseUrl, webhookJWTSecret: opts.admissionWebhookJWTSecret },
+          opts.blobStorage,
+          opts.chClient,
+          opts.webhookProxyUrl,
+          req.disableResolvabilityValidation,
+          opts.promptToQueryClient,
+          opts.billingDefaultPlanId,
+          mapperUpdater,
+        );
+
+        if (subgraph.isFeatureSubgraph) {
+          // To avoid having to re-fetch the feature flags for v2, we are just going to update the feature flag
+          // reference to remove the deleted feature subgraph, that way, we have an up-to-date view of the feature flag
+          for (const featureFlag of affectedFeatureFlags) {
+            featureFlag.featureSubgraphs = featureFlag.featureSubgraphs.filter((fs) => fs.id !== subgraph.id);
+          }
+        }
+
+        const { deploymentErrors, compositionErrors, compositionWarnings } =
+          await compositionService.recomposeAndDeployAffected({
+            actorId: authContext.userId,
+            affectedFederatedGraphs,
+            affectedFeatureFlags,
+            isFeatureSubgraph: subgraph.isFeatureSubgraph,
+          });
+
+        // Re-fetch the federated graphs to get the updated composedSchemaVersionId
+        const refreshedGraphs = await Promise.all(affectedFederatedGraphs.map((g) => fedGraphRepo.byId(g.id)));
+        for (let i = 0; i < affectedFederatedGraphs.length; i++) {
+          const refreshedGraph = refreshedGraphs[i];
+          if (refreshedGraph) {
+            affectedFederatedGraphs[i] = refreshedGraph;
+          }
+        }
+
+        return { affectedFederatedGraphs, compositionErrors, deploymentErrors, compositionWarnings };
+      });
+
+    // if this subgraph is part of a proposal, mark the proposal subgraph as published
+    // and if all proposal subgraphs are published, collect proposal details for the webhook
+    const proposalDetailsList: {
+      id: string;
+      name: string;
+      namespace: string;
+      federatedGraphId: string;
+    }[] = [];
+
+    for (const matchedEntity of matchedProposalEntities) {
+      const { allSubgraphsPublished } = await proposalRepo.markProposalSubgraphAsPublished({
+        proposalSubgraphId: matchedEntity.proposalSubgraphId,
+        proposalId: matchedEntity.proposalId,
+      });
+      if (allSubgraphsPublished) {
+        const proposal = await proposalRepo.ById(matchedEntity.proposalId);
+        if (proposal) {
+          proposalDetailsList.push({
+            id: proposal.proposal.id,
+            name: proposal.proposal.name,
+            namespace: req.namespace,
+            federatedGraphId: proposal.proposal.federatedGraphId,
+          });
+        }
+      }
+    }
+
+    for (const affectedFederatedGraph of affectedFederatedGraphs) {
+      const hasErrors =
+        compositionErrors.some((error) => error.federatedGraphName === affectedFederatedGraph.name) ||
+        deploymentErrors.some((error) => error.federatedGraphName === affectedFederatedGraph.name);
+      orgWebhooks.send(
+        {
+          eventName: OrganizationEventName.FEDERATED_GRAPH_SCHEMA_UPDATED,
+          payload: {
+            federated_graph: {
+              id: affectedFederatedGraph.id,
+              name: affectedFederatedGraph.name,
+              namespace: affectedFederatedGraph.namespace,
+              composedSchemaVersionId: affectedFederatedGraph.composedSchemaVersionId,
+            },
+            organization: {
+              id: authContext.organizationId,
+              slug: authContext.organizationSlug,
+            },
+            errors: hasErrors,
+            actor_id: authContext.userId,
+          },
+        },
+        authContext.userId,
+      );
+    }
+
+    // Send PROPOSAL_STATE_UPDATED webhook for each published proposal
+    for (const proposalDetails of proposalDetailsList) {
+      const federatedGraph = affectedFederatedGraphs.find((g) => g.id === proposalDetails.federatedGraphId);
+      if (federatedGraph) {
+        orgWebhooks.send(
+          {
+            eventName: OrganizationEventName.PROPOSAL_STATE_UPDATED,
+            payload: {
+              federated_graph: {
+                id: federatedGraph.id,
+                name: federatedGraph.name,
+                namespace: federatedGraph.namespace,
+              },
+              organization: {
+                id: authContext.organizationId,
+                slug: authContext.organizationSlug,
+              },
+              proposal: {
+                id: proposalDetails.id,
+                name: proposalDetails.name,
+                namespace: proposalDetails.namespace,
+                state: 'PUBLISHED',
+              },
+              actor_id: authContext.userId,
+            },
+          },
+          authContext.userId,
+        );
+      }
+    }
+
+    return flushMapperIntoResponse(mapperUpdater, {
+      response: {
+        code:
+          compositionErrors.length > 0
+            ? EnumStatusCode.ERR_SUBGRAPH_COMPOSITION_FAILED
+            : deploymentErrors.length > 0
+              ? EnumStatusCode.ERR_DEPLOYMENT_FAILED
+              : EnumStatusCode.OK,
+      },
+      deploymentErrors,
+      compositionErrors,
+      compositionWarnings,
+      proposalMatchMessage,
+    });
+  });
+}

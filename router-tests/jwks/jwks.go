@@ -1,0 +1,223 @@
+package jwks
+
+import (
+	"context"
+	"encoding/json"
+	"fmt"
+	"log"
+	"net/http"
+	"net/http/httptest"
+	"testing"
+	"time"
+
+	"github.com/MicahParks/jwkset"
+	"github.com/golang-jwt/jwt/v5"
+)
+
+const (
+	jwksHTTPPath = "/.well-known/jwks.json"
+	oidcHTTPPath = "/.well-known/openid-configuration"
+)
+
+type Server struct {
+	providers   map[string]Crypto
+	httpServer  *httptest.Server
+	storage     jwkset.Storage
+	respondTime time.Duration
+}
+
+type oidcConfiguration struct {
+	JwksURI string `json:"jwks_uri"`
+}
+
+func (s *Server) Close() {
+	s.httpServer.Close()
+}
+
+type TokenOpts struct {
+	AlgOverride string
+}
+
+func (s *Server) Token(claims map[string]any) (string, error) {
+	return s.TokenWithOpts(claims, TokenOpts{AlgOverride: ""})
+}
+
+func (s *Server) TokenWithOpts(claims map[string]any, tokenOpts TokenOpts) (string, error) {
+	if len(s.providers) == 0 {
+		return "", jwt.ErrInvalidKey
+	}
+
+	for kid, pr := range s.providers {
+		method := pr.SigningMethod()
+		if tokenOpts.AlgOverride != "" {
+			method = jwt.GetSigningMethod(tokenOpts.AlgOverride)
+			if method == nil {
+				return "", fmt.Errorf("unsupported signing method: %s", tokenOpts.AlgOverride)
+			}
+		}
+		token := jwt.NewWithClaims(method, jwt.MapClaims(claims))
+		token.Header[jwkset.HeaderKID] = kid
+		return token.SignedString(pr.PrivateKey())
+	}
+
+	return "", jwt.ErrInvalidKey
+}
+
+func (s *Server) TokenForKID(kid string, claims map[string]any, useInvalidKID bool) (string, error) {
+	provider, ok := s.providers[kid]
+	if useInvalidKID {
+		// If we don't care about the kid, use any available provider
+		for _, pr := range s.providers {
+			provider = pr
+			break
+		}
+	} else if !ok {
+		return "", jwt.ErrInvalidKey
+	}
+
+	token := jwt.NewWithClaims(provider.SigningMethod(), jwt.MapClaims(claims))
+	token.Header[jwkset.HeaderKID] = kid
+	return token.SignedString(provider.PrivateKey())
+}
+
+func (s *Server) jwksJSON(w http.ResponseWriter, r *http.Request) {
+	time.Sleep(s.respondTime)
+
+	ctx := context.Background()
+
+	rawJWKS, err := s.storage.JSON(ctx)
+	if err != nil {
+		log.Fatalf("Failed to get the server's JWKS.\nError: %s", err)
+	}
+	_, _ = w.Write(rawJWKS)
+}
+
+func (s *Server) oidcJSON(w http.ResponseWriter, r *http.Request) {
+	time.Sleep(s.respondTime)
+	oidc := oidcConfiguration{
+		JwksURI: s.httpServer.URL + jwksHTTPPath,
+	}
+
+	data, err := json.Marshal(oidc)
+	if err != nil {
+		log.Fatalf("Failed to marshal the OIDC configuration.\nError: %s", err)
+	}
+	_, _ = w.Write(data)
+}
+
+func (s *Server) JWKSURL() string {
+	return s.httpServer.URL + jwksHTTPPath
+}
+
+func (s *Server) OIDCURL() string {
+	return s.httpServer.URL + oidcHTTPPath
+}
+
+func (s *Server) waitForServer(ctx context.Context) error {
+	for {
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		default:
+		}
+		resp, err := http.Get(s.httpServer.URL)
+		if err == nil {
+			_ = resp.Body.Close()
+			return nil
+		}
+		time.Sleep(time.Millisecond * 100)
+	}
+}
+
+func (s *Server) SetRespondTime(d time.Duration) {
+	s.respondTime = d
+}
+
+// ServerOption represents a configuration option for the test JWKS server.
+type ServerOption func(*serverConfig)
+
+// serverConfig holds configurable parameters for server initialization.
+type serverConfig struct {
+	use       jwkset.USE
+	providers []Crypto
+}
+
+// WithUse sets the JWK "use" metadata value for keys written to storage.
+func WithUse(use jwkset.USE) ServerOption {
+	return func(cfg *serverConfig) {
+		cfg.use = use
+	}
+}
+
+func WithProviders(providers ...Crypto) ServerOption {
+	return func(cfg *serverConfig) {
+		cfg.providers = providers
+	}
+}
+
+func NewServerWithCrypto(t *testing.T, providers ...Crypto) (*Server, error) {
+	return NewServerWithOptions(t, WithProviders(providers...))
+}
+
+func NewServerWithOptions(t *testing.T, opts ...ServerOption) (*Server, error) {
+	t.Helper()
+
+	// Default configuration
+	cfg := &serverConfig{
+		use: jwkset.UseSig,
+	}
+
+	// Apply options
+	for _, opt := range opts {
+		opt(cfg)
+	}
+
+	if len(cfg.providers) == 0 {
+		t.Fatalf("At least one crypto provider is required.")
+	}
+
+	s := &Server{
+		providers: make(map[string]Crypto),
+		storage:   jwkset.NewMemoryStorage(),
+	}
+
+	ctx := context.Background()
+
+	for _, p := range cfg.providers {
+		kid := p.KID()
+
+		jwk, err := p.MarshalJWKWithUse(cfg.use)
+		if err != nil {
+			t.Fatalf("Failed to marshal the JWK.\nError: %s", err)
+		}
+
+		if err := s.storage.KeyWrite(ctx, jwk); err != nil {
+			t.Fatalf("Failed to write the JWK to the server's storage.\nError: %s", err)
+		}
+
+		s.providers[kid] = p
+	}
+
+	mux := http.NewServeMux()
+	mux.HandleFunc(jwksHTTPPath, s.jwksJSON)
+	mux.HandleFunc(oidcHTTPPath, s.oidcJSON)
+
+	httpServer := httptest.NewUnstartedServer(mux)
+	httpServer.Start()
+
+	s.httpServer = httpServer
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second*5)
+	defer cancel()
+	if err := s.waitForServer(ctx); err != nil {
+		t.Fatal(err)
+	}
+	return s, nil
+}
+
+func NewServer(t *testing.T) (*Server, error) {
+	rsaCrypto, err := NewRSACrypto("", jwkset.AlgRS256, 2048)
+	if err != nil {
+		t.Fatalf("Failed to create an RSA crypto provider.\nError: %s", err)
+	}
+	return NewServerWithCrypto(t, rsaCrypto)
+}

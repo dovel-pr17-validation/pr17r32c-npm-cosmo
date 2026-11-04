@@ -1,0 +1,1212 @@
+import { useApplyParams } from '@/components/analytics/use-apply-params';
+import { parseAsString, useQueryState, useQueryStates } from 'nuqs';
+import { getGraphLayout, GraphContext, GraphPageLayout } from '@/components/layout/graph-layout';
+import { PageHeader } from '@/components/layout/head';
+import { attachPlaygroundAPI, CustomScripts, detachPlaygroundAPI } from '@/components/playground/custom-scripts';
+import { CopyOperation } from '@/components/playground/copy-operation';
+import { DefaultHeadersDialog } from '@/components/playground/default-headers/default-headers-dialog';
+import { GraphCollectionsProvider } from '@/components/playground/graph-collections/graph-collections-provider';
+import { collectionDeepLinkParams } from '@/lib/graph-collections';
+import { collectionsPlugin } from '@/components/playground/graph-collections/collections-panel';
+import { SaveOperationControl } from '@/components/playground/graph-collections/save-operation-control';
+import { PlanView } from '@/components/playground/plan-view';
+import { SharePlaygroundModal } from '@/components/playground/share-playground-modal';
+import { TraceContext, TraceView } from '@/components/playground/trace-view';
+import { PlaygroundContext, PlaygroundView, QueryPlan, TabsState } from '@/components/playground/types';
+import { Alert, AlertDescription, AlertTitle } from '@/components/ui/alert';
+import { Badge } from '@/components/ui/badge';
+import { Button } from '@/components/ui/button';
+import { Loader } from '@/components/ui/loader';
+import {
+  Select,
+  SelectContent,
+  SelectGroup,
+  SelectItem,
+  SelectLabel,
+  SelectSeparator,
+  SelectTrigger,
+  SelectValue,
+} from '@/components/ui/select';
+import { Tooltip } from '@/components/ui/tooltip';
+import { useToast } from '@/components/ui/use-toast';
+import { useHydratePlaygroundStateFromUrl } from '@/hooks/use-hydrate-playground-state-from-url';
+import { useLocalStorage } from '@/hooks/use-local-storage';
+import { PLAYGROUND_DEFAULT_HEADERS_TEMPLATE, PLAYGROUND_DEFAULT_QUERY_TEMPLATE } from '@/lib/constants';
+import { NextPageWithLayout } from '@/lib/page';
+import { effectiveDefaultHeadersString, substituteHeadersFromEnv, validateHeaders } from '@/lib/playground-headers';
+import { CONFIG_TYPE_LABELS, ConfigType, isSchemaLoading, selectSchemaSdl, toConfigType } from '@/lib/schema-loading';
+import { parseSchema } from '@/lib/schema-helpers';
+import { cn } from '@/lib/utils';
+import { useMutation, useQuery } from '@connectrpc/connect-query';
+import { explorerPlugin } from '@graphiql/plugin-explorer';
+import { createGraphiQLFetcher, createLocalStorage, type Storage as GraphiQLStorage } from '@graphiql/toolkit';
+import { Component2Icon, ExclamationTriangleIcon, MobileIcon } from '@radix-ui/react-icons';
+import { TooltipContent, TooltipTrigger } from '@radix-ui/react-tooltip';
+import { EnumStatusCode } from '@wundergraph/cosmo-connect/dist/common/common_pb';
+import {
+  getFeatureFlagsInLatestCompositionByFederatedGraph,
+  getFederatedGraphSDLByName,
+  getPlaygroundDefaultHeaders,
+  getSubgraphSDLFromLatestComposition,
+} from '@wundergraph/cosmo-connect/dist/platform/v1/platform-PlatformService_connectquery';
+import { GetFeatureFlagsInLatestCompositionByFederatedGraphResponse } from '@wundergraph/cosmo-connect/dist/platform/v1/platform_pb';
+import { sentenceCase } from 'change-case';
+import { GraphiQL } from 'graphiql';
+import { GraphQLSchema, parse, validate } from 'graphql';
+import { useTheme } from 'next-themes';
+import posthog from 'posthog-js';
+import { createContext, Fragment, PropsWithChildren, ReactNode, useContext, useEffect, useMemo, useState } from 'react';
+import { createPortal } from 'react-dom';
+import { FaNetworkWired } from 'react-icons/fa';
+import { LuLayoutDashboard } from 'react-icons/lu';
+import { MdOutlineFeaturedPlayList } from 'react-icons/md';
+import { PiBracketsCurly, PiGraphLight } from 'react-icons/pi';
+import { TbDevicesCheck } from 'react-icons/tb';
+import { useDebounce } from 'use-debounce';
+import { z } from 'zod';
+import { groupFeatureSubgraphsByFlag, useFeatureSubgraphSchema } from '@/hooks/use-feature-subgraph-schema';
+import { SchemaNotFound } from '@/components/schema/schema-not-found';
+
+class CosmoGraphiqlStorage implements GraphiQLStorage {
+  constructor(graphId: string) {
+    this.storage = createLocalStorage({ namespace: `cosmo-playground:${graphId}` });
+  }
+
+  private storage: GraphiQLStorage;
+
+  public setItem = (key: string, value: string) => this.storage.setItem(key, value);
+  public getItem = (key: string) => {
+    // GraphiQL matches restored tabs by query, variables, and headers. When it restores headers from a
+    // separate empty key, it adds a duplicate tab instead of selecting the matching persisted tab.
+    if (key === 'graphiql:headers') {
+      const tabState = this.storage.getItem('graphiql:tabState');
+
+      if (tabState) {
+        try {
+          const parsed = JSON.parse(tabState);
+          const activeTab = parsed?.tabs?.[parsed.activeTabIndex];
+
+          if (activeTab && 'headers' in activeTab) {
+            return activeTab.headers;
+          }
+        } catch {
+          // Fall back to stored headers.
+        }
+      }
+    }
+
+    return this.storage.getItem(key);
+  };
+  public removeItem = (key: string) => this.storage.removeItem(key);
+  public clear = () => this.storage.clear();
+  public get length() {
+    return this.storage.length;
+  }
+}
+
+const executeScript = async (code: string | undefined, graphId: string) => {
+  if (!code) {
+    return;
+  }
+
+  try {
+    const asyncEval = new Function(`
+        return (async () => {
+          ${code}
+        })();
+      `);
+
+    await asyncEval();
+  } catch (error: any) {
+    console.error(error);
+  }
+};
+
+const retrieveScriptFromLocalStorage = (key: string) => {
+  const selectedScript = localStorage.getItem(key);
+  return JSON.parse(!selectedScript || selectedScript === 'undefined' ? '{}' : selectedScript);
+};
+
+const executePreScripts = async (graphId: string, requestBody: any) => {
+  attachPlaygroundAPI(graphId, requestBody);
+
+  const preflightScript = retrieveScriptFromLocalStorage('playground:pre-flight:selected');
+
+  const preFlightScriptEnabled = localStorage.getItem('playground:pre-flight:enabled');
+
+  const preOpScript = retrieveScriptFromLocalStorage('playground:pre-operation:selected');
+
+  if (!preFlightScriptEnabled || preFlightScriptEnabled === 'true') {
+    await executeScript(preflightScript.content, graphId);
+  }
+
+  if (preOpScript.enabled) {
+    await executeScript(preOpScript.content, graphId);
+  }
+
+  detachPlaygroundAPI();
+};
+
+const executePostScripts = async (graphId: string, requestBody: any, responseBody: any) => {
+  const selectedScript = localStorage.getItem('playground:post-operation:selected');
+
+  const script = JSON.parse(!selectedScript || selectedScript === 'undefined' ? '{}' : selectedScript);
+
+  if (script.enabled) {
+    attachPlaygroundAPI(graphId, requestBody, responseBody);
+    await executeScript(script.content, graphId);
+    detachPlaygroundAPI();
+  }
+};
+
+const graphiQLFetch = async (
+  onFetch: any,
+  graphRequestToken: string,
+  schema: GraphQLSchema | null,
+  clientValidationEnabled: boolean,
+  url: URL,
+  init: RequestInit,
+  graphId: string,
+  featureFlagName?: string,
+) => {
+  try {
+    let headers: Record<string, string> = {
+      ...(init.headers as Record<string, string>),
+    };
+
+    headers = substituteHeadersFromEnv(headers, graphId);
+
+    validateHeaders(headers);
+
+    let hasTraceHeader = false;
+
+    for (const headersKey in headers) {
+      if (headersKey.toLowerCase() === 'x-wg-trace') {
+        hasTraceHeader = headers[headersKey] === 'true';
+        break;
+      }
+    }
+
+    // add token if trace header is present
+    if (hasTraceHeader) {
+      headers['X-WG-Token'] = graphRequestToken;
+    }
+
+    if (featureFlagName) {
+      headers['X-Feature-Flag'] = featureFlagName;
+    }
+
+    if (schema && clientValidationEnabled) {
+      const query = JSON.parse(init.body as string)?.query;
+      const errors = validate(schema, parse(query));
+
+      if (errors.length > 0) {
+        const responseData = {
+          message: 'Client-side validation failed. The request was not sent to the Router.',
+          errors: errors.map((e) => ({
+            message: e.message,
+            path: e.path,
+            locations: e.locations,
+          })),
+        };
+
+        const response = new Response(JSON.stringify(responseData), {
+          headers: {
+            'Content-Type': 'application/json',
+          },
+        });
+
+        onFetch(await response.clone().json());
+        return response;
+      }
+    }
+
+    const requestBody = JSON.parse(init.body as string);
+
+    await executePreScripts(graphId, requestBody);
+
+    const response = await fetch(url, {
+      ...init,
+      headers,
+    });
+
+    const responseData = await response.clone().json();
+
+    await executePostScripts(graphId, requestBody, responseData);
+
+    posthog.capture('cosmo_studio_query_executed', {
+      query_success: response.ok && !responseData.errors,
+    });
+
+    onFetch(await response.clone().json(), response.status, response.statusText);
+    return response;
+  } catch (e: any) {
+    const customMessage =
+      'Failed to fetch from router due to network errors. Please check network activity in browser dev tools for more details.';
+
+    const resp = new Response(
+      JSON.stringify(e.message ? (e.message == 'Failed to fetch' ? customMessage : e.message) : customMessage),
+      {
+        headers: {
+          'Content-Type': 'application/json',
+        },
+      },
+    );
+
+    onFetch(await resp.clone().json(), undefined, 'Network Error');
+
+    return resp;
+  }
+};
+
+const ResponseToolbar = () => {
+  const { view, setView } = useContext(PlaygroundContext);
+
+  const onValueChange = (val: PlaygroundView) => {
+    const response = document.getElementsByClassName('graphiql-response')[0] as HTMLDivElement;
+
+    const art = document.getElementById('art-visualization') as HTMLDivElement;
+
+    const plan = document.getElementById('planner-visualization') as HTMLDivElement;
+
+    if (!response || !art || !plan) {
+      return;
+    }
+
+    if (val === 'request-trace') {
+      response.classList.add('invisible');
+      response.classList.add('-z-50');
+      plan.classList.add('invisible');
+      plan.classList.add('-z-50');
+
+      art.classList.remove('invisible');
+      art.classList.remove('-z-50');
+    } else if (val === 'query-plan') {
+      response.classList.add('invisible');
+      response.classList.add('-z-50');
+      art.classList.add('invisible');
+      art.classList.add('-z-50');
+
+      plan.classList.remove('invisible');
+      plan.classList.remove('-z-50');
+    } else {
+      response.classList.remove('invisible');
+      response.classList.remove('-z-50');
+
+      art.classList.add('invisible');
+      art.classList.add('-z-50');
+      plan.classList.add('invisible');
+      plan.classList.add('-z-50');
+    }
+
+    setView(val);
+  };
+
+  const getIcon = (val: string) => {
+    if (val === 'response') {
+      return <PiBracketsCurly className="h-4 w-4 flex-shrink-0" />;
+    } else if (val === 'request-trace') {
+      return <FaNetworkWired className="h-4 w-4 flex-shrink-0" />;
+    } else {
+      return <LuLayoutDashboard className="h-4 w-4 flex-shrink-0" />;
+    }
+  };
+
+  const { status, statusText } = useContext(PlaygroundContext);
+
+  const isSuccess = !!status && status >= 200 && status < 300;
+
+  return (
+    <div className="flex items-center gap-x-2">
+      {(status || statusText) && (
+        <Badge className="h-8" variant={isSuccess ? 'success' : 'destructive'}>
+          {!isSuccess && <ExclamationTriangleIcon className="mr-1 h-4 w-4" />}
+          {status || statusText}
+        </Badge>
+      )}
+      <Select onValueChange={onValueChange}>
+        <SelectTrigger className="w-[180px]">
+          <SelectValue>
+            <div className="flex items-center gap-x-2">
+              {getIcon(view)}
+              {sentenceCase(view)}
+            </div>
+          </SelectValue>
+        </SelectTrigger>
+        <SelectContent>
+          <SelectItem value="response">
+            <div className="flex items-center gap-x-2">
+              {getIcon('response')}
+              Response
+            </div>
+          </SelectItem>
+          <SelectItem value="request-trace">
+            <div className="flex items-center gap-x-2">
+              {getIcon('request-trace')}
+              Request Trace
+            </div>
+          </SelectItem>
+          <SelectItem value="query-plan">
+            <div className="flex items-center gap-x-2">
+              {getIcon('query-plan')}
+              Query Plan
+            </div>
+          </SelectItem>
+        </SelectContent>
+      </Select>
+    </div>
+  );
+};
+
+const ToggleClientValidation = () => {
+  const { clientValidationEnabled, setClientValidationEnabled } = useContext(TraceContext);
+
+  return (
+    <Tooltip delayDuration={100}>
+      <TooltipTrigger asChild>
+        <Button
+          onClick={() => setClientValidationEnabled(!clientValidationEnabled)}
+          variant="ghost"
+          size="icon"
+          className="graphiql-toolbar-button"
+        >
+          <TbDevicesCheck
+            className={cn('graphiql-toolbar-icon', {
+              'text-success': clientValidationEnabled,
+            })}
+          />
+        </Button>
+      </TooltipTrigger>
+      <TooltipContent className="rounded-md border bg-background px-2 py-1">
+        {clientValidationEnabled ? 'Client-side validation enabled' : 'Client-side validation disabled'}
+      </TooltipContent>
+    </Tooltip>
+  );
+};
+
+type ConfigSelection = { load: string; type: ConfigType; featureFlag?: string };
+
+/** A feature subgraph can belong to more than one flag, so `load` alone does not identify it. */
+const configSelectionValue = (selection: ConfigSelection) => JSON.stringify(selection);
+
+const parseConfigSelection = (value: string): ConfigSelection => {
+  const { load, type, featureFlag } = JSON.parse(value) as Record<string, string | undefined>;
+  return {
+    load: load ?? '',
+    type: toConfigType(type),
+    featureFlag,
+  };
+};
+
+const ConfigSelect = () => {
+  const graphContext = useContext(GraphContext);
+  const subgraphs = graphContext?.subgraphs;
+  const { data: compositionFlagsData, isLoading: isLoadingCompositionFlags } = useCompositionFlags();
+  const featureFlags = compositionFlagsData?.featureFlags ?? [];
+  const featureSubgraphsByFlag = useMemo(
+    () => groupFeatureSubgraphsByFlag(compositionFlagsData?.featureSubgraphs ?? []),
+    [compositionFlagsData?.featureSubgraphs],
+  );
+
+  const [selected] = useQueryState('load', parseAsString.withDefault(graphContext?.graph?.id || ''));
+  const [type] = useQueryState('type');
+  const configType = toConfigType(type);
+  const [activeFeatureFlag] = useQueryState('featureFlag', parseAsString.withDefault(''));
+
+  const applyParams = useApplyParams();
+
+  const currentValue = configSelectionValue({
+    load: selected,
+    type: configType,
+    featureFlag: configType === 'featureSubgraph' ? activeFeatureFlag : undefined,
+  });
+
+  const selectedName = useMemo(() => {
+    switch (configType) {
+      case 'graph': {
+        return graphContext?.graph?.name;
+      }
+      case 'featureFlag': {
+        return featureFlags.find((featureFlag) => featureFlag.id === selected)?.name;
+      }
+      case 'featureSubgraph': {
+        const featureFlag = featureFlags.find(({ name }) => name === activeFeatureFlag);
+        return (featureSubgraphsByFlag[featureFlag?.id ?? ''] ?? []).find(({ id }) => id === selected)?.name;
+      }
+      case 'subgraph': {
+        return subgraphs?.find((subgraph) => subgraph.id === selected)?.name;
+      }
+    }
+  }, [
+    configType,
+    graphContext?.graph?.name,
+    featureFlags,
+    featureSubgraphsByFlag,
+    subgraphs,
+    selected,
+    activeFeatureFlag,
+  ]);
+
+  const selectedLabel = selectedName ?? (isLoadingCompositionFlags ? '' : 'Unavailable');
+
+  return (
+    <div className="ml-1 flex items-center gap-x-2 pl-3">
+      <span className="text-sm text-muted-foreground">Querying {CONFIG_TYPE_LABELS[configType]} :</span>
+      <Select
+        value={currentValue}
+        onValueChange={(value) => {
+          const selection = parseConfigSelection(value);
+          applyParams({
+            load: selection.load,
+            type: selection.type,
+            featureFlag: selection.featureFlag ?? null,
+          });
+        }}
+      >
+        <SelectTrigger className="ml-1 mr-4 flex h-8 w-auto gap-x-2 border-0 bg-transparent pl-3 pr-1 shadow-none data-[state=open]:bg-accent data-[state=open]:text-accent-foreground hover:bg-accent hover:text-accent-foreground focus:ring-0 md:ml-0">
+          <SelectValue aria-label={selectedLabel}>{selectedLabel}</SelectValue>
+        </SelectTrigger>
+        <SelectContent>
+          <SelectGroup>
+            <SelectLabel className="mb-1 flex flex-row items-center justify-start gap-x-1 text-[0.7rem] uppercase tracking-wider">
+              <PiGraphLight className="h-3 w-3" /> Graph
+            </SelectLabel>
+            <SelectItem value={configSelectionValue({ load: graphContext?.graph?.id ?? '', type: 'graph' })}>
+              {graphContext?.graph?.name}
+            </SelectItem>
+          </SelectGroup>
+
+          {featureFlags && featureFlags.length > 0 && (
+            <>
+              <SelectSeparator />
+              <SelectGroup>
+                <SelectLabel className="mb-1 flex flex-row items-center justify-start gap-x-1 text-[0.7rem] uppercase tracking-wider">
+                  <MdOutlineFeaturedPlayList className="h-3 w-3" /> Feature Flags
+                </SelectLabel>
+                {featureFlags.map((featureFlag) => (
+                  <Fragment key={featureFlag.id}>
+                    <SelectItem value={configSelectionValue({ load: featureFlag.id, type: 'featureFlag' })}>
+                      {featureFlag.name}
+                    </SelectItem>
+                    {(featureSubgraphsByFlag[featureFlag.id] ?? []).map((featureSubgraph) => (
+                      <SelectItem
+                        key={`${featureFlag.id}:${featureSubgraph.id}`}
+                        className="pl-8"
+                        value={configSelectionValue({
+                          load: featureSubgraph.id,
+                          type: 'featureSubgraph',
+                          featureFlag: featureFlag.name,
+                        })}
+                      >
+                        {featureSubgraph.name}
+                      </SelectItem>
+                    ))}
+                  </Fragment>
+                ))}
+              </SelectGroup>
+            </>
+          )}
+          {subgraphs && subgraphs.length > 0 && (
+            <>
+              <SelectSeparator />
+              <SelectGroup>
+                <SelectLabel className="mb-1 flex flex-row items-center justify-start gap-x-1 text-[0.7rem] uppercase tracking-wider">
+                  <Component2Icon className="h-3 w-3" /> Subgraphs
+                </SelectLabel>
+                {subgraphs.map(({ name, id }) => (
+                  <SelectItem key={id} value={configSelectionValue({ load: id, type: 'subgraph' })}>
+                    {name}
+                  </SelectItem>
+                ))}
+              </SelectGroup>
+            </>
+          )}
+        </SelectContent>
+      </Select>
+    </div>
+  );
+};
+
+const PlaygroundPortal = () => {
+  const responseToolbar = document.getElementById('response-toolbar');
+  const artDiv = document.getElementById('art-visualization');
+  const plannerDiv = document.getElementById('planner-visualization');
+  const toggleClientValidation = document.getElementById('toggle-client-validation');
+  const scriptsSection = document.getElementById('scripts-section');
+  const defaultHeadersSection = document.getElementById('default-headers-section');
+  const shareButton = document.getElementById('share-button');
+  const copyButton = document.getElementById('copy-button');
+
+  if (
+    !responseToolbar ||
+    !artDiv ||
+    !plannerDiv ||
+    !toggleClientValidation ||
+    !scriptsSection ||
+    !shareButton ||
+    !copyButton ||
+    !defaultHeadersSection
+  ) {
+    return null;
+  }
+
+  return (
+    <>
+      {createPortal(<ResponseToolbar />, responseToolbar)}
+      {createPortal(<PlanView />, plannerDiv)}
+      {createPortal(<TraceView />, artDiv)}
+      {createPortal(<ToggleClientValidation />, toggleClientValidation)}
+      {createPortal(<CustomScripts />, scriptsSection)}
+      {createPortal(<SharePlaygroundModal />, shareButton)}
+      {createPortal(<CopyOperation />, copyButton)}
+      {createPortal(<DefaultHeadersDialog />, defaultHeadersSection)}
+    </>
+  );
+};
+
+const PlaygroundPage: NextPageWithLayout = () => {
+  const [operation] = useQueryState('operation');
+  const [variables] = useQueryState('variables');
+
+  const graphContext = useContext(GraphContext);
+
+  const [loadSchemaGraphId] = useQueryState('load', parseAsString.withDefault(graphContext?.graph?.id || ''));
+  const [type] = useQueryState('type');
+  const configType = toConfigType(type);
+  const [activeFeatureFlag] = useQueryState('featureFlag', parseAsString.withDefault(''));
+
+  const { data: compositionFlagsData, isLoading: isLoadingCompositionFlags } = useCompositionFlags();
+
+  const {
+    featureSubgraph: activeFeatureSubgraph,
+    sdl: featureSubgraphSdl,
+    isLoading: isLoadingFeatureSubgraphSchema,
+  } = useFeatureSubgraphSchema(
+    compositionFlagsData,
+    configType === 'featureSubgraph'
+      ? { featureFlagName: activeFeatureFlag, subgraphId: loadSchemaGraphId }
+      : undefined,
+  );
+
+  const { data, isLoading: isLoadingGraphSchema } = useQuery(
+    getFederatedGraphSDLByName,
+    {
+      name: graphContext?.graph?.name,
+      namespace: graphContext?.graph?.namespace,
+      featureFlagName:
+        configType === 'featureFlag'
+          ? (compositionFlagsData?.featureFlags ?? []).find((f) => f.id === loadSchemaGraphId)?.name
+          : undefined,
+    },
+    {
+      // A subgraph or feature subgraph selection shows its own schema, so this response, the
+      // largest on the page, would only be fetched and discarded. A flag selection waits for the
+      // flag list, without which featureFlagName is undefined and the base graph answers instead.
+      enabled: configType === 'graph' || (configType === 'featureFlag' && !isLoadingCompositionFlags),
+    },
+  );
+
+  const { data: subgraphData, isLoading: isLoadingSubgraphSchema } = useQuery(
+    getSubgraphSDLFromLatestComposition,
+    {
+      name: graphContext?.subgraphs.find((s) => s.id === loadSchemaGraphId)?.name,
+      fedGraphName: graphContext?.graph?.name,
+      namespace: graphContext?.graph?.namespace,
+    },
+    {
+      enabled: !!loadSchemaGraphId && loadSchemaGraphId !== graphContext?.graph?.id && configType === 'subgraph',
+    },
+  );
+
+  const isLoading = isSchemaLoading({
+    isLoadingGraphSchema,
+    isLoadingSubgraphSchema,
+    isLoadingFeatureSubgraphSchema,
+    isLoadingCompositionFlags,
+    isFeatureSubgraphSelected: configType === 'featureSubgraph',
+  });
+
+  const { data: defaultHeadersData, isLoading: isLoadingDefaultHeaders } = useQuery(
+    getPlaygroundDefaultHeaders,
+    {
+      federatedGraphName: graphContext?.graph?.name,
+      namespace: graphContext?.graph?.namespace,
+    },
+    {
+      enabled: !!graphContext?.graph?.name,
+      retry: 1,
+      // These change only when someone edits them in the dialog (which
+      // refetches explicitly); no need to re-fetch on every window focus.
+      staleTime: 5 * 60 * 1000,
+    },
+  );
+
+  const effectiveDefaultHeaders = useMemo(() => {
+    return effectiveDefaultHeadersString(
+      (defaultHeadersData?.graphHeaders ?? []).map((h) => ({ key: h.key, value: h.value })),
+      (defaultHeadersData?.personalHeaders ?? []).map((h) => ({ key: h.key, value: h.value })),
+    );
+  }, [defaultHeadersData]);
+
+  // A flag that left the latest composition leaves the selection unresolvable. The endpoint is
+  // unknown too, so there is nothing for GraphiQL to introspect and it would fail silently.
+  const isUnresolvedFeatureSubgraph = configType === 'featureSubgraph' && !isLoading && !activeFeatureSubgraph;
+
+  const schema = useMemo(() => {
+    const sdl = selectSchemaSdl(configType, {
+      featureSubgraph: featureSubgraphSdl,
+      subgraph: subgraphData?.sdl,
+      graph: data?.clientSchema,
+    });
+
+    return parseSchema(sdl)?.ast ?? null;
+  }, [configType, data?.clientSchema, featureSubgraphSdl, subgraphData?.sdl]);
+
+  const [query, setQuery] = useState<string | undefined>(operation ? decodeURIComponent(operation) : undefined);
+
+  const [updatedVariables, setUpdatedVariables] = useState<string | undefined>(
+    variables ? decodeURIComponent(variables) : undefined,
+  );
+
+  const [storedHeaders, setStoredHeaders] = useLocalStorage('graphiql:headers', '', {
+    deserializer(value) {
+      return value;
+    },
+    serializer(value) {
+      return value;
+    },
+  });
+  const [tempHeaders, setTempHeaders] = useState<any>();
+
+  const graphId = graphContext?.graph?.id ?? 'unknown';
+
+  const graphiqlStorage = useMemo(() => new CosmoGraphiqlStorage(graphId), [graphId]);
+
+  useEffect(() => {
+    if (!storedHeaders || tempHeaders) {
+      return;
+    }
+    setTempHeaders(storedHeaders);
+  }, [storedHeaders, tempHeaders]);
+
+  useEffect(() => {
+    if (!tempHeaders) {
+      return;
+    }
+    setStoredHeaders(tempHeaders);
+  }, [setStoredHeaders, tempHeaders]);
+
+  // What GraphiQL will restore into the header editor, or null on a first visit.
+  // Guarded because this page server-renders and localStorage is client-only.
+  const persistedHeaders = useMemo(
+    () => (typeof window === 'undefined' ? null : graphiqlStorage.getItem('graphiql:headers')),
+    [graphiqlStorage],
+  );
+
+  // `headers` mirrors GraphiQL's header editor for the two consumers below that are not
+  // GraphiQL (the query plan request and TraceContext). GraphiQL never reports the
+  // editor's initial value - its change handler is attached after construction - so the
+  // mirror has to be seeded rather than waited for.
+  const [headers, setHeaders] = useState<string>(() => persistedHeaders ?? effectiveDefaultHeaders);
+
+  // The defaults query is usually still in flight on the first render, so the seed above
+  // falls back to the built-in template. Adopt the real defaults once they resolve, but
+  // only on a first visit and only while untouched: a restored tab and anything the user
+  // has typed both take precedence over a default.
+  useEffect(() => {
+    if (persistedHeaders !== null) {
+      return;
+    }
+
+    setHeaders((current) => (current === PLAYGROUND_DEFAULT_HEADERS_TEMPLATE ? effectiveDefaultHeaders : current));
+  }, [persistedHeaders, effectiveDefaultHeaders]);
+
+  const [response, setResponse] = useState<string>('');
+
+  const [plan, setPlan] = useState<QueryPlan | undefined>(undefined);
+  const [planError, setPlanError] = useState<string>('');
+
+  const [clientValidationEnabled, setClientValidationEnabled] = useState(true);
+
+  const [isGraphiqlRendered, setIsGraphiqlRendered] = useState(false);
+  const [isMounted, setIsMounted] = useState(false);
+
+  const [view, setView] = useState<PlaygroundView>('response');
+
+  const [tabsState, setTabsState] = useState<TabsState>({
+    activeTabIndex: 0,
+    tabs: [],
+  });
+
+  const plugins = useMemo(() => [collectionsPlugin, explorerPlugin({ showAttribution: false })], []);
+
+  const [visiblePlugin, setVisiblePlugin] = useState<string | undefined>(undefined);
+
+  const [{ collectionId: linkedCollection, operationId: linkedOperation }] = useQueryStates(collectionDeepLinkParams);
+
+  useEffect(() => {
+    if ((linkedCollection || linkedOperation) && !visiblePlugin) {
+      setVisiblePlugin('Collections');
+    }
+  }, [linkedCollection, linkedOperation, visiblePlugin]);
+
+  const [isHydrated, setIsHydrated] = useState(false);
+  const shouldPassEditorStateProps = !!operation;
+  useHydratePlaygroundStateFromUrl(
+    tabsState,
+    setQuery,
+    setUpdatedVariables,
+    setHeaders,
+    setTabsState,
+    isGraphiqlRendered,
+  );
+
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  useEffect(() => {
+    if (isLoadingDefaultHeaders) {
+      return;
+    }
+
+    const responseToolbar = document.getElementById('response-toolbar');
+    if (responseToolbar && isMounted) {
+      return;
+    }
+
+    const header = document.getElementsByClassName('graphiql-session-header-right')[0] as any as HTMLDivElement;
+
+    if (header) {
+      const logo = document.getElementsByClassName('graphiql-logo')[0];
+      if (logo) {
+        logo.classList.add('hidden');
+        const div = document.createElement('div');
+        div.id = 'response-toolbar';
+        div.className = 'flex items-center justify-center mx-2';
+        header.append(div);
+      }
+    }
+
+    const editors = document.getElementsByClassName('graphiql-editors')[0] as any as HTMLDivElement;
+
+    const defaultHeadersSection = document.getElementById('default-headers-section') ?? document.createElement('div');
+
+    if (editors && !defaultHeadersSection.isConnected) {
+      defaultHeadersSection.id = 'default-headers-section';
+      defaultHeadersSection.className = 'invisible';
+      editors.appendChild(defaultHeadersSection);
+    }
+
+    const editorToolsTabBar = document.getElementsByClassName('graphiql-editor-tools')[0] as any as HTMLDivElement;
+
+    const editorToolsSection = document.getElementsByClassName('graphiql-editor-tool')[0] as any as HTMLDivElement;
+
+    if (editorToolsTabBar && editorToolsSection && !document.getElementById('scripts-tab')) {
+      const tabs = [editorToolsTabBar.childNodes[0], editorToolsTabBar.childNodes[1]];
+      const sections = Array.from(editorToolsSection.childNodes);
+
+      const scriptsButton = document.createElement('button');
+      scriptsButton.id = 'scripts-tab';
+      scriptsButton.className = 'graphiql-un-styled';
+      scriptsButton.textContent = 'Operation Scripts';
+
+      const scriptsSection = document.createElement('div');
+      scriptsSection.id = 'scripts-section';
+      scriptsSection.className = 'graphiql-editor hidden';
+
+      // childNodes[1] is the Headers tab; the default headers row belongs to it alone.
+      const HEADERS_TAB_INDEX = 1;
+
+      tabs.forEach((e, index) =>
+        e.addEventListener('click', () => {
+          (e as HTMLButtonElement).className = 'graphiql-un-styled active';
+          (sections[index] as HTMLDivElement).className = 'graphiql-editor';
+          scriptsSection.className = 'graphiql-editor hidden';
+          defaultHeadersSection.className = index === HEADERS_TAB_INDEX ? '' : 'invisible';
+        }),
+      );
+
+      if ((tabs[HEADERS_TAB_INDEX] as HTMLButtonElement).classList.contains('active')) {
+        defaultHeadersSection.className = '';
+      }
+
+      scriptsButton.onclick = (e) => {
+        (tabs[0] as HTMLButtonElement).className = 'graphiql-un-styled';
+        (tabs[1] as HTMLButtonElement).className = 'graphiql-un-styled';
+        (sections[0] as HTMLDivElement).className = 'graphiql-editor hidden';
+        (sections[1] as HTMLDivElement).className = 'graphiql-editor hidden';
+        scriptsSection.className = 'graphiql-editor';
+        defaultHeadersSection.className = 'invisible';
+
+        scriptsButton.className = 'graphiql-un-styled active';
+      };
+
+      editorToolsTabBar.addEventListener('click', (e) => {
+        if (!(e.target as HTMLElement)?.closest(`#${scriptsButton.id}`)) {
+          scriptsButton.className = 'graphiql-un-styled';
+        }
+      });
+
+      editorToolsTabBar.insertBefore(scriptsButton, editorToolsTabBar.childNodes[2]);
+      editorToolsSection.appendChild(scriptsSection);
+    }
+
+    const responseSection = document.getElementsByClassName('graphiql-response')[0];
+    if (responseSection) {
+      const responseSectionParent = responseSection.parentElement as any as HTMLDivElement;
+
+      if (responseSectionParent) {
+        responseSectionParent.id = 'response-parent';
+        responseSectionParent.classList.add('relative');
+
+        const artWrapper = document.createElement('div');
+        artWrapper.id = 'art-visualization';
+        artWrapper.className = 'flex flex-1 h-full w-full absolute invisible -z-50';
+
+        const plannerWrapper = document.createElement('div');
+        plannerWrapper.id = 'planner-visualization';
+        plannerWrapper.className = 'flex flex-1 h-full w-full absolute invisible -z-50';
+
+        responseSectionParent.append(artWrapper);
+        responseSectionParent.append(plannerWrapper);
+      }
+    }
+
+    const toolbar = document.getElementsByClassName('graphiql-toolbar')[0] as any as HTMLDivElement;
+
+    if (toolbar) {
+      // graphiql's own copy button is hidden via css and replaced by this one, which can also copy the curl request
+      const graphiqlCopyButton = toolbar.querySelector('[aria-label^="Copy query"]');
+      const copyButton = document.createElement('div');
+      copyButton.id = 'copy-button';
+
+      if (graphiqlCopyButton) {
+        toolbar.insertBefore(copyButton, graphiqlCopyButton);
+      } else {
+        toolbar.append(copyButton);
+      }
+
+      const toggleClientValidation = document.createElement('div');
+      toggleClientValidation.id = 'toggle-client-validation';
+      toolbar.append(toggleClientValidation);
+
+      const shareButton = document.createElement('div');
+      shareButton.id = 'share-button';
+      toolbar.append(shareButton);
+    }
+
+    // remove settings button
+    const sidebarSection = document.getElementsByClassName('graphiql-sidebar-section')[1];
+    if (sidebarSection) {
+      const children = Array.from(sidebarSection.childNodes.values());
+      sidebarSection.removeChild(children[2]);
+    }
+
+    setIsMounted(true);
+  });
+
+  useEffect(() => {
+    if (!isGraphiqlRendered && typeof query === 'string') {
+      if (!query) {
+        // query is empty - fill it with template
+        setQuery(PLAYGROUND_DEFAULT_QUERY_TEMPLATE);
+      }
+      // set first render flag to true - to prevent opening new tab / filling data while user is editing
+      setIsGraphiqlRendered(true);
+    }
+  }, [query, isGraphiqlRendered]);
+
+  const { routingUrl, subscriptionUrl } = useMemo(() => {
+    if (!loadSchemaGraphId || configType === 'graph' || configType === 'featureFlag') {
+      const url = graphContext?.graph?.routingURL ?? '';
+      return { routingUrl: url, subscriptionUrl: url.replace('http', 'ws') };
+    }
+
+    if (configType === 'featureSubgraph') {
+      return {
+        routingUrl: activeFeatureSubgraph?.routingUrl ?? '',
+        subscriptionUrl: activeFeatureSubgraph?.subscriptionUrl ?? '',
+      };
+    }
+
+    const subgraph = graphContext?.subgraphs?.find((s) => s.id === loadSchemaGraphId);
+    if (!subgraph) {
+      return { routingUrl: '', subscriptionUrl: '' };
+    }
+
+    return {
+      routingUrl: subgraph.routingURL,
+      subscriptionUrl: subgraph.subscriptionUrl,
+    };
+  }, [activeFeatureSubgraph, graphContext?.graph?.routingURL, graphContext?.subgraphs, loadSchemaGraphId, configType]);
+
+  const featureFlagName = useMemo(() => {
+    if (configType !== 'featureFlag') {
+      return undefined;
+    }
+
+    return (compositionFlagsData?.featureFlags ?? []).find((f) => f.id === loadSchemaGraphId)?.name;
+  }, [compositionFlagsData?.featureFlags, loadSchemaGraphId, configType]);
+
+  const [status, setStatus] = useState<number>();
+  const [statusText, setStatusText] = useState<string>();
+
+  const fetcher = useMemo(() => {
+    const onFetch = (response: any, status?: number, statusText?: string) => {
+      setResponse(JSON.stringify(response));
+      setStatus(status);
+      setStatusText(statusText);
+    };
+
+    return createGraphiQLFetcher({
+      url: routingUrl,
+      subscriptionUrl: subscriptionUrl,
+      fetch: (...args) =>
+        graphiQLFetch(
+          onFetch,
+          graphContext?.graphRequestToken!,
+          schema,
+          clientValidationEnabled,
+          args[0] as URL,
+          args[1] as RequestInit,
+          graphContext?.graph?.id || '',
+          featureFlagName,
+        ),
+    });
+  }, [
+    routingUrl,
+    subscriptionUrl,
+    graphContext?.graphRequestToken,
+    graphContext?.graph?.id,
+    featureFlagName,
+    schema,
+    clientValidationEnabled,
+  ]);
+
+  const [debouncedQuery] = useDebounce(query, 300);
+  const [debouncedHeaders] = useDebounce(headers, 300);
+
+  useEffect(() => {
+    const getPlan = async () => {
+      if (
+        !schema ||
+        !debouncedQuery ||
+        !routingUrl ||
+        !graphContext?.graphRequestToken ||
+        !graphContext?.graph?.id ||
+        view !== 'query-plan'
+      ) {
+        return;
+      }
+
+      try {
+        const parsed = parse(debouncedQuery);
+
+        const errors = validate(schema, parsed);
+        if (errors.length > 0) {
+          setPlanError('Invalid query');
+          return;
+        }
+
+        const existingHeaders = JSON.parse(debouncedHeaders || '{}');
+        delete existingHeaders['X-WG-TRACE'];
+        let requestHeaders: Record<string, string> = {
+          ...existingHeaders,
+          'X-WG-Token': graphContext.graphRequestToken,
+          'X-WG-Include-Query-Plan': 'true',
+          'X-WG-Skip-Loader': 'true',
+          'X-WG-DISABLE-TRACING': 'true',
+        };
+
+        requestHeaders = substituteHeadersFromEnv(requestHeaders, graphContext?.graph?.id);
+        validateHeaders(requestHeaders);
+
+        if (configType === 'featureFlag') {
+          const featureFlag = (compositionFlagsData?.featureFlags ?? []).find((f) => f.id === loadSchemaGraphId);
+          if (featureFlag) {
+            requestHeaders['X-Feature-Flag'] = featureFlag.name;
+          }
+        }
+
+        const response = await fetch(routingUrl, {
+          method: 'POST',
+          headers: requestHeaders,
+          body: JSON.stringify({
+            query: debouncedQuery,
+          }),
+        });
+
+        const data = await response.json();
+
+        if (!data?.extensions?.queryPlan) {
+          throw new Error('No query plan found');
+        }
+
+        setPlanError('');
+        setPlan(data.extensions.queryPlan);
+      } catch (error: any) {
+        setPlan(undefined);
+        setPlanError(error.message || 'Network error');
+      }
+    };
+
+    getPlan();
+  }, [
+    debouncedQuery,
+    debouncedHeaders,
+    compositionFlagsData?.featureFlags,
+    graphContext?.graphRequestToken,
+    graphContext?.graph?.id,
+    loadSchemaGraphId,
+    routingUrl,
+    schema,
+    configType,
+    view,
+  ]);
+
+  const { theme } = useTheme();
+
+  useEffect(() => {
+    if (theme === 'light') {
+      document.body.classList.add('graphiql-light');
+      document.body.classList.remove('graphiql-dark');
+    } else {
+      document.body.classList.add('graphiql-dark');
+      document.body.classList.remove('graphiql-light');
+    }
+
+    return () => {
+      document.body.classList.remove('graphiql-dark');
+      document.body.classList.remove('graphiql-light');
+    };
+  }, [theme]);
+
+  if (!graphContext?.graph) return null;
+
+  return (
+    <PlaygroundContext.Provider
+      value={{
+        graphId: graphContext.graph.id,
+        tabsState,
+        status,
+        statusText,
+        view,
+        setView,
+        isHydrated,
+        setIsHydrated,
+        routingUrl,
+        featureFlagName,
+      }}
+    >
+      <TraceContext.Provider
+        value={{
+          query,
+          headers,
+          response,
+          plan,
+          planError,
+          subgraphs: graphContext.subgraphs,
+          clientValidationEnabled,
+          setClientValidationEnabled,
+        }}
+      >
+        {/* Sits above GraphiQL so both the Collections plugin panel and the
+            toolbar's save control (each rendered inside GraphiQL) share one
+            set of tab-to-operation bindings. */}
+        <GraphCollectionsProvider graphId={graphId} tabsState={tabsState}>
+          <div className="hidden h-full flex-1 md:flex">
+            {isLoadingDefaultHeaders ? (
+              <Loader fullscreen />
+            ) : isUnresolvedFeatureSubgraph ? (
+              <SchemaNotFound featureFlagName={activeFeatureFlag} />
+            ) : (
+              <>
+                <GraphiQL
+                  key={graphId}
+                  shouldPersistHeaders
+                  showPersistHeadersSettings={false}
+                  fetcher={fetcher}
+                  query={shouldPassEditorStateProps ? query : undefined}
+                  variables={shouldPassEditorStateProps || variables ? updatedVariables : undefined}
+                  onEditQuery={setQuery}
+                  headers={headers === PLAYGROUND_DEFAULT_HEADERS_TEMPLATE ? undefined : headers}
+                  defaultHeaders={effectiveDefaultHeaders}
+                  onEditHeaders={setHeaders}
+                  visiblePlugin={visiblePlugin}
+                  plugins={plugins}
+                  // Rendered inside GraphiQL's own React tree, unlike the DOM
+                  // portals below, so it can reach the editor and tab APIs.
+                  toolbar={{ additionalComponent: SaveOperationControl }}
+                  // null stops introspection and undefined forces introspection if schema is null
+                  schema={isLoading ? null : (schema ?? undefined)}
+                  storage={graphiqlStorage}
+                  onTabChange={setTabsState}
+                  // When GraphiQL falls back to introspection, this makes it ask for deprecated input
+                  // fields and arguments. They are excluded by default, so an input object with only
+                  // deprecated fields would come back empty and fail schema building.
+                  inputValueDeprecation
+                />
+                {isMounted && <PlaygroundPortal />}
+              </>
+            )}
+          </div>
+        </GraphCollectionsProvider>
+        <div className="flex flex-1 items-center justify-center md:hidden">
+          <Alert className="m-8">
+            <MobileIcon className="h-4 w-4" />
+            <AlertTitle>Heads up!</AlertTitle>
+            <AlertDescription>
+              Cosmo GraphQL Playground is not available on mobile devices. Please open this page on your desktop.
+            </AlertDescription>
+          </Alert>
+        </div>
+      </TraceContext.Provider>
+    </PlaygroundContext.Provider>
+  );
+};
+
+interface CompositionFlags {
+  data?: GetFeatureFlagsInLatestCompositionByFederatedGraphResponse;
+  isLoading: boolean;
+}
+
+const CompositionFlagsContext = createContext<CompositionFlags>({ isLoading: false });
+
+function useCompositionFlags() {
+  return useContext(CompositionFlagsContext);
+}
+
+const CompositionFlagsProvider = ({ children }: PropsWithChildren) => {
+  const graphContext = useContext(GraphContext);
+  const { data, isLoading } = useQuery(
+    getFeatureFlagsInLatestCompositionByFederatedGraph,
+    {
+      federatedGraphName: graphContext?.graph?.name,
+      namespace: graphContext?.graph?.namespace,
+    },
+    {
+      enabled: !!graphContext?.graph?.name,
+    },
+  );
+
+  const value = useMemo(() => ({ data, isLoading }), [data, isLoading]);
+
+  return <CompositionFlagsContext.Provider value={value}>{children}</CompositionFlagsContext.Provider>;
+};
+
+PlaygroundPage.getLayout = (page: ReactNode) => {
+  return getGraphLayout(
+    <PageHeader title="Playground | Studio">
+      <CompositionFlagsProvider>
+        <GraphPageLayout
+          title="Playground"
+          subtitle="Execute queries against your graph"
+          noPadding
+          toolbar={<ConfigSelect />}
+        >
+          {page}
+        </GraphPageLayout>
+      </CompositionFlagsProvider>
+    </PageHeader>,
+  );
+};
+
+export default PlaygroundPage;

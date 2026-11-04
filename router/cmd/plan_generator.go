@@ -1,0 +1,126 @@
+package cmd
+
+import (
+	"context"
+	"flag"
+	"fmt"
+	"log"
+	"os"
+	"os/signal"
+	"strings"
+	"syscall"
+
+	"github.com/KimMachineGun/automemlimit/memlimit"
+	"github.com/dustin/go-humanize"
+	"github.com/wundergraph/cosmo/router/core"
+	"github.com/wundergraph/cosmo/router/pkg/logging"
+	"github.com/wundergraph/cosmo/router/pkg/plan_generator"
+	"go.uber.org/automaxprocs/maxprocs"
+	"go.uber.org/zap"
+	"go.uber.org/zap/zapcore"
+)
+
+func PlanGenerator(args []string) {
+	var planHelp bool
+
+	cfg := plan_generator.QueryPlanConfig{
+		OutputFormat: core.PlanOutputFormatText,
+	}
+	f := flag.NewFlagSet("router "+args[0], flag.ExitOnError)
+	f.BoolVar(&planHelp, "help", false, "Prints the help message")
+	f.StringVar(&cfg.ExecutionConfig, "execution-config", "", "required, execution config file location")
+	f.StringVar(&cfg.SourceDir, "operations", "", "required, source operations folder location")
+	f.StringVar(&cfg.OutDir, "plans", "", "required, output plans folder location")
+	f.StringVar(&cfg.Filter, "filter", "", "operation filter file location which should contain file names of operations to include")
+	f.StringVar(&cfg.Timeout, "timeout", "30s", "timeout")
+	f.IntVar(&cfg.Concurrency, "concurrency", 0, "how many query plan run concurrently")
+	f.BoolVar(&cfg.OutputFiles, "print-per-file", true, "write a file for each query, with inside the plan or the query plan error")
+	f.BoolVar(&cfg.OutputReport, "print-report", false, "write a report.json file, with all the query plans and errors sorted by file name")
+	f.BoolVar(&cfg.FailOnPlanError, "fail-on-error", false, "if at least one plan fails, the command exit code will be 1")
+	f.BoolVar(&cfg.FailFast, "fail-fast", false, "stop as soon as possible if a plan fails")
+	f.StringVar(&cfg.LogLevel, "log-level", "warn", "the log level to use (debug, info, warn, error, panic, fatal)")
+	f.Func("print-format", "output format of the query plan (text, json) (default \"text\")", func(s string) error {
+		switch value := core.PlanOutputFormat(strings.ToLower(s)); value {
+		case core.PlanOutputFormatUnset:
+			cfg.OutputFormat = core.PlanOutputFormatText
+			return nil
+		case core.PlanOutputFormatText, core.PlanOutputFormatJSON:
+			cfg.OutputFormat = value
+			return nil
+		}
+		return fmt.Errorf("must be one of: text, json (got %q)", s)
+	})
+	f.UintVar(&cfg.MaxDataSourceCollectorsConcurrency, "max-collectors", 0, "max number of concurrent data source collectors, if unset or 0, no limit will be enforced")
+	f.BoolVar(&cfg.EnableMultiFetch, "enable-multi-fetch", true, "mirrors engine.enable_multi_fetch, merging entity fetches to the same subgraph in the same wave; pass -enable-multi-fetch=false to plan one request per entity fetch")
+	f.BoolVar(&cfg.EnableScheduleFetches, "enable-schedule-fetches", true, "mirrors engine.enable_schedule_fetches, using the dependency-aware fetch scheduler; pass -enable-schedule-fetches=false to plan with the wave-based organizers")
+
+	if err := f.Parse(args[1:]); err != nil {
+		f.PrintDefaults()
+		log.Fatalf("Failed to parse flags: %v", err)
+	}
+
+	if planHelp {
+		f.PrintDefaults()
+		return
+	}
+	if cfg.ExecutionConfig == "" || cfg.SourceDir == "" || cfg.OutDir == "" {
+		f.PrintDefaults()
+		log.Fatalf("missing required flags")
+	}
+
+	ctxNotify, stop := signal.NotifyContext(context.Background(), os.Interrupt,
+		syscall.SIGHUP,  // process is detached from terminal
+		syscall.SIGTERM, // default for kill
+		syscall.SIGKILL,
+		syscall.SIGQUIT, // ctrl + \
+		syscall.SIGINT,  // ctrl+c
+	)
+	defer stop()
+
+	logLevel, err := zapcore.ParseLevel(cfg.LogLevel)
+	if err != nil {
+		log.Fatalf("Could not parse log level: %s", err)
+	}
+
+	logger := logging.New(false, false, true, logLevel).
+		With(
+			zap.String("service", "@wundergraph/query-plan"),
+			zap.String("service_version", core.Version),
+		)
+	cfg.Logger = logger
+
+	// Automatically set GOMAXPROCS to avoid CPU throttling on containerized environments
+	_, err = maxprocs.Set(maxprocs.Logger(func(msg string, args ...any) {
+		logger.Info(fmt.Sprintf(msg, args...))
+	}))
+	if err != nil {
+		logger.Fatal("could not set max GOMAXPROCS", zap.Error(err))
+	}
+
+	if os.Getenv("GOMEMLIMIT") != "" {
+		logger.Info("GOMEMLIMIT set by user", zap.String("gomemlimit", os.Getenv("GOMEMLIMIT")))
+	} else {
+		// Automatically set GOMEMLIMIT to 90% of the available memory.
+		// This is an effort to prevent the router from being killed by OOM (Out Of Memory)
+		// when the system is under memory pressure e.g. when GC is not able to free memory fast enough.
+		// More details: https://tip.golang.org/doc/gc-guide#Memory_limit
+		mLimit, err := memlimit.SetGoMemLimitWithOpts(
+			memlimit.WithRatio(0.9),
+			memlimit.WithProvider(memlimit.FromCgroup),
+		)
+		if err == nil {
+			logger.Info("GOMEMLIMIT set automatically", zap.String("size", humanize.Bytes(uint64(mLimit))))
+		} else {
+			logger.Info(
+				"GOMEMLIMIT was not set. Please set it manually to around 90%% of the available memory to "+
+					"prevent OOM kills",
+				zap.Error(err),
+			)
+		}
+	}
+
+	err = plan_generator.PlanGenerator(ctxNotify, cfg)
+	if err != nil {
+		logger.Fatal("Error during command plan-generator: %s", zap.Error(err))
+	}
+}

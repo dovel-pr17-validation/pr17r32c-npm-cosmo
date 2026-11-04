@@ -1,0 +1,2 @@
+paths-ignore:
+  - 'router/internal/graphiql/graphiql.html'

@@ -1,0 +1,38 @@
+{
+  "$schema": "node_modules/@lerna-lite/cli/schemas/lerna-schema.json",
+  "version": "independent",
+  "command": {
+    "publish": {
+      "registry": "https://registry.npmjs.org"
+    },
+    "version": {
+      "conventionalCommits": true,
+      "changelogPreset": "conventionalcommits",
+      "createRelease": "github",
+      "syncWorkspaceLock": true,
+      "changelogIncludeCommitsClientLogin": " (@%l)",
+      "message": "chore(release): Publish [skip ci]",
+      "changelogHeaderMessage": "Binaries are attached to the github release otherwise all images can be found [here](https://github.com/orgs/wundergraph/packages?repo_name=cosmo)"
+    }
+  },
+  "packages": [
+    "cli",
+    "composition",
+    "shared",
+    "connect",
+    "controlplane",
+    "router",
+    "otelcollector",
+    "graphqlmetrics",
+    "studio",
+    "keycloak",
+    "cdn-server",
+    "cdn-server/cdn",
+    "aws-lambda-router",
+    "playground",
+    "protographic",
+    "router-plugin"
+  ],
+  "npmClient": "pnpm",
+  "loglevel": "verbose"
+}

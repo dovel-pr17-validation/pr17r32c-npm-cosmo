@@ -1,0 +1,1345 @@
+package service
+
+import (
+	"context"
+	"fmt"
+	"strconv"
+	"strings"
+	"sync"
+	"syscall"
+	"time"
+
+	"github.com/hashicorp/go-hclog"
+	service "github.com/wundergraph/cosmo/demo/pkg/subgraphs/projects/generated"
+	"github.com/wundergraph/cosmo/demo/pkg/subgraphs/projects/src/data"
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
+	"google.golang.org/protobuf/types/known/wrapperspb"
+)
+
+// Relationship mappings - easily configurable and maintainable
+var (
+	// projectToProductMap maps project IDs to product UPCs
+	projectToProductMap = map[string][]string{
+		"1": {"cosmo"},
+		"2": {"cosmo"},
+		"3": {"sdk"},
+		"4": {"cosmo"},
+		"5": {"consultancy"},
+		"6": {"consultancy"},
+		"7": {"sdk"},
+	}
+)
+
+var _ service.ProjectsServiceServer = &ProjectsService{}
+
+type ProjectsService struct {
+	service.UnimplementedProjectsServiceServer
+	lock   sync.RWMutex
+	NextID int
+}
+
+// LookupMilestoneById implements projects.ProjectsServiceServer.
+func (p *ProjectsService) LookupMilestoneById(ctx context.Context, req *service.LookupMilestoneByIdRequest) (*service.LookupMilestoneByIdResponse, error) {
+	logger := hclog.FromContext(ctx)
+	if len(req.Keys) == 0 {
+		logger.Info("LookupMilestoneById", "no keys provided")
+		return &service.LookupMilestoneByIdResponse{Result: []*service.Milestone{}}, nil
+	}
+
+	logger.Info("LookupMilestoneById", "milestone_id", req.Keys[0].Id)
+
+	p.lock.RLock()
+	defer p.lock.RUnlock()
+
+	var result []*service.Milestone
+
+	// Maintain order of keys
+	for _, key := range req.Keys {
+		found := false
+		for _, milestone := range data.ServiceMilestones {
+			if milestone.Id == key.Id {
+				// Populate the milestone with its relationships
+				populatedMilestone := data.PopulateMilestoneRelationships(milestone)
+				result = append(result, populatedMilestone)
+				found = true
+				break
+			}
+		}
+		if !found {
+			result = append(result, nil)
+		}
+	}
+
+	return &service.LookupMilestoneByIdResponse{Result: result}, nil
+}
+
+// LookupTaskById implements projects.ProjectsServiceServer.
+func (p *ProjectsService) LookupTaskById(ctx context.Context, req *service.LookupTaskByIdRequest) (*service.LookupTaskByIdResponse, error) {
+	logger := hclog.FromContext(ctx)
+	if len(req.Keys) == 0 {
+		logger.Info("LookupTaskById", "no keys provided")
+		return &service.LookupTaskByIdResponse{Result: []*service.Task{}}, nil
+	}
+
+	logger.Info("LookupTaskById", "task_id", req.Keys[0].Id)
+
+	p.lock.RLock()
+	defer p.lock.RUnlock()
+
+	var result []*service.Task
+
+	// Maintain order of keys
+	for _, key := range req.Keys {
+		found := false
+		for _, task := range data.ServiceTasks {
+			if task.Id == key.Id {
+				// Populate the task with its relationships
+				populatedTask := data.PopulateTaskRelationships(task)
+				result = append(result, populatedTask)
+				found = true
+				break
+			}
+		}
+		if !found {
+			result = append(result, nil)
+		}
+	}
+
+	return &service.LookupTaskByIdResponse{Result: result}, nil
+}
+
+// LookupProductByUpc implements projects.ProjectsServiceServer.
+func (p *ProjectsService) LookupProductByUpc(ctx context.Context, req *service.LookupProductByUpcRequest) (*service.LookupProductByUpcResponse, error) {
+	logger := hclog.FromContext(ctx)
+
+	if len(req.Keys) == 0 {
+		logger.Info("LookupProductByUpc", "no keys provided")
+		return &service.LookupProductByUpcResponse{Result: []*service.Product{}}, nil
+	}
+
+	logger.Info("LookupProductByUpc", "upc", req.Keys[0].Upc)
+
+	p.lock.RLock()
+	defer p.lock.RUnlock()
+
+	var result []*service.Product
+
+	// Maintain order of keys
+	for _, key := range req.Keys {
+		found := false
+		for _, product := range data.ServiceProducts {
+			if product.Upc == key.Upc {
+				result = append(result, product)
+				found = true
+				break
+			}
+		}
+		if !found {
+			result = append(result, nil)
+		}
+	}
+
+	return &service.LookupProductByUpcResponse{Result: result}, nil
+}
+
+// MutationAddMilestone implements projects.ProjectsServiceServer.
+func (p *ProjectsService) MutationAddMilestone(ctx context.Context, req *service.MutationAddMilestoneRequest) (*service.MutationAddMilestoneResponse, error) {
+	logger := hclog.FromContext(ctx)
+	logger.Info("MutationAddMilestone", "project_id", req.Milestone.ProjectId)
+
+	p.lock.Lock()
+	defer p.lock.Unlock()
+
+	var nextID int
+	if len(data.ServiceMilestones) == 0 {
+		nextID = 1
+	} else {
+		// Generate next ID
+		lastID := data.ServiceMilestones[len(data.ServiceMilestones)-1].Id
+		next, err := strconv.Atoi(lastID)
+		if err != nil {
+			return nil, status.Errorf(codes.Internal, "failed to convert lastID to int: %v", err)
+		}
+		nextID = next + 1
+	}
+
+	milestone := &service.Milestone{
+		Id:                   strconv.Itoa(nextID),
+		ProjectId:            req.Milestone.ProjectId,
+		Name:                 req.Milestone.Name,
+		Description:          req.Milestone.Description,
+		StartDate:            nil, // Will be set when milestone work starts
+		EndDate:              req.Milestone.DueDate,
+		Status:               req.Milestone.Status,
+		CompletionPercentage: &wrapperspb.DoubleValue{Value: 0.0},
+	}
+
+	data.ServiceMilestones = append(data.ServiceMilestones, milestone)
+
+	return &service.MutationAddMilestoneResponse{AddMilestone: milestone}, nil
+}
+
+// MutationAddTask implements projects.ProjectsServiceServer.
+func (p *ProjectsService) MutationAddTask(ctx context.Context, req *service.MutationAddTaskRequest) (*service.MutationAddTaskResponse, error) {
+	logger := hclog.FromContext(ctx)
+	logger.Info("MutationAddTask", "project_id", req.Task.ProjectId)
+
+	p.lock.Lock()
+	defer p.lock.Unlock()
+
+	// Generate next ID
+	lastID := data.ServiceTasks[len(data.ServiceTasks)-1].Id
+	nextID, err := strconv.Atoi(lastID)
+	if err != nil {
+		return nil, status.Errorf(codes.Internal, "failed to convert lastID to int: %v", err)
+	}
+	nextID++
+
+	task := &service.Task{
+		Id:             strconv.Itoa(nextID),
+		ProjectId:      req.Task.ProjectId,
+		AssigneeId:     req.Task.AssigneeId,
+		Name:           req.Task.Name,
+		Description:    req.Task.Description,
+		Priority:       req.Task.Priority,
+		Status:         req.Task.Status,
+		EstimatedHours: req.Task.EstimatedHours,
+		ActualHours:    &wrapperspb.DoubleValue{Value: 0.0},
+		CreatedAt:      &wrapperspb.StringValue{Value: time.Now().Format(time.RFC3339)},
+		CompletedAt:    nil,
+	}
+
+	data.ServiceTasks = append(data.ServiceTasks, task)
+
+	return &service.MutationAddTaskResponse{AddTask: task}, nil
+}
+
+// MutationUpdateProjectStatus implements projects.ProjectsServiceServer.
+func (p *ProjectsService) MutationUpdateProjectStatus(ctx context.Context, req *service.MutationUpdateProjectStatusRequest) (*service.MutationUpdateProjectStatusResponse, error) {
+	logger := hclog.FromContext(ctx)
+	logger.Info("MutationUpdateProjectStatus", "project_id", req.ProjectId, "status", req.Status)
+
+	p.lock.Lock()
+	defer p.lock.Unlock()
+
+	// Find and update the project
+	var updatedProject *service.Project
+	for _, project := range data.ServiceProjects {
+		if project.Id == req.ProjectId {
+			project.Status = req.Status
+			updatedProject = project
+			break
+		}
+	}
+
+	if updatedProject == nil {
+		return nil, status.Errorf(codes.NotFound, "project not found")
+	}
+
+	// Create project update record
+	var nextID int
+	if len(data.ServiceProjectUpdates) == 0 {
+		nextID = 1
+	} else {
+		lastUpdateID := data.ServiceProjectUpdates[len(data.ServiceProjectUpdates)-1].Id
+		next, err := strconv.Atoi(lastUpdateID)
+		if err != nil {
+			return nil, status.Errorf(codes.Internal, "failed to convert lastID to int: %v", err)
+		}
+		nextID = next + 1
+	}
+
+	projectUpdate := &service.ProjectUpdate{
+		Id:          strconv.Itoa(nextID),
+		ProjectId:   req.ProjectId,
+		UpdatedById: 1,
+		UpdateType:  service.ProjectUpdateType_PROJECT_UPDATE_TYPE_STATUS_CHANGE,
+		Description: "Project status updated via API",
+		Timestamp:   time.Now().Format(time.RFC3339),
+		Metadata:    &wrapperspb.StringValue{Value: `{"new_status": "` + req.Status.String() + `"}`},
+	}
+
+	data.ServiceProjectUpdates = append(data.ServiceProjectUpdates, projectUpdate)
+
+	return &service.MutationUpdateProjectStatusResponse{UpdateProjectStatus: p.populateProjectUpdateRelationships(projectUpdate)}, nil
+}
+
+// QueryMilestones implements projects.ProjectsServiceServer.
+func (p *ProjectsService) QueryMilestones(ctx context.Context, req *service.QueryMilestonesRequest) (*service.QueryMilestonesResponse, error) {
+	logger := hclog.FromContext(ctx)
+	logger.Info("QueryMilestones", "project_id", req.ProjectId)
+
+	p.lock.RLock()
+	defer p.lock.RUnlock()
+
+	milestones := data.GetMilestonesByProjectID(req.ProjectId)
+	// Populate relationships for all milestones
+	populatedMilestones := p.populateMilestonesList(milestones)
+
+	return &service.QueryMilestonesResponse{Milestones: populatedMilestones}, nil
+}
+
+// QueryTasks implements projects.ProjectsServiceServer.
+func (p *ProjectsService) QueryTasks(ctx context.Context, req *service.QueryTasksRequest) (*service.QueryTasksResponse, error) {
+	logger := hclog.FromContext(ctx)
+	logger.Info("QueryTasks", "project_id", req.ProjectId)
+
+	p.lock.RLock()
+	defer p.lock.RUnlock()
+
+	tasks := data.GetTasksByProjectID(req.ProjectId)
+	// Populate relationships for all tasks
+	populatedTasks := p.populateTasksList(tasks)
+
+	return &service.QueryTasksResponse{Tasks: populatedTasks}, nil
+}
+
+// QueryProjectActivities implements projects.ProjectsServiceServer.
+func (p *ProjectsService) QueryProjectActivities(ctx context.Context, req *service.QueryProjectActivitiesRequest) (*service.QueryProjectActivitiesResponse, error) {
+	logger := hclog.FromContext(ctx)
+	logger.Info("QueryProjectActivities", "project_id", req.ProjectId)
+
+	p.lock.RLock()
+	defer p.lock.RUnlock()
+
+	var activities []*service.ProjectActivity
+
+	// Add project updates (populated with relationships)
+	updates := data.GetProjectUpdatesByProjectID(req.ProjectId)
+	for _, update := range updates {
+		activities = append(activities, &service.ProjectActivity{
+			Value: &service.ProjectActivity_ProjectUpdate{ProjectUpdate: update},
+		})
+	}
+
+	// Add milestones (populated with relationships)
+	milestones := data.GetMilestonesByProjectID(req.ProjectId)
+	for _, milestone := range milestones {
+		activities = append(activities, &service.ProjectActivity{
+			Value: &service.ProjectActivity_Milestone{Milestone: milestone},
+		})
+	}
+
+	// Add tasks (populated with relationships)
+	tasks := data.GetTasksByProjectID(req.ProjectId)
+	for _, task := range tasks {
+		activities = append(activities, &service.ProjectActivity{
+			Value: &service.ProjectActivity_Task{Task: task},
+		})
+	}
+
+	return &service.QueryProjectActivitiesResponse{ProjectActivities: activities}, nil
+}
+
+// QueryProjectResources implements projects.ProjectsServiceServer.
+func (p *ProjectsService) QueryProjectResources(ctx context.Context, req *service.QueryProjectResourcesRequest) (*service.QueryProjectResourcesResponse, error) {
+	logger := hclog.FromContext(ctx)
+	logger.Info("QueryProjectResources", "project_id", req.ProjectId)
+
+	p.lock.RLock()
+	defer p.lock.RUnlock()
+
+	var resources []*service.ProjectResource
+
+	// Find the project
+	var project *service.Project
+	for _, p := range data.ServiceProjects {
+		if p.Id == req.ProjectId {
+			project = p
+			break
+		}
+	}
+
+	if project == nil {
+		return nil, status.Errorf(codes.NotFound, "project not found")
+	}
+
+	// Get populated project to access relationships
+	project = p.populateProjectRelationships(project)
+
+	// Add employees (team members)
+	for _, employee := range project.TeamMembers {
+		resources = append(resources, &service.ProjectResource{
+			Value: &service.ProjectResource_Employee{Employee: employee},
+		})
+	}
+
+	// Add related products
+	for _, product := range project.RelatedProducts {
+		resources = append(resources, &service.ProjectResource{
+			Value: &service.ProjectResource_Product{Product: product},
+		})
+	}
+
+	// Add milestones
+	for _, milestone := range project.Milestones {
+		resources = append(resources, &service.ProjectResource{
+			Value: &service.ProjectResource_Milestone{Milestone: milestone},
+		})
+	}
+
+	// Add tasks
+	for _, task := range project.Tasks {
+		resources = append(resources, &service.ProjectResource{
+			Value: &service.ProjectResource_Task{Task: task},
+		})
+	}
+
+	return &service.QueryProjectResourcesResponse{ProjectResources: resources}, nil
+}
+
+// QuerySearchProjects implements projects.ProjectsServiceServer.
+func (p *ProjectsService) QuerySearchProjects(ctx context.Context, req *service.QuerySearchProjectsRequest) (*service.QuerySearchProjectsResponse, error) {
+	logger := hclog.FromContext(ctx)
+	logger.Info("QuerySearchProjects", "query", req.Query)
+
+	p.lock.RLock()
+	defer p.lock.RUnlock()
+
+	var searchResults []*service.ProjectSearchResult
+	query := strings.ToLower(req.Query)
+
+	// Search projects
+	for _, project := range data.ServiceProjects {
+		if strings.Contains(strings.ToLower(project.Name), query) ||
+			(project.Description != nil && strings.Contains(strings.ToLower(project.Description.Value), query)) {
+			populatedProject := p.populateProjectRelationships(project)
+			searchResults = append(searchResults, &service.ProjectSearchResult{
+				Value: &service.ProjectSearchResult_Project{Project: populatedProject},
+			})
+		}
+	}
+
+	// Search milestones
+	for _, milestone := range data.ServiceMilestones {
+		if strings.Contains(strings.ToLower(milestone.Name), query) ||
+			(milestone.Description != nil && strings.Contains(strings.ToLower(milestone.Description.Value), query)) {
+			searchResults = append(searchResults, &service.ProjectSearchResult{
+				Value: &service.ProjectSearchResult_Milestone{Milestone: milestone},
+			})
+		}
+	}
+
+	// Search tasks
+	for _, task := range data.ServiceTasks {
+		if strings.Contains(strings.ToLower(task.Name), query) ||
+			(task.Description != nil && strings.Contains(strings.ToLower(task.Description.Value), query)) {
+			searchResults = append(searchResults, &service.ProjectSearchResult{
+				Value: &service.ProjectSearchResult_Task{Task: task},
+			})
+		}
+	}
+
+	return &service.QuerySearchProjectsResponse{SearchProjects: searchResults}, nil
+}
+
+// QueryKillService implements projects.ProjectsServiceServer.
+func (p *ProjectsService) QueryKillService(context.Context, *service.QueryKillServiceRequest) (*service.QueryKillServiceResponse, error) {
+	syscall.Kill(syscall.Getpid(), syscall.SIGKILL)
+
+	return &service.QueryKillServiceResponse{
+		KillService: true,
+	}, nil
+}
+
+// QueryPanic implements projects.ProjectsServiceServer.
+func (p *ProjectsService) QueryPanic(context.Context, *service.QueryPanicRequest) (*service.QueryPanicResponse, error) {
+	panic("The panic was triggered from QueryPanic")
+}
+
+// LookupEmployeeById implements projects.ProjectsServiceServer.
+func (p *ProjectsService) LookupEmployeeById(ctx context.Context, req *service.LookupEmployeeByIdRequest) (*service.LookupEmployeeByIdResponse, error) {
+	logger := hclog.FromContext(ctx)
+
+	if len(req.Keys) == 0 {
+		logger.Info("LookupEmployeeById", "no keys provided")
+		return &service.LookupEmployeeByIdResponse{Result: []*service.Employee{}}, nil
+	}
+
+	logger.Info("LookupEmployeeById", "employee_id", req.Keys[0].Id)
+
+	p.lock.RLock()
+	defer p.lock.RUnlock()
+
+	var result []*service.Employee
+
+	// Maintain order of keys
+	for _, key := range req.Keys {
+		id, err := strconv.ParseInt(key.Id, 10, 32)
+		if err != nil {
+			return nil, status.Errorf(codes.InvalidArgument, "invalid employee id: %v", err)
+		}
+
+		found := false
+		for _, employee := range data.Employees {
+			if employee.Id == int32(id) {
+				result = append(result, employee)
+				found = true
+				break
+			}
+		}
+		if !found {
+			result = append(result, nil)
+		}
+	}
+
+	return &service.LookupEmployeeByIdResponse{Result: result}, nil
+}
+
+// RequireEmployeeFilteredProjectSummaryById implements projects.ProjectsServiceServer.
+// It resolves the filteredProjectSummary field on Employee, which requires the `expertise` field
+// from the employees subgraph via @requires(fields: "expertise") and accepts a `tag` argument to filter.
+func (p *ProjectsService) RequireEmployeeFilteredProjectSummaryById(_ context.Context, req *service.RequireEmployeeFilteredProjectSummaryByIdRequest) (*service.RequireEmployeeFilteredProjectSummaryByIdResponse, error) {
+	p.lock.RLock()
+	defer p.lock.RUnlock()
+
+	tagFilter := ""
+	if req.GetFieldArgs() != nil {
+		tagFilter = req.GetFieldArgs().GetTag()
+	}
+
+	result := make([]*service.RequireEmployeeFilteredProjectSummaryByIdResult, 0, len(req.Context))
+
+	for _, ctx := range req.Context {
+		keyID := ctx.GetKey().GetId()
+		if keyID == "" {
+			return nil, status.Errorf(codes.InvalidArgument, "missing employee id")
+		}
+		id, err := strconv.ParseInt(keyID, 10, 32)
+		if err != nil {
+			return nil, status.Errorf(codes.InvalidArgument, "invalid employee id %q: %v", keyID, err)
+		}
+
+		var matchingTags []string
+		emp := data.GetEmployeeByID(int32(id))
+		if emp != nil && emp.Projects != nil && emp.Projects.List != nil {
+			seen := make(map[string]struct{})
+			for _, project := range emp.Projects.List.Items {
+				if project.Tags == nil || project.Tags.List == nil {
+					continue
+				}
+				for _, tag := range project.Tags.List.Items {
+					if _, ok := seen[tag]; ok {
+						continue
+					}
+					seen[tag] = struct{}{}
+					if tagFilter == "" || strings.EqualFold(tag, tagFilter) {
+						matchingTags = append(matchingTags, tag)
+					}
+				}
+			}
+		}
+
+		employeeExpertise := ctx.GetFields().GetExpertise()
+		if employeeExpertise == "" {
+			employeeExpertise = "none"
+		}
+
+		var summary string
+		if len(matchingTags) > 0 {
+			summary = fmt.Sprintf("expertise: %s, filtered tags (tag=%s): [%s]", employeeExpertise, tagFilter, strings.Join(matchingTags, ", "))
+		} else {
+			summary = fmt.Sprintf("expertise: %s, no tags matched (tag=%s)", employeeExpertise, tagFilter)
+		}
+		result = append(result, &service.RequireEmployeeFilteredProjectSummaryByIdResult{
+			FilteredProjectSummary: summary,
+		})
+	}
+
+	return &service.RequireEmployeeFilteredProjectSummaryByIdResponse{Result: result}, nil
+}
+
+// RequireEmployeeTaggedProjectSummaryById implements projects.ProjectsServiceServer.
+// It resolves the taggedProjectSummary field on Employee, which requires the `tag` field
+// from the employees subgraph via @requires(fields: "tag").
+func (p *ProjectsService) RequireEmployeeTaggedProjectSummaryById(_ context.Context, req *service.RequireEmployeeTaggedProjectSummaryByIdRequest) (*service.RequireEmployeeTaggedProjectSummaryByIdResponse, error) {
+	p.lock.RLock()
+	defer p.lock.RUnlock()
+
+	result := make([]*service.RequireEmployeeTaggedProjectSummaryByIdResult, 0, len(req.Context))
+
+	for _, ctx := range req.Context {
+		keyID := ctx.GetKey().GetId()
+		if keyID == "" {
+			return nil, status.Errorf(codes.InvalidArgument, "missing employee id")
+		}
+		id, err := strconv.ParseInt(keyID, 10, 32)
+		if err != nil {
+			return nil, status.Errorf(codes.InvalidArgument, "invalid employee id %q: %v", keyID, err)
+		}
+
+		var projectTags []string
+		emp := data.GetEmployeeByID(int32(id))
+		if emp != nil && emp.Projects != nil && emp.Projects.List != nil {
+			seen := make(map[string]struct{})
+			for _, project := range emp.Projects.List.Items {
+				if project.Tags == nil || project.Tags.List == nil {
+					continue
+				}
+				for _, tag := range project.Tags.List.Items {
+					if _, ok := seen[tag]; !ok {
+						seen[tag] = struct{}{}
+						projectTags = append(projectTags, tag)
+					}
+				}
+			}
+		}
+
+		employeeExpertise := ctx.GetFields().GetExpertise()
+		if employeeExpertise == "" {
+			employeeExpertise = "none"
+		}
+
+		var summary string
+		if len(projectTags) > 0 {
+			summary = fmt.Sprintf("expertise: %s, project tags: [%s]", employeeExpertise, strings.Join(projectTags, ", "))
+		} else {
+			summary = fmt.Sprintf("expertise: %s, project has no tags", employeeExpertise)
+		}
+		result = append(result, &service.RequireEmployeeTaggedProjectSummaryByIdResult{
+			TaggedProjectSummary: summary,
+		})
+	}
+
+	return &service.RequireEmployeeTaggedProjectSummaryByIdResponse{Result: result}, nil
+}
+
+// RequireEmployeeWorkItemInfoById implements projects.ProjectsServiceServer.
+// Pattern 1: Flat abstract — interface. Extracts primaryWorkItem interface from fields.
+func (p *ProjectsService) RequireEmployeeWorkItemInfoById(_ context.Context, req *service.RequireEmployeeWorkItemInfoByIdRequest) (*service.RequireEmployeeWorkItemInfoByIdResponse, error) {
+	results := make([]*service.RequireEmployeeWorkItemInfoByIdResult, 0, len(req.GetContext()))
+
+	for _, ctx := range req.GetContext() {
+		item := ctx.GetFields().GetPrimaryWorkItem()
+
+		var summary string
+		switch v := item.GetInstance().(type) {
+		case *service.RequireEmployeeWorkItemInfoByIdFields_EmployeeWorkItem_TechnicalWorkItem:
+			summary = fmt.Sprintf("Technical: %s (count: %d)", v.TechnicalWorkItem.GetName(), v.TechnicalWorkItem.GetCodeCount())
+		case *service.RequireEmployeeWorkItemInfoByIdFields_EmployeeWorkItem_ManagementWorkItem:
+			summary = fmt.Sprintf("Management: %s (size: %s)", v.ManagementWorkItem.GetName(), v.ManagementWorkItem.GetTeamSize())
+		default:
+			summary = "Unknown work item"
+		}
+
+		results = append(results, &service.RequireEmployeeWorkItemInfoByIdResult{
+			WorkItemInfo: summary,
+		})
+	}
+
+	return &service.RequireEmployeeWorkItemInfoByIdResponse{Result: results}, nil
+}
+
+// RequireEmployeeReviewReportById implements projects.ProjectsServiceServer.
+// Pattern 2: Flat abstract — union. Extracts lastWorkReview union from fields.
+func (p *ProjectsService) RequireEmployeeReviewReportById(_ context.Context, req *service.RequireEmployeeReviewReportByIdRequest) (*service.RequireEmployeeReviewReportByIdResponse, error) {
+	results := make([]*service.RequireEmployeeReviewReportByIdResult, 0, len(req.GetContext()))
+
+	for _, ctx := range req.GetContext() {
+		review := ctx.GetFields().GetLastWorkReview()
+
+		var report string
+		switch v := review.GetValue().(type) {
+		case *service.RequireEmployeeReviewReportByIdFields_WorkReviewResult_WorkApproval:
+			report = fmt.Sprintf("Approved: %s at %s", v.WorkApproval.GetComment(), v.WorkApproval.GetApprovedAt())
+		case *service.RequireEmployeeReviewReportByIdFields_WorkReviewResult_WorkRejection:
+			report = fmt.Sprintf("Rejected: %s (code: %s)", v.WorkRejection.GetReason(), v.WorkRejection.GetRejectionCode())
+		default:
+			report = "Unknown review"
+		}
+
+		results = append(results, &service.RequireEmployeeReviewReportByIdResult{
+			ReviewReport: report,
+		})
+	}
+
+	return &service.RequireEmployeeReviewReportByIdResponse{Result: results}, nil
+}
+
+// RequireEmployeeWorkSetupSummaryById implements projects.ProjectsServiceServer.
+// Pattern 3: Concrete wrapping abstract. Extracts workSetup with nested abstract primaryItem.
+func (p *ProjectsService) RequireEmployeeWorkSetupSummaryById(_ context.Context, req *service.RequireEmployeeWorkSetupSummaryByIdRequest) (*service.RequireEmployeeWorkSetupSummaryByIdResponse, error) {
+	results := make([]*service.RequireEmployeeWorkSetupSummaryByIdResult, 0, len(req.GetContext()))
+
+	for _, ctx := range req.GetContext() {
+		setup := ctx.GetFields().GetWorkSetup()
+
+		itemSummary := "Unknown work item"
+		if item := setup.GetPrimaryItem(); item != nil {
+			switch v := item.GetInstance().(type) {
+			case *service.RequireEmployeeWorkSetupSummaryByIdFields_WorkSetup_EmployeeWorkItem_TechnicalWorkItem:
+				itemSummary = fmt.Sprintf("Technical: %s (count: %d)", v.TechnicalWorkItem.GetName(), v.TechnicalWorkItem.GetCodeCount())
+			case *service.RequireEmployeeWorkSetupSummaryByIdFields_WorkSetup_EmployeeWorkItem_ManagementWorkItem:
+				itemSummary = fmt.Sprintf("Management: %s (size: %s)", v.ManagementWorkItem.GetName(), v.ManagementWorkItem.GetTeamSize())
+			}
+		}
+
+		summary := fmt.Sprintf("[%s] %s", setup.GetPriority(), itemSummary)
+		results = append(results, &service.RequireEmployeeWorkSetupSummaryByIdResult{
+			WorkSetupSummary: summary,
+		})
+	}
+
+	return &service.RequireEmployeeWorkSetupSummaryByIdResponse{Result: results}, nil
+}
+
+// RequireEmployeeWorkItemHandlerInfoById implements projects.ProjectsServiceServer.
+// Pattern 4: Concrete message inside fragment. Extracts handler name from within interface fragments.
+func (p *ProjectsService) RequireEmployeeWorkItemHandlerInfoById(_ context.Context, req *service.RequireEmployeeWorkItemHandlerInfoByIdRequest) (*service.RequireEmployeeWorkItemHandlerInfoByIdResponse, error) {
+	results := make([]*service.RequireEmployeeWorkItemHandlerInfoByIdResult, 0, len(req.GetContext()))
+
+	for _, ctx := range req.GetContext() {
+		item := ctx.GetFields().GetPrimaryWorkItem()
+
+		var info string
+		switch v := item.GetInstance().(type) {
+		case *service.RequireEmployeeWorkItemHandlerInfoByIdFields_EmployeeWorkItem_TechnicalWorkItem:
+			info = fmt.Sprintf("TechnicalHandler: %s", v.TechnicalWorkItem.GetHandler().GetName())
+		case *service.RequireEmployeeWorkItemHandlerInfoByIdFields_EmployeeWorkItem_ManagementWorkItem:
+			info = fmt.Sprintf("ManagementHandler: %s", v.ManagementWorkItem.GetHandler().GetName())
+		default:
+			info = "Unknown handler"
+		}
+
+		results = append(results, &service.RequireEmployeeWorkItemHandlerInfoByIdResult{
+			WorkItemHandlerInfo: info,
+		})
+	}
+
+	return &service.RequireEmployeeWorkItemHandlerInfoByIdResponse{Result: results}, nil
+}
+
+// RequireEmployeeWorkItemSpecsInfoById implements projects.ProjectsServiceServer.
+// Pattern 5: Deep concrete nesting inside fragment (specs → metrics).
+func (p *ProjectsService) RequireEmployeeWorkItemSpecsInfoById(_ context.Context, req *service.RequireEmployeeWorkItemSpecsInfoByIdRequest) (*service.RequireEmployeeWorkItemSpecsInfoByIdResponse, error) {
+	results := make([]*service.RequireEmployeeWorkItemSpecsInfoByIdResult, 0, len(req.GetContext()))
+
+	for _, ctx := range req.GetContext() {
+		item := ctx.GetFields().GetPrimaryWorkItem()
+
+		var info string
+		switch v := item.GetInstance().(type) {
+		case *service.RequireEmployeeWorkItemSpecsInfoByIdFields_EmployeeWorkItem_TechnicalWorkItem:
+			specs := v.TechnicalWorkItem.GetSpecs()
+			metrics := specs.GetMetrics()
+			info = fmt.Sprintf("TechnicalSpecs: %s (%.1fx%.1f)", specs.GetName(), metrics.GetScore(), metrics.GetEfficiency())
+		case *service.RequireEmployeeWorkItemSpecsInfoByIdFields_EmployeeWorkItem_ManagementWorkItem:
+			specs := v.ManagementWorkItem.GetSpecs()
+			metrics := specs.GetMetrics()
+			info = fmt.Sprintf("ManagementSpecs: %s (%.1fx%.1f)", specs.GetName(), metrics.GetScore(), metrics.GetEfficiency())
+		default:
+			info = "Unknown specs"
+		}
+
+		results = append(results, &service.RequireEmployeeWorkItemSpecsInfoByIdResult{
+			WorkItemSpecsInfo: info,
+		})
+	}
+
+	return &service.RequireEmployeeWorkItemSpecsInfoByIdResponse{Result: results}, nil
+}
+
+// RequireEmployeeDeepWorkItemInfoById implements projects.ProjectsServiceServer.
+// Pattern 6: Nested abstract through concrete intermediary (handler → assignedItem).
+func (p *ProjectsService) RequireEmployeeDeepWorkItemInfoById(_ context.Context, req *service.RequireEmployeeDeepWorkItemInfoByIdRequest) (*service.RequireEmployeeDeepWorkItemInfoByIdResponse, error) {
+	results := make([]*service.RequireEmployeeDeepWorkItemInfoByIdResult, 0, len(req.GetContext()))
+
+	for _, ctx := range req.GetContext() {
+		item := ctx.GetFields().GetPrimaryWorkItem()
+
+		var info string
+		switch v := item.GetInstance().(type) {
+		case *service.RequireEmployeeDeepWorkItemInfoByIdFields_EmployeeWorkItem_TechnicalWorkItem:
+			handler := v.TechnicalWorkItem.GetHandler()
+			assignedItem := handler.GetAssignedItem()
+			switch av := assignedItem.GetInstance().(type) {
+			case *service.RequireEmployeeDeepWorkItemInfoByIdFields_TechnicalWorkItem_WorkItemHandler_EmployeeWorkItem_ManagementWorkItem:
+				info = fmt.Sprintf("TechnicalHandler->Management: %s (size: %s)", av.ManagementWorkItem.GetName(), av.ManagementWorkItem.GetTeamSize())
+			case *service.RequireEmployeeDeepWorkItemInfoByIdFields_TechnicalWorkItem_WorkItemHandler_EmployeeWorkItem_TechnicalWorkItem:
+				info = fmt.Sprintf("TechnicalHandler->Technical: %s (count: %d)", av.TechnicalWorkItem.GetName(), av.TechnicalWorkItem.GetCodeCount())
+			default:
+				info = "TechnicalHandler->Unknown"
+			}
+		case *service.RequireEmployeeDeepWorkItemInfoByIdFields_EmployeeWorkItem_ManagementWorkItem:
+			info = fmt.Sprintf("ManagementHandler: %s", v.ManagementWorkItem.GetHandler().GetName())
+		default:
+			info = "Unknown deep item"
+		}
+
+		results = append(results, &service.RequireEmployeeDeepWorkItemInfoByIdResult{
+			DeepWorkItemInfo: info,
+		})
+	}
+
+	return &service.RequireEmployeeDeepWorkItemInfoByIdResponse{Result: results}, nil
+}
+
+// isTechnicalExpertise reports whether an expertise describes a technical role. The @requires fields
+// that return abstract types use it to pick the concrete member they return, so that both members
+// are reachable from the static employee data.
+func isTechnicalExpertise(expertise string) bool {
+	words := strings.Fields(expertise)
+	if len(words) == 0 {
+		return false
+	}
+
+	switch words[0] {
+	case "Backend", "Frontend", "Fullstack":
+		return true
+	default:
+		return false
+	}
+}
+
+// newTechnicalWorkItem builds a fully populated TechnicalWorkItem wrapped in the EmployeeWorkItem
+// interface message. assignedItem is attached to the item's handler and may be nil to terminate the
+// recursion, as EmployeeWorkItem is reachable from itself via handler.assignedItem.
+func newTechnicalWorkItem(name string, priority int32, assignedItem *service.EmployeeWorkItem) *service.EmployeeWorkItem {
+	return &service.EmployeeWorkItem{
+		Instance: &service.EmployeeWorkItem_TechnicalWorkItem{
+			TechnicalWorkItem: &service.TechnicalWorkItem{
+				Name:      name,
+				Priority:  priority,
+				CodeCount: int32(len(name)) * 100,
+				Handler: &service.WorkItemHandler{
+					Name:         "Handler for " + name,
+					AssignedItem: assignedItem,
+				},
+				Specs: &service.TechnicalSpecs{
+					Name:       name + " specs",
+					Complexity: float64(priority) * 1.5,
+					Metrics: &service.WorkMetrics{
+						Score:      95.5,
+						Efficiency: 0.9,
+					},
+				},
+			},
+		},
+	}
+}
+
+// newManagementWorkItem builds a fully populated ManagementWorkItem wrapped in the EmployeeWorkItem
+// interface message. assignedItem is attached to the item's handler and may be nil to terminate the
+// recursion, as EmployeeWorkItem is reachable from itself via handler.assignedItem.
+func newManagementWorkItem(name string, priority int32, assignedItem *service.EmployeeWorkItem) *service.EmployeeWorkItem {
+	return &service.EmployeeWorkItem{
+		Instance: &service.EmployeeWorkItem_ManagementWorkItem{
+			ManagementWorkItem: &service.ManagementWorkItem{
+				Name:     name,
+				Priority: priority,
+				TeamSize: fmt.Sprintf("team of %d", priority*3),
+				Handler: &service.WorkItemHandler{
+					Name:         "Handler for " + name,
+					AssignedItem: assignedItem,
+				},
+				Specs: &service.ManagementSpecs{
+					Name:  name + " specs",
+					Scope: float64(priority) * 2.5,
+					Metrics: &service.WorkMetrics{
+						Score:      88.0,
+						Efficiency: 0.9,
+					},
+				},
+			},
+		},
+	}
+}
+
+// RequireEmployeeRecommendedWorkItemById implements projects.ProjectsServiceServer.
+// Pattern 7: the @requires field returns an interface. The concrete member is derived from the
+// required expertise, and the returned item's handler is assigned the opposite member so that a
+// nested abstract type is reachable inside an abstract result.
+func (p *ProjectsService) RequireEmployeeRecommendedWorkItemById(_ context.Context, req *service.RequireEmployeeRecommendedWorkItemByIdRequest) (*service.RequireEmployeeRecommendedWorkItemByIdResponse, error) {
+	results := make([]*service.RequireEmployeeRecommendedWorkItemByIdResult, 0, len(req.GetContext()))
+
+	for _, ctx := range req.GetContext() {
+		expertise := ctx.GetFields().GetExpertise()
+
+		var item *service.EmployeeWorkItem
+		if isTechnicalExpertise(expertise) {
+			assigned := newManagementWorkItem(fmt.Sprintf("%s follow-up", expertise), 2, nil)
+			item = newTechnicalWorkItem(fmt.Sprintf("%s work item", expertise), 1, assigned)
+		} else {
+			assigned := newTechnicalWorkItem(fmt.Sprintf("%s follow-up", expertise), 2, nil)
+			item = newManagementWorkItem(fmt.Sprintf("%s work item", expertise), 1, assigned)
+		}
+
+		results = append(results, &service.RequireEmployeeRecommendedWorkItemByIdResult{
+			RecommendedWorkItem: item,
+		})
+	}
+
+	return &service.RequireEmployeeRecommendedWorkItemByIdResponse{Result: results}, nil
+}
+
+// RequireEmployeeRecommendedWorkItemsById implements projects.ProjectsServiceServer.
+// Pattern 8: the @requires field returns a list of an interface and takes an argument. It produces
+// one entry per word of the required expertise, alternating between both concrete members by index
+// and capped at the limit argument, so that a limit of zero yields an empty list.
+func (p *ProjectsService) RequireEmployeeRecommendedWorkItemsById(_ context.Context, req *service.RequireEmployeeRecommendedWorkItemsByIdRequest) (*service.RequireEmployeeRecommendedWorkItemsByIdResponse, error) {
+	results := make([]*service.RequireEmployeeRecommendedWorkItemsByIdResult, 0, len(req.GetContext()))
+	limit := req.GetFieldArgs().GetLimit()
+
+	for _, ctx := range req.GetContext() {
+		words := strings.Fields(ctx.GetFields().GetExpertise())
+
+		items := make([]*service.EmployeeWorkItem, 0, len(words))
+		for i, word := range words {
+			if int32(len(items)) >= limit {
+				break
+			}
+
+			if i%2 == 0 {
+				items = append(items, newTechnicalWorkItem(fmt.Sprintf("Technical %s", word), int32(i+1), nil))
+			} else {
+				items = append(items, newManagementWorkItem(fmt.Sprintf("Management %s", word), int32(i+1), nil))
+			}
+		}
+
+		results = append(results, &service.RequireEmployeeRecommendedWorkItemsByIdResult{
+			RecommendedWorkItems: items,
+		})
+	}
+
+	return &service.RequireEmployeeRecommendedWorkItemsByIdResponse{Result: results}, nil
+}
+
+// RequireEmployeeLatestWorkOperationById implements projects.ProjectsServiceServer.
+// Pattern 9: the @requires field returns a union. Technical expertise reports an approval,
+// everything else a rejection.
+func (p *ProjectsService) RequireEmployeeLatestWorkOperationById(_ context.Context, req *service.RequireEmployeeLatestWorkOperationByIdRequest) (*service.RequireEmployeeLatestWorkOperationByIdResponse, error) {
+	results := make([]*service.RequireEmployeeLatestWorkOperationByIdResult, 0, len(req.GetContext()))
+
+	for _, ctx := range req.GetContext() {
+		expertise := ctx.GetFields().GetExpertise()
+
+		operation := &service.WorkReviewResult{}
+		if isTechnicalExpertise(expertise) {
+			operation.Value = &service.WorkReviewResult_WorkApproval{
+				WorkApproval: &service.WorkApproval{
+					Comment:    fmt.Sprintf("Approved for %s", expertise),
+					ApprovedAt: "2024-01-01T00:00:00Z",
+				},
+			}
+		} else {
+			operation.Value = &service.WorkReviewResult_WorkRejection{
+				WorkRejection: &service.WorkRejection{
+					Reason:        fmt.Sprintf("Rejected for %s", expertise),
+					RejectionCode: "NON_TECHNICAL",
+				},
+			}
+		}
+
+		results = append(results, &service.RequireEmployeeLatestWorkOperationByIdResult{
+			LatestWorkOperation: operation,
+		})
+	}
+
+	return &service.RequireEmployeeLatestWorkOperationByIdResponse{Result: results}, nil
+}
+
+// RequireEmployeeOptionalLatestWorkOperationById implements projects.ProjectsServiceServer.
+// Pattern 10: the @requires field returns a nullable union. An expertise spanning more than two
+// words has no single latest operation, so no union value is returned at all, which has to surface
+// as null rather than as an empty object.
+func (p *ProjectsService) RequireEmployeeOptionalLatestWorkOperationById(_ context.Context, req *service.RequireEmployeeOptionalLatestWorkOperationByIdRequest) (*service.RequireEmployeeOptionalLatestWorkOperationByIdResponse, error) {
+	results := make([]*service.RequireEmployeeOptionalLatestWorkOperationByIdResult, 0, len(req.GetContext()))
+
+	for _, ctx := range req.GetContext() {
+		expertise := ctx.GetFields().GetExpertise()
+
+		var operation *service.WorkReviewResult
+		switch {
+		case len(strings.Fields(expertise)) > 2:
+			operation = nil
+		case isTechnicalExpertise(expertise):
+			operation = &service.WorkReviewResult{
+				Value: &service.WorkReviewResult_WorkApproval{
+					WorkApproval: &service.WorkApproval{
+						Comment:    fmt.Sprintf("Latest operation approved for %s", expertise),
+						ApprovedAt: "2024-01-02T00:00:00Z",
+					},
+				},
+			}
+		default:
+			operation = &service.WorkReviewResult{
+				Value: &service.WorkReviewResult_WorkRejection{
+					WorkRejection: &service.WorkRejection{
+						Reason:        fmt.Sprintf("Latest operation rejected for %s", expertise),
+						RejectionCode: "NO_TECHNICAL_OPERATION",
+					},
+				},
+			}
+		}
+
+		results = append(results, &service.RequireEmployeeOptionalLatestWorkOperationByIdResult{
+			OptionalLatestWorkOperation: operation,
+		})
+	}
+
+	return &service.RequireEmployeeOptionalLatestWorkOperationByIdResponse{Result: results}, nil
+}
+
+// LookupProjectById implements projects.ProjectsServiceServer.
+func (p *ProjectsService) LookupProjectById(ctx context.Context, req *service.LookupProjectByIdRequest) (*service.LookupProjectByIdResponse, error) {
+	logger := hclog.FromContext(ctx)
+
+	if len(req.Keys) == 0 {
+		logger.Info("LookupProjectById", "no keys provided")
+		return &service.LookupProjectByIdResponse{Result: []*service.Project{}}, nil
+	}
+
+	logger.Info("LookupProjectById", "project_id", req.Keys[0].Id)
+
+	p.lock.RLock()
+	defer p.lock.RUnlock()
+
+	var result []*service.Project
+
+	// Maintain order of keys
+	for _, key := range req.Keys {
+		found := false
+		for _, project := range data.ServiceProjects {
+			if project.Id == key.Id {
+				result = append(result, project)
+				found = true
+				break
+			}
+		}
+		if !found {
+			result = append(result, nil)
+		}
+	}
+
+	return &service.LookupProjectByIdResponse{Result: result}, nil
+}
+
+// MutationAddProject implements projects.ProjectsServiceServer.
+func (p *ProjectsService) MutationAddProject(ctx context.Context, req *service.MutationAddProjectRequest) (*service.MutationAddProjectResponse, error) {
+	logger := hclog.FromContext(ctx)
+	logger.Info("MutationAddProject")
+
+	p.lock.Lock()
+	defer p.lock.Unlock()
+
+	lastID := data.ServiceProjects[len(data.ServiceProjects)-1].Id
+
+	nextID, err := strconv.Atoi(lastID)
+	if err != nil {
+		return nil, status.Errorf(codes.Internal, "failed to convert lastID to int: %v", err)
+	}
+
+	nextID++
+
+	project := &service.Project{
+		Id:              strconv.Itoa(nextID),
+		Name:            req.Project.Name,
+		Description:     req.Project.Description,
+		Status:          req.Project.Status,
+		StartDate:       req.Project.StartDate,
+		EndDate:         req.Project.EndDate,
+		TeamMembers:     []*service.Employee{},
+		RelatedProducts: []*service.Product{},
+		MilestoneIds:    &service.ListOfString{List: &service.ListOfString_List{Items: []string{}}},
+		Milestones:      []*service.Milestone{},
+		Tasks:           []*service.Task{},
+		Progress:        &wrapperspb.DoubleValue{Value: 0.0},
+	}
+
+	data.ServiceProjects = append(data.ServiceProjects, project)
+
+	return &service.MutationAddProjectResponse{AddProject: project}, nil
+}
+
+// QueryProject implements projects.ProjectsServiceServer.
+func (p *ProjectsService) QueryProject(ctx context.Context, req *service.QueryProjectRequest) (*service.QueryProjectResponse, error) {
+	logger := hclog.FromContext(ctx)
+	logger.Info("QueryProject", "project_id", req.Id)
+
+	p.lock.RLock()
+	defer p.lock.RUnlock()
+
+	for _, project := range data.ServiceProjects {
+		if project.Id == req.Id {
+			return &service.QueryProjectResponse{Project: p.populateProjectRelationships(project)}, nil
+		}
+	}
+
+	return nil, nil
+}
+
+// QueryProjectStatuses implements projects.ProjectsServiceServer.
+func (p *ProjectsService) QueryProjectStatuses(ctx context.Context, _ *service.QueryProjectStatusesRequest) (*service.QueryProjectStatusesResponse, error) {
+	logger := hclog.FromContext(ctx)
+	logger.Info("QueryProjectStatuses")
+
+	p.lock.RLock()
+	defer p.lock.RUnlock()
+
+	sm := make(map[service.ProjectStatus]struct{})
+
+	for _, proj := range data.ServiceProjects {
+		sm[proj.Status] = struct{}{}
+	}
+
+	projectStatuses := make([]service.ProjectStatus, 0, len(sm))
+	for status := range sm {
+		projectStatuses = append(projectStatuses, status)
+	}
+
+	return &service.QueryProjectStatusesResponse{
+		ProjectStatuses: projectStatuses,
+	}, nil
+}
+
+// QueryProjects implements projects.ProjectsServiceServer.
+func (p *ProjectsService) QueryProjects(ctx context.Context, req *service.QueryProjectsRequest) (*service.QueryProjectsResponse, error) {
+	logger := hclog.FromContext(ctx)
+	logger.Info("QueryProjects")
+
+	p.lock.RLock()
+	defer p.lock.RUnlock()
+
+	// Populate relationships for all projects
+	var populatedProjects []*service.Project
+	for _, project := range data.ServiceProjects {
+		populatedProjects = append(populatedProjects, p.populateProjectRelationships(project))
+	}
+
+	return &service.QueryProjectsResponse{Projects: populatedProjects}, nil
+}
+
+// QueryNodesById implements projects.ProjectsServiceServer.
+func (p *ProjectsService) QueryNodesById(ctx context.Context, req *service.QueryNodesByIdRequest) (*service.QueryNodesByIdResponse, error) {
+	logger := hclog.FromContext(ctx)
+	logger.Info("QueryNodesById", "id", req.Id)
+
+	p.lock.RLock()
+	defer p.lock.RUnlock()
+
+	var nodes []*service.Node
+
+	for _, project := range data.ServiceProjects {
+		if project.Id == req.Id {
+			nodes = append(nodes, &service.Node{
+				Instance: &service.Node_Project{
+					Project: p.populateProjectRelationships(project),
+				},
+			})
+		}
+	}
+	for _, milestone := range data.ServiceMilestones {
+		if milestone.Id == req.Id {
+			nodes = append(nodes, &service.Node{
+				Instance: &service.Node_Milestone{
+					Milestone: data.PopulateMilestoneRelationships(milestone),
+				},
+			})
+		}
+	}
+	for _, task := range data.ServiceTasks {
+		if task.Id == req.Id {
+			nodes = append(nodes, &service.Node{
+				Instance: &service.Node_Task{
+					Task: data.PopulateTaskRelationships(task),
+				},
+			})
+		}
+	}
+	for _, update := range data.ServiceProjectUpdates {
+		if update.Id == req.Id {
+			nodes = append(nodes, &service.Node{
+				Instance: &service.Node_ProjectUpdate{
+					ProjectUpdate: p.populateProjectUpdateRelationships(update),
+				},
+			})
+		}
+	}
+
+	return &service.QueryNodesByIdResponse{NodesById: nodes}, nil
+}
+
+// QueryProjectsByStatus implements projects.ProjectsServiceServer.
+func (p *ProjectsService) QueryProjectsByStatus(ctx context.Context, req *service.QueryProjectsByStatusRequest) (*service.QueryProjectsByStatusResponse, error) {
+	logger := hclog.FromContext(ctx)
+	logger.Info("QueryProjectsByStatus", "status", req.Status)
+
+	p.lock.RLock()
+	defer p.lock.RUnlock()
+
+	projects := make([]*service.Project, 0)
+
+	for _, proj := range data.ServiceProjects {
+		if proj.Status == req.Status {
+			projects = append(projects, proj)
+		}
+	}
+
+	return &service.QueryProjectsByStatusResponse{ProjectsByStatus: projects}, nil
+}
+
+// QueryProjectTags implements projects.ProjectsServiceServer.
+func (p *ProjectsService) QueryProjectTags(ctx context.Context, req *service.QueryProjectTagsRequest) (*service.QueryProjectTagsResponse, error) {
+	logger := hclog.FromContext(ctx)
+	logger.Info("QueryProjectTags")
+
+	p.lock.RLock()
+	defer p.lock.RUnlock()
+
+	tags := data.GetAllProjectTags()
+	return &service.QueryProjectTagsResponse{ProjectTags: tags}, nil
+}
+
+// QueryArchivedProjects implements projects.ProjectsServiceServer.
+func (p *ProjectsService) QueryArchivedProjects(ctx context.Context, req *service.QueryArchivedProjectsRequest) (*service.QueryArchivedProjectsResponse, error) {
+	logger := hclog.FromContext(ctx)
+	logger.Info("QueryArchivedProjects")
+
+	p.lock.RLock()
+	defer p.lock.RUnlock()
+
+	archivedProjects := data.GetArchivedProjects()
+	return &service.QueryArchivedProjectsResponse{ArchivedProjects: archivedProjects}, nil
+}
+
+// QueryTasksByPriority implements projects.ProjectsServiceServer.
+func (p *ProjectsService) QueryTasksByPriority(ctx context.Context, req *service.QueryTasksByPriorityRequest) (*service.QueryTasksByPriorityResponse, error) {
+	logger := hclog.FromContext(ctx)
+	logger.Info("QueryTasksByPriority", "project_id", req.ProjectId)
+
+	p.lock.RLock()
+	defer p.lock.RUnlock()
+
+	tasks := data.GetTasksByProjectID(req.ProjectId)
+
+	// Group tasks by priority - create nested lists
+	lowTasks := []*service.Task{}
+	mediumTasks := []*service.Task{}
+	highTasks := []*service.Task{}
+	urgentTasks := []*service.Task{}
+
+	for _, task := range tasks {
+		switch task.Priority {
+		case service.TaskPriority_TASK_PRIORITY_LOW:
+			lowTasks = append(lowTasks, task)
+		case service.TaskPriority_TASK_PRIORITY_MEDIUM:
+			mediumTasks = append(mediumTasks, task)
+		case service.TaskPriority_TASK_PRIORITY_HIGH:
+			highTasks = append(highTasks, task)
+		case service.TaskPriority_TASK_PRIORITY_URGENT:
+			urgentTasks = append(urgentTasks, task)
+		}
+	}
+
+	// Create nested list structure for testing
+	tasksByPriority := &service.ListOfListOfTask{
+		List: &service.ListOfListOfTask_List{
+			Items: []*service.ListOfTask{
+				{List: &service.ListOfTask_List{Items: lowTasks}},
+				{List: &service.ListOfTask_List{Items: mediumTasks}},
+				{List: &service.ListOfTask_List{Items: highTasks}},
+				{List: &service.ListOfTask_List{Items: urgentTasks}},
+				{List: &service.ListOfTask_List{}}, // Empty list for testing
+				nil,                                // Add nullable list for testing
+			},
+		},
+	}
+
+	return &service.QueryTasksByPriorityResponse{TasksByPriority: tasksByPriority}, nil
+}
+
+// QueryResourceMatrix implements projects.ProjectsServiceServer.
+func (p *ProjectsService) QueryResourceMatrix(ctx context.Context, req *service.QueryResourceMatrixRequest) (*service.QueryResourceMatrixResponse, error) {
+	logger := hclog.FromContext(ctx)
+	logger.Info("QueryResourceMatrix", "project_id", req.ProjectId)
+
+	p.lock.RLock()
+	defer p.lock.RUnlock()
+
+	// Create a matrix of resources grouped by type for testing
+	var resourceMatrix []*service.ListOfProjectResource
+
+	// Get project resources
+	milestones := data.GetMilestonesByProjectID(req.ProjectId)
+	tasks := data.GetTasksByProjectID(req.ProjectId)
+	teamMembers := data.GetTeamMembersByProjectId(req.ProjectId)
+	relatedProducts := p.getRelatedProductsByProjectId(req.ProjectId)
+
+	// Group 1: Milestones as resources
+	milestoneResources := []*service.ProjectResource{}
+	for _, milestone := range milestones {
+		milestoneResources = append(milestoneResources, &service.ProjectResource{
+			Value: &service.ProjectResource_Milestone{Milestone: milestone},
+		})
+	}
+
+	// Group 2: Tasks as resources
+	taskResources := []*service.ProjectResource{}
+	for _, task := range tasks {
+		taskResources = append(taskResources, &service.ProjectResource{
+			Value: &service.ProjectResource_Task{Task: task},
+		})
+	}
+
+	// Group 3: Team members as resources
+	employeeResources := []*service.ProjectResource{}
+	for _, employee := range teamMembers {
+		employeeResources = append(employeeResources, &service.ProjectResource{
+			Value: &service.ProjectResource_Employee{Employee: employee},
+		})
+	}
+
+	// Group 4: Products as resources
+	productResources := []*service.ProjectResource{}
+	for _, product := range relatedProducts {
+		productResources = append(productResources, &service.ProjectResource{
+			Value: &service.ProjectResource_Product{Product: product},
+		})
+	}
+
+	resourceMatrix = []*service.ListOfProjectResource{
+		{List: &service.ListOfProjectResource_List{Items: milestoneResources}},
+		{List: &service.ListOfProjectResource_List{Items: taskResources}},
+		{List: &service.ListOfProjectResource_List{Items: employeeResources}},
+		{List: &service.ListOfProjectResource_List{Items: productResources}},
+	}
+
+	return &service.QueryResourceMatrixResponse{
+		ResourceMatrix: &service.ListOfListOfProjectResource{
+			List: &service.ListOfListOfProjectResource_List{Items: resourceMatrix},
+		},
+	}, nil
+}
+
+// RequireEmployeeWorkAuditById implements projects.ProjectsServiceServer.
+// The @requires field returns a nested object tree whose types carry field resolvers
+// (riskScore, remediation, estimatedHours). Each word of the required expertise becomes a finding.
+func (p *ProjectsService) RequireEmployeeWorkAuditById(_ context.Context, req *service.RequireEmployeeWorkAuditByIdRequest) (*service.RequireEmployeeWorkAuditByIdResponse, error) {
+	results := make([]*service.RequireEmployeeWorkAuditByIdResult, 0, len(req.GetContext()))
+
+	for _, ctx := range req.GetContext() {
+		expertise := ctx.GetFields().GetExpertise()
+
+		words := strings.Fields(expertise)
+		findings := make([]*service.WorkAuditFinding, 0, len(words))
+		for i, word := range words {
+			findings = append(findings, &service.WorkAuditFinding{
+				Code:     strings.ToUpper(word),
+				Severity: int32(i + 1),
+			})
+		}
+
+		results = append(results, &service.RequireEmployeeWorkAuditByIdResult{
+			WorkAudit: &service.WorkAudit{
+				Expertise: expertise,
+				Report: &service.WorkAuditReport{
+					GeneratedAt: "2024-01-01T00:00:00Z",
+					Findings:    findings,
+				},
+			},
+		})
+	}
+
+	return &service.RequireEmployeeWorkAuditByIdResponse{Result: results}, nil
+}

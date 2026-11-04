@@ -1,0 +1,170 @@
+import { afterAll, beforeAll, describe, expect, onTestFinished, test } from 'vitest';
+import { EnumStatusCode } from '@wundergraph/cosmo-connect/dist/common/common_pb';
+import { SetupTest } from '../test-util.js';
+import { afterAllSetup, beforeAllSetup, genID } from '../../src/core/test-util.js';
+import { OrganizationRepository } from '../../src/core/repositories/OrganizationRepository.js';
+
+describe('Create organization', () => {
+  let dbname = '';
+
+  beforeAll(async () => {
+    dbname = await beforeAllSetup();
+  });
+
+  afterAll(async () => {
+    await afterAllSetup(dbname);
+  });
+
+  test('Should link Keycloak group when a new organization is created', async (testContext) => {
+    const { client, server, keycloakClient, realm } = await SetupTest({ dbname });
+    testContext.onTestFinished(() => server.close());
+
+    const orgName = genID('org');
+    const createOrganizationResponse = await client.createOrganization({
+      name: orgName,
+      slug: orgName,
+      plan: 'developer',
+    });
+
+    expect(createOrganizationResponse.response?.code).toBe(EnumStatusCode.OK);
+
+    const orgRepo = new OrganizationRepository(server.log, server.db);
+    const org = await orgRepo.byId(createOrganizationResponse.organization!.id);
+
+    expect(org).toBeDefined();
+    expect(org?.kcGroupId).toBeDefined();
+
+    const kcGroup = await keycloakClient.client.groups.findOne({ realm, id: org!.kcGroupId! });
+    expect(kcGroup).toBeDefined();
+    expect(kcGroup?.subGroupCount).toBe(3);
+  });
+
+  test('Should fail when provided a name with only spaces', async (testContext) => {
+    const { client, server } = await SetupTest({ dbname });
+    testContext.onTestFinished(() => server.close());
+
+    const createOrganizationResponse = await client.createOrganization({
+      name: '             ',
+      slug: genID('org'),
+      plan: 'developer',
+    });
+
+    expect(createOrganizationResponse.response?.code).toBe(EnumStatusCode.ERR_BAD_REQUEST);
+    expect(createOrganizationResponse.response?.details).toBe('Invalid name. It must be of 3-32 characters in length.');
+  });
+
+  test('Should fail when provided a name that is too short', async (testContext) => {
+    const { client, server } = await SetupTest({ dbname });
+    testContext.onTestFinished(() => server.close());
+
+    const createOrganizationResponse = await client.createOrganization({
+      name: 'aa',
+      slug: genID('org'),
+      plan: 'developer',
+    });
+
+    expect(createOrganizationResponse.response?.code).toBe(EnumStatusCode.ERR_BAD_REQUEST);
+    expect(createOrganizationResponse.response?.details).toBe('Invalid name. It must be of 3-32 characters in length.');
+  });
+
+  test('Should fail when provided a name that is too long', async (testContext) => {
+    const { client, server } = await SetupTest({ dbname });
+    testContext.onTestFinished(() => server.close());
+
+    const createOrganizationResponse = await client.createOrganization({
+      name: 'a'.repeat(50),
+      slug: genID('org'),
+      plan: 'developer',
+    });
+
+    expect(createOrganizationResponse.response?.code).toBe(EnumStatusCode.ERR_BAD_REQUEST);
+    expect(createOrganizationResponse.response?.details).toBe('Invalid name. It must be of 3-32 characters in length.');
+  });
+
+  test('Should fail when provided a slug with only spaces', async (testContext) => {
+    const { client, server } = await SetupTest({ dbname });
+    testContext.onTestFinished(() => server.close());
+
+    const createOrganizationResponse = await client.createOrganization({
+      name: genID('org'),
+      slug: '          ',
+      plan: 'developer',
+    });
+
+    expect(createOrganizationResponse.response?.code).toBe(EnumStatusCode.ERR_BAD_REQUEST);
+    expect(createOrganizationResponse.response?.details).toBe(
+      'Slug should start and end with an alphanumeric character. Spaces and special characters other that hyphen not allowed.',
+    );
+  });
+
+  test.each(['login', 'create', 'signup'])(
+    'Should fail when creating an organization with the reserved slug "%s"',
+    async (slug) => {
+      const { client, server } = await SetupTest({ dbname });
+      onTestFinished(() => server.close());
+
+      const createOrganizationResponse = await client.createOrganization({
+        name: genID('org'),
+        slug,
+        plan: 'developer',
+      });
+
+      expect(createOrganizationResponse.response?.code).toBe(EnumStatusCode.ERR_BAD_REQUEST);
+      expect(createOrganizationResponse.response?.details).toBe('This slug is a reserved keyword.');
+    },
+  );
+
+  test('Should fail when provided a slug that is too short', async (testContext) => {
+    const { client, server } = await SetupTest({ dbname });
+    testContext.onTestFinished(() => server.close());
+
+    const createOrganizationResponse = await client.createOrganization({
+      name: genID('org'),
+      slug: 'aa',
+      plan: 'developer',
+    });
+
+    expect(createOrganizationResponse.response?.code).toBe(EnumStatusCode.ERR_BAD_REQUEST);
+    expect(createOrganizationResponse.response?.details).toBe(
+      'Invalid slug. It must be of 3-32 characters in length, start and end with an alphanumeric character and may contain hyphens in between.',
+    );
+  });
+
+  test('Should fail when provided a slug that is too long', async (testContext) => {
+    const { client, server } = await SetupTest({ dbname });
+    testContext.onTestFinished(() => server.close());
+
+    const createOrganizationResponse = await client.createOrganization({
+      name: genID('org'),
+      slug: 'a'.repeat(50),
+      plan: 'developer',
+    });
+
+    expect(createOrganizationResponse.response?.code).toBe(EnumStatusCode.ERR_BAD_REQUEST);
+    expect(createOrganizationResponse.response?.details).toBe(
+      'Invalid slug. It must be of 3-32 characters in length, start and end with an alphanumeric character and may contain hyphens in between.',
+    );
+  });
+
+  test('new organizations should enable `split-config-loading` by default', async (testContext) => {
+    const { client, server } = await SetupTest({ dbname });
+    testContext.onTestFinished(() => server.close());
+
+    const orgName = genID('org');
+    const createOrganizationResponse = await client.createOrganization({
+      name: orgName,
+      slug: orgName,
+      plan: 'developer',
+    });
+
+    expect(createOrganizationResponse.response?.code).toBe(EnumStatusCode.OK);
+
+    const orgRepo = new OrganizationRepository(server.log, server.db);
+    const org = await orgRepo.byId(createOrganizationResponse.organization!.id);
+
+    expect(org).toBeDefined();
+
+    const isEnabled = await orgRepo.isFeatureEnabled(org!.id, 'split-config-loading');
+    expect(isEnabled).toBe(true);
+  });
+});

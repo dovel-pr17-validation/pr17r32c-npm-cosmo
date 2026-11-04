@@ -1,0 +1,29 @@
+# This job is used to satisfy PR checks for parts of the codebase
+# that are not tested during CI
+name: Dummy CI
+on:
+  pull_request:
+    paths:
+      - 'scripts/**'
+      - '.github/workflows/*.yaml'
+      - '.github/workflows/*.yml'
+      - '.github/actions/**'
+      - '.github/scripts/**'
+      - '.husky/**'
+      - 'docs-website/**'
+      - 'rfc/**'
+      - '.oss-scanner/**'
+      - 'CLAUDE.md'
+      - 'CONTRIBUTING.md'
+      - 'README.md'
+      - 'SECURITY.md'
+      - 'LICENSE'
+      - '.github/PULL_REQUEST_TEMPLATE.md'
+      - '.github/CODEOWNERS'
+      - '.gitignore'
+jobs:
+  build_test:
+    timeout-minutes: 5
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo Nothing to do

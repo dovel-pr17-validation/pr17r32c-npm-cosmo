@@ -1,0 +1,1348 @@
+package integration
+
+import (
+	"fmt"
+	"net/http"
+	"sync"
+	"testing"
+	"time"
+
+	"github.com/stretchr/testify/require"
+	"github.com/wundergraph/astjson"
+	"github.com/wundergraph/cosmo/router-tests/testenv"
+	"github.com/wundergraph/cosmo/router/core"
+	"github.com/wundergraph/cosmo/router/pkg/config"
+)
+
+func TestSingleFlight(t *testing.T) {
+	t.Parallel()
+	t.Run("disabled", func(t *testing.T) {
+		t.Parallel()
+		testenv.Run(t, &testenv.Config{
+			Subgraphs: testenv.SubgraphsConfig{
+				GlobalDelay: time.Millisecond * 100,
+			},
+			RouterOptions: []core.Option{
+				core.WithEngineExecutionConfig(config.EngineExecutionConfiguration{
+					EnableSingleFlight:      false,
+					ForceEnableSingleFlight: false,
+					MaxConcurrentResolvers:  0,
+				}),
+			},
+		}, func(t *testing.T, xEnv *testenv.Environment) {
+			var (
+				numOfOperations = int64(10)
+				ready, done     sync.WaitGroup
+			)
+			ready.Add(int(numOfOperations))
+			done.Add(int(numOfOperations))
+			trigger := make(chan struct{})
+			for range numOfOperations {
+				go func() {
+					ready.Done()
+					defer done.Done()
+					<-trigger
+					res := xEnv.MakeGraphQLRequestOK(testenv.GraphQLRequest{
+						Query: `{ employees { id } }`,
+					})
+					require.Equal(t, `{"data":{"employees":[{"id":1},{"id":2},{"id":3},{"id":4},{"id":5},{"id":7},{"id":8},{"id":10},{"id":11},{"id":12}]}}`, res.Body)
+				}()
+			}
+			ready.Wait()
+			close(trigger)
+			done.Wait()
+			// We expect no request de-duplication because single flight is disabled
+			require.Equal(t, xEnv.SubgraphRequestCount.Global.Load(), numOfOperations)
+		})
+	})
+	t.Run("enabled", func(t *testing.T) {
+		t.Parallel()
+		testenv.Run(t, &testenv.Config{
+			Subgraphs: testenv.SubgraphsConfig{
+				GlobalDelay: time.Millisecond * 100,
+			},
+			RouterOptions: []core.Option{
+				core.WithEngineExecutionConfig(config.EngineExecutionConfiguration{
+					EnableSingleFlight:      true,
+					ForceEnableSingleFlight: false,
+					MaxConcurrentResolvers:  0,
+				}),
+			},
+		}, func(t *testing.T, xEnv *testenv.Environment) {
+			var (
+				numOfOperations = int64(10)
+				ready, done     sync.WaitGroup
+			)
+			ready.Add(int(numOfOperations))
+			done.Add(int(numOfOperations))
+			trigger := make(chan struct{})
+			for range numOfOperations {
+				go func() {
+					ready.Done()
+					defer done.Done()
+					<-trigger
+					res := xEnv.MakeGraphQLRequestOK(testenv.GraphQLRequest{
+						Query: `{ employees { id } }`,
+					})
+					require.Equal(t, `{"data":{"employees":[{"id":1},{"id":2},{"id":3},{"id":4},{"id":5},{"id":7},{"id":8},{"id":10},{"id":11},{"id":12}]}}`, res.Body)
+				}()
+			}
+			ready.Wait()
+			close(trigger)
+			done.Wait()
+			// We expect request de-duplication because single flight is enabled
+			require.Less(t, xEnv.SubgraphRequestCount.Global.Load(), numOfOperations)
+		})
+	})
+	t.Run("force-enabled", func(t *testing.T) {
+		t.Parallel()
+		testenv.Run(t, &testenv.Config{
+			Subgraphs: testenv.SubgraphsConfig{
+				GlobalDelay: time.Millisecond * 100,
+			},
+		}, func(t *testing.T, xEnv *testenv.Environment) {
+			var (
+				numOfOperations = int64(10)
+				ready, done     sync.WaitGroup
+			)
+			ready.Add(int(numOfOperations))
+			done.Add(int(numOfOperations))
+			trigger := make(chan struct{})
+			for range numOfOperations {
+				go func() {
+					ready.Done()
+					defer done.Done()
+					<-trigger
+					res := xEnv.MakeGraphQLRequestOK(testenv.GraphQLRequest{
+						Query: `{ employees { id } }`,
+					})
+					require.Equal(t, `{"data":{"employees":[{"id":1},{"id":2},{"id":3},{"id":4},{"id":5},{"id":7},{"id":8},{"id":10},{"id":11},{"id":12}]}}`, res.Body)
+				}()
+			}
+			ready.Wait()
+			close(trigger)
+			done.Wait()
+			// We expect request de-duplication because single flight is enabled
+			require.Less(t, xEnv.SubgraphRequestCount.Global.Load(), numOfOperations)
+		})
+	})
+	t.Run("mutations no deduplication", func(t *testing.T) {
+		t.Parallel()
+		testenv.Run(t, &testenv.Config{
+			Subgraphs: testenv.SubgraphsConfig{
+				GlobalDelay: time.Millisecond * 100,
+			},
+		}, func(t *testing.T, xEnv *testenv.Environment) {
+			var (
+				numOfOperations = int64(10)
+				ready, done     sync.WaitGroup
+			)
+			ready.Add(int(numOfOperations))
+			done.Add(int(numOfOperations))
+			trigger := make(chan struct{})
+			for range numOfOperations {
+				go func() {
+					ready.Done()
+					defer done.Done()
+					<-trigger
+					res := xEnv.MakeGraphQLRequestOK(testenv.GraphQLRequest{
+						Query: `mutation { updateEmployeeTag(id: 1, tag: "test") { id tag } }`,
+					})
+					require.Equal(t, `{"data":{"updateEmployeeTag":{"id":1,"tag":"test"}}}`, res.Body)
+				}()
+			}
+			ready.Wait()
+			close(trigger)
+			done.Wait()
+			// We expect no request de-duplication because mutations must not be de-duplicated
+			require.Equal(t, xEnv.SubgraphRequestCount.Global.Load(), numOfOperations)
+		})
+	})
+	t.Run("different headers no deduplication", func(t *testing.T) {
+		t.Parallel()
+		testenv.Run(t, &testenv.Config{
+			Subgraphs: testenv.SubgraphsConfig{
+				GlobalDelay: time.Millisecond * 100,
+			},
+			RouterOptions: []core.Option{
+				core.WithEngineExecutionConfig(config.EngineExecutionConfiguration{
+					EnableSingleFlight:      true,
+					ForceEnableSingleFlight: false,
+					MaxConcurrentResolvers:  0,
+				}),
+				core.WithHeaderRules(config.HeaderRules{
+					All: &config.GlobalHeaderRule{
+						Request: []*config.RequestHeaderRule{
+							{
+								Named:     "Authorization",
+								Operation: config.HeaderRuleOperationPropagate,
+							},
+						},
+					},
+				}),
+			},
+		}, func(t *testing.T, xEnv *testenv.Environment) {
+			var (
+				numOfOperations = int64(10)
+				ready, done     sync.WaitGroup
+			)
+			ready.Add(int(numOfOperations))
+			done.Add(int(numOfOperations))
+			trigger := make(chan struct{})
+			for i := range numOfOperations {
+				go func(i int64) {
+					ready.Done()
+					defer done.Done()
+					<-trigger
+					res := xEnv.MakeGraphQLRequestOK(testenv.GraphQLRequest{
+						Query: `{ employees { id } }`,
+						Header: http.Header{
+							"Authorization": []string{fmt.Sprintf("Bearer test-%d", i)},
+						},
+					})
+					require.Equal(t, `{"data":{"employees":[{"id":1},{"id":2},{"id":3},{"id":4},{"id":5},{"id":7},{"id":8},{"id":10},{"id":11},{"id":12}]}}`, res.Body)
+				}(i)
+			}
+			ready.Wait()
+			close(trigger)
+			done.Wait()
+			// We expect no request de-duplication because different headers must not be de-duplicated
+			require.Equal(t, xEnv.SubgraphRequestCount.Global.Load(), numOfOperations)
+		})
+	})
+	t.Run("same headers should be deduplicated", func(t *testing.T) {
+		t.Parallel()
+		testenv.Run(t, &testenv.Config{
+			Subgraphs: testenv.SubgraphsConfig{
+				GlobalDelay: time.Millisecond * 100,
+			},
+			RouterOptions: []core.Option{
+				core.WithEngineExecutionConfig(config.EngineExecutionConfiguration{
+					EnableSingleFlight:      true,
+					ForceEnableSingleFlight: false,
+					MaxConcurrentResolvers:  0,
+				}),
+				core.WithHeaderRules(config.HeaderRules{
+					All: &config.GlobalHeaderRule{
+						Request: []*config.RequestHeaderRule{
+							{
+								Named:     "Authorization",
+								Operation: config.HeaderRuleOperationPropagate,
+							},
+						},
+					},
+				}),
+			},
+		}, func(t *testing.T, xEnv *testenv.Environment) {
+			var (
+				numOfOperations = int64(10)
+				ready, done     sync.WaitGroup
+			)
+			ready.Add(int(numOfOperations))
+			done.Add(int(numOfOperations))
+			trigger := make(chan struct{})
+			for range numOfOperations {
+				go func() {
+					ready.Done()
+					defer done.Done()
+					<-trigger
+					res := xEnv.MakeGraphQLRequestOK(testenv.GraphQLRequest{
+						Query: `{ employees { id } }`,
+						Header: http.Header{
+							"Authorization": []string{"Bearer test"},
+						},
+					})
+					require.Equal(t, `{"data":{"employees":[{"id":1},{"id":2},{"id":3},{"id":4},{"id":5},{"id":7},{"id":8},{"id":10},{"id":11},{"id":12}]}}`, res.Body)
+				}()
+			}
+			ready.Wait()
+			close(trigger)
+			done.Wait()
+			// We expect request de-duplication because same headers should be de-duplicated
+			require.Less(t, xEnv.SubgraphRequestCount.Global.Load(), numOfOperations)
+		})
+	})
+	t.Run("subscription deduplication with multiple subgraphs", func(t *testing.T) {
+		t.Parallel()
+		testenv.Run(t, &testenv.Config{
+			RouterConfigJSONTemplate: testenv.ConfigWithEdfsNatsJSONTemplate,
+			EnableNats:               true,
+			Subgraphs: testenv.SubgraphsConfig{
+				GlobalDelay: time.Millisecond * 100,
+			},
+			RouterOptions: []core.Option{
+				core.WithEngineExecutionConfig(config.EngineExecutionConfiguration{
+					EnableSingleFlight:      true,
+					ForceEnableSingleFlight: false,
+					MaxConcurrentResolvers:  0,
+					Debug: config.EngineDebugConfiguration{
+						ReportWebSocketConnections: true,
+					},
+				}),
+			},
+		}, func(t *testing.T, xEnv *testenv.Environment) {
+			var (
+				numOfOperations = int64(10)
+				done            sync.WaitGroup
+			)
+			done.Add(int(numOfOperations))
+
+			// Wait for all subscriptions to be established before triggering
+			go func() {
+				xEnv.WaitForSubscriptionCount(uint64(numOfOperations), time.Second*15)
+				xEnv.WaitForTriggerCount(1, time.Second*15)
+				// Trigger the subscription via NATS to get updates for all subscriptions
+				xEnv.NATSPublishUntilReceived(xEnv.NatsConnectionDefault, xEnv.GetPubSubName("employeeUpdated.3"), []byte(`{"id":3,"__typename": "Employee"}`), 1, time.Second*15)
+			}()
+
+			for range numOfOperations {
+				go func() {
+					defer done.Done()
+
+					conn := xEnv.InitGraphQLWebSocketConnection(nil, nil, nil)
+					defer conn.Close()
+
+					err := testenv.WSWriteJSON(t, conn, &testenv.WebSocketMessage{
+						ID:      "1",
+						Type:    "subscribe",
+						Payload: []byte(`{"query":"subscription { employeeUpdated(employeeID: 3) { id details { forename surname } } }"}`),
+					})
+					require.NoError(t, err)
+
+					// Read one message to ensure subscription is working
+					var msg testenv.WebSocketMessage
+					err = testenv.WSReadJSON(t, conn, &msg)
+					require.NoError(t, err)
+					require.Equal(t, "next", msg.Type)
+					require.Equal(t, "1", msg.ID)
+
+					// Complete the subscription
+					err = testenv.WSWriteJSON(t, conn, &testenv.WebSocketMessage{
+						ID:   "1",
+						Type: "complete",
+					})
+					require.NoError(t, err)
+
+					// Read the complete message
+					var complete testenv.WebSocketMessage
+					err = conn.SetReadDeadline(time.Now().Add(1 * time.Second))
+					require.NoError(t, err)
+					err = testenv.WSReadJSON(t, conn, &complete)
+					require.NoError(t, err)
+					require.Equal(t, "complete", complete.Type)
+					require.Equal(t, "1", complete.ID)
+				}()
+			}
+			done.Wait()
+			xEnv.WaitForSubscriptionCount(0, time.Second*5)
+
+			// We expect request de-duplication because same subscription queries should be de-duplicated
+			// This subscription involves multiple subgraphs:
+			// - employees subgraph: provides the subscription root and id field
+			// - family subgraph: provides details.forename and details.surname fields
+			actualSubgraphRequests := xEnv.SubgraphRequestCount.Global.Load()
+			require.Less(t, actualSubgraphRequests, numOfOperations)
+		})
+	})
+	t.Run("subscription deduplication with multiple subgraphs - single flight disabled", func(t *testing.T) {
+		t.Parallel()
+		testenv.Run(t, &testenv.Config{
+			RouterConfigJSONTemplate: testenv.ConfigWithEdfsNatsJSONTemplate,
+			EnableNats:               true,
+			Subgraphs: testenv.SubgraphsConfig{
+				GlobalDelay: time.Millisecond * 100,
+			},
+			RouterOptions: []core.Option{
+				core.WithEngineExecutionConfig(config.EngineExecutionConfiguration{
+					EnableSingleFlight:      false,
+					ForceEnableSingleFlight: false,
+					MaxConcurrentResolvers:  0,
+					Debug: config.EngineDebugConfiguration{
+						ReportWebSocketConnections: true,
+					},
+				}),
+			},
+		}, func(t *testing.T, xEnv *testenv.Environment) {
+			var (
+				numOfOperations = int64(10)
+				done            sync.WaitGroup
+			)
+			done.Add(int(numOfOperations))
+
+			// Wait for all subscriptions to be established before triggering
+			go func() {
+				xEnv.WaitForSubscriptionCount(uint64(numOfOperations), time.Second*15)
+				xEnv.WaitForTriggerCount(1, time.Second*15)
+				// Trigger the subscription via NATS to get updates for all subscriptions
+				xEnv.NATSPublishUntilReceived(xEnv.NatsConnectionDefault, xEnv.GetPubSubName("employeeUpdated.3"), []byte(`{"id":3,"__typename": "Employee"}`), 1, time.Second*15)
+			}()
+
+			for range numOfOperations {
+				go func() {
+					defer done.Done()
+
+					conn := xEnv.InitGraphQLWebSocketConnection(nil, nil, nil)
+					defer conn.Close()
+
+					err := testenv.WSWriteJSON(t, conn, &testenv.WebSocketMessage{
+						ID:      "1",
+						Type:    "subscribe",
+						Payload: []byte(`{"query":"subscription { employeeUpdated(employeeID: 3) { id details { forename surname } } }"}`),
+					})
+					require.NoError(t, err)
+
+					// Read one message to ensure subscription is working
+					var msg testenv.WebSocketMessage
+					err = testenv.WSReadJSON(t, conn, &msg)
+					require.NoError(t, err)
+					require.Equal(t, "next", msg.Type)
+					require.Equal(t, "1", msg.ID)
+
+					// Complete the subscription
+					err = testenv.WSWriteJSON(t, conn, &testenv.WebSocketMessage{
+						ID:   "1",
+						Type: "complete",
+					})
+					require.NoError(t, err)
+
+					// Read the complete message
+					var complete testenv.WebSocketMessage
+					err = conn.SetReadDeadline(time.Now().Add(1 * time.Second))
+					require.NoError(t, err)
+					err = testenv.WSReadJSON(t, conn, &complete)
+					require.NoError(t, err)
+					require.Equal(t, "complete", complete.Type)
+					require.Equal(t, "1", complete.ID)
+				}()
+			}
+			done.Wait()
+			xEnv.WaitForSubscriptionCount(0, time.Second*5)
+
+			// We expect no request de-duplication because single flight is disabled
+			// This subscription involves multiple subgraphs:
+			// - employees subgraph: provides the subscription root and id field
+			// - family subgraph: provides details.forename and details.surname fields
+			actualSubgraphRequests := xEnv.SubgraphRequestCount.Global.Load()
+			require.Equal(t, numOfOperations, actualSubgraphRequests)
+		})
+	})
+	t.Run("subscription deduplication with multiple subgraphs - same headers", func(t *testing.T) {
+		t.Parallel()
+		testenv.Run(t, &testenv.Config{
+			RouterConfigJSONTemplate: testenv.ConfigWithEdfsNatsJSONTemplate,
+			EnableNats:               true,
+			Subgraphs: testenv.SubgraphsConfig{
+				GlobalDelay: time.Millisecond * 100,
+			},
+			RouterOptions: []core.Option{
+				core.WithEngineExecutionConfig(config.EngineExecutionConfiguration{
+					EnableSingleFlight:      true,
+					ForceEnableSingleFlight: false,
+					MaxConcurrentResolvers:  0,
+					Debug: config.EngineDebugConfiguration{
+						ReportWebSocketConnections: true,
+					},
+				}),
+				core.WithHeaderRules(config.HeaderRules{
+					All: &config.GlobalHeaderRule{
+						Request: []*config.RequestHeaderRule{
+							{
+								Named:     "Authorization",
+								Operation: config.HeaderRuleOperationPropagate,
+							},
+						},
+					},
+				}),
+			},
+		}, func(t *testing.T, xEnv *testenv.Environment) {
+			var (
+				numOfOperations = int64(10)
+				done            sync.WaitGroup
+			)
+			done.Add(int(numOfOperations))
+
+			// Wait for all subscriptions to be established before triggering
+			go func() {
+				xEnv.WaitForSubscriptionCount(uint64(numOfOperations), time.Second*15)
+				xEnv.WaitForTriggerCount(1, time.Second*15)
+				// Trigger the subscription via NATS to get updates for all subscriptions
+				xEnv.NATSPublishUntilReceived(xEnv.NatsConnectionDefault, xEnv.GetPubSubName("employeeUpdated.3"), []byte(`{"id":3,"__typename": "Employee"}`), 1, time.Second*15)
+			}()
+
+			for range numOfOperations {
+				go func() {
+					defer done.Done()
+
+					conn := xEnv.InitGraphQLWebSocketConnection(http.Header{
+						"Authorization": []string{"Bearer test"},
+					}, nil, nil)
+					defer conn.Close()
+
+					err := testenv.WSWriteJSON(t, conn, &testenv.WebSocketMessage{
+						ID:      "1",
+						Type:    "subscribe",
+						Payload: []byte(`{"query":"subscription { employeeUpdated(employeeID: 3) { id details { forename surname } } }"}`),
+					})
+					require.NoError(t, err)
+
+					// Read one message to ensure subscription is working
+					var msg testenv.WebSocketMessage
+					err = testenv.WSReadJSON(t, conn, &msg)
+					require.NoError(t, err)
+					require.Equal(t, "next", msg.Type)
+					require.Equal(t, "1", msg.ID)
+
+					// Complete the subscription
+					err = testenv.WSWriteJSON(t, conn, &testenv.WebSocketMessage{
+						ID:   "1",
+						Type: "complete",
+					})
+					require.NoError(t, err)
+
+					// Read the complete message
+					var complete testenv.WebSocketMessage
+					err = conn.SetReadDeadline(time.Now().Add(1 * time.Second))
+					require.NoError(t, err)
+					err = testenv.WSReadJSON(t, conn, &complete)
+					require.NoError(t, err)
+					require.Equal(t, "complete", complete.Type)
+					require.Equal(t, "1", complete.ID)
+				}()
+			}
+			done.Wait()
+			xEnv.WaitForSubscriptionCount(0, time.Second*5)
+
+			// We expect request de-duplication because same headers should be de-duplicated
+			// This subscription involves multiple subgraphs:
+			// - employees subgraph: provides the subscription root and id field
+			// - family subgraph: provides details.forename and details.surname fields
+			actualSubgraphRequests := xEnv.SubgraphRequestCount.Global.Load()
+			require.Less(t, actualSubgraphRequests, numOfOperations)
+		})
+	})
+	// All subscriptions share a single EDFS trigger regardless of their headers, because the
+	// trigger ID of a pubsub source is derived from the subject and provider only. The nested
+	// fetches each subscription performs to resolve its response are still built from the
+	// per-request propagated headers, so those must not be de-duplicated by single flight.
+	t.Run("subscription with different headers does not deduplicate subgraph fetches", func(t *testing.T) {
+		t.Parallel()
+		testenv.Run(t, &testenv.Config{
+			RouterConfigJSONTemplate: testenv.ConfigWithEdfsNatsJSONTemplate,
+			EnableNats:               true,
+			Subgraphs: testenv.SubgraphsConfig{
+				GlobalDelay: time.Millisecond * 100,
+			},
+			RouterOptions: []core.Option{
+				core.WithEngineExecutionConfig(config.EngineExecutionConfiguration{
+					EnableSingleFlight:      true,
+					ForceEnableSingleFlight: false,
+					MaxConcurrentResolvers:  0,
+					Debug: config.EngineDebugConfiguration{
+						ReportWebSocketConnections: true,
+					},
+				}),
+				core.WithHeaderRules(config.HeaderRules{
+					All: &config.GlobalHeaderRule{
+						Request: []*config.RequestHeaderRule{
+							{
+								Named:     "Authorization",
+								Operation: config.HeaderRuleOperationPropagate,
+							},
+						},
+					},
+				}),
+			},
+		}, func(t *testing.T, xEnv *testenv.Environment) {
+			var (
+				numOfOperations = int64(10)
+				done            sync.WaitGroup
+			)
+			done.Add(int(numOfOperations))
+
+			// Wait for all subscriptions to be established before triggering. The differing
+			// Authorization headers do not split the trigger, so a single message fans out
+			// to all subscriptions.
+			go func() {
+				xEnv.WaitForSubscriptionCount(uint64(numOfOperations), time.Second*15)
+				xEnv.WaitForTriggerCount(1, time.Second*15)
+				// Trigger the subscription via NATS to get updates for all subscriptions
+				xEnv.NATSPublishUntilReceived(xEnv.NatsConnectionDefault, xEnv.GetPubSubName("employeeUpdated.3"), []byte(`{"id":3,"__typename": "Employee"}`), 1, time.Second*15)
+			}()
+
+			for i := range numOfOperations {
+				go func(index int64) {
+					defer done.Done()
+
+					conn := xEnv.InitGraphQLWebSocketConnection(http.Header{
+						"Authorization": []string{fmt.Sprintf("Bearer test-%d", index)},
+					}, nil, nil)
+					defer conn.Close()
+
+					err := testenv.WSWriteJSON(t, conn, &testenv.WebSocketMessage{
+						ID:      "1",
+						Type:    "subscribe",
+						Payload: []byte(`{"query":"subscription { employeeUpdated(employeeID: 3) { id details { forename surname } } }"}`),
+					})
+					require.NoError(t, err)
+
+					// Read one message to ensure subscription is working
+					var msg testenv.WebSocketMessage
+					err = testenv.WSReadJSON(t, conn, &msg)
+					require.NoError(t, err)
+					require.Equal(t, "next", msg.Type)
+					require.Equal(t, "1", msg.ID)
+
+					// Complete the subscription
+					err = testenv.WSWriteJSON(t, conn, &testenv.WebSocketMessage{
+						ID:   "1",
+						Type: "complete",
+					})
+					require.NoError(t, err)
+
+					// Read the complete message
+					var complete testenv.WebSocketMessage
+					err = conn.SetReadDeadline(time.Now().Add(1 * time.Second))
+					require.NoError(t, err)
+					err = testenv.WSReadJSON(t, conn, &complete)
+					require.NoError(t, err)
+					require.Equal(t, "complete", complete.Type)
+					require.Equal(t, "1", complete.ID)
+				}(i)
+			}
+			done.Wait()
+			xEnv.WaitForSubscriptionCount(0, time.Second*5)
+
+			// We expect no request de-duplication because the fetches carry different headers.
+			// The NATS event itself supplies __typename and id — the only fields the pubsub
+			// data source owns — so resolving details.forename and details.surname costs one
+			// entity fetch to the employees subgraph per subscription: 10 in total.
+			actualSubgraphRequests := xEnv.SubgraphRequestCount.Global.Load()
+			require.Equal(t, numOfOperations, actualSubgraphRequests)
+			require.Equal(t, numOfOperations, xEnv.SubgraphRequestCount.Employees.Load())
+		})
+	})
+	t.Run("mutation with multiple subgraphs deduplication", func(t *testing.T) {
+		t.Parallel()
+		testenv.Run(t, &testenv.Config{
+			Subgraphs: testenv.SubgraphsConfig{
+				GlobalDelay: time.Millisecond * 100,
+			},
+			RouterOptions: []core.Option{
+				core.WithEngineExecutionConfig(config.EngineExecutionConfiguration{
+					EnableSingleFlight:      true,
+					ForceEnableSingleFlight: false,
+					MaxConcurrentResolvers:  0,
+				}),
+			},
+		}, func(t *testing.T, xEnv *testenv.Environment) {
+			var (
+				numOfOperations = int64(10)
+				ready, done     sync.WaitGroup
+			)
+			ready.Add(int(numOfOperations))
+			done.Add(int(numOfOperations))
+			trigger := make(chan struct{})
+			for range numOfOperations {
+				go func() {
+					ready.Done()
+					defer done.Done()
+					<-trigger
+					res := xEnv.MakeGraphQLRequestOK(testenv.GraphQLRequest{
+						Query: `mutation { updateMood(employeeID: 1, mood: HAPPY) { id currentMood isAvailable tag } }`,
+					})
+					require.Contains(t, res.Body, `"updateMood"`)
+				}()
+			}
+			ready.Wait()
+			close(trigger)
+			done.Wait()
+
+			// The mutation is called 10 times (mutations must not be deduplicated at the root level)
+			// However, the subgraph requests for fetching additional fields (like isAvailable, tag, currentMood)
+			// should be deduplicated since they are queries to other subgraphs
+			moodRequests := xEnv.SubgraphRequestCount.Mood.Load()
+			availabilityRequests := xEnv.SubgraphRequestCount.Availability.Load()
+
+			// The mood subgraph receives the mutation, but the additional field requests to availability
+			// and global subgraphs should be deduplicated
+			require.Equal(t, numOfOperations, moodRequests) // Mutation calls mood subgraph 10 times
+			require.Less(t, availabilityRequests, numOfOperations)
+		})
+	})
+	t.Run("mutation with EnableInboundRequestDeduplication enabled - should not deduplicate", func(t *testing.T) {
+		t.Parallel()
+		testenv.Run(t, &testenv.Config{
+			Subgraphs: testenv.SubgraphsConfig{
+				GlobalDelay: time.Millisecond * 100,
+			},
+			RouterOptions: []core.Option{
+				core.WithEngineExecutionConfig(config.EngineExecutionConfiguration{
+					EnableSingleFlight:                true,
+					ForceEnableSingleFlight:           false,
+					EnableInboundRequestDeduplication: true,
+					MaxConcurrentResolvers:            0,
+				}),
+			},
+		}, func(t *testing.T, xEnv *testenv.Environment) {
+			var (
+				numOfOperations = int64(10)
+				ready, done     sync.WaitGroup
+			)
+			ready.Add(int(numOfOperations))
+			done.Add(int(numOfOperations))
+			trigger := make(chan struct{})
+			for range numOfOperations {
+				go func() {
+					ready.Done()
+					defer done.Done()
+					<-trigger
+					res := xEnv.MakeGraphQLRequestOK(testenv.GraphQLRequest{
+						Query: `mutation { updateMood(employeeID: 1, mood: HAPPY) { id currentMood } }`,
+					})
+					require.Contains(t, res.Body, `"updateMood"`)
+				}()
+			}
+			ready.Wait()
+			close(trigger)
+			done.Wait()
+
+			// Even with EnableInboundRequestDeduplication enabled, mutations should not be deduplicated
+			moodRequests := xEnv.SubgraphRequestCount.Mood.Load()
+			require.Equal(t, numOfOperations, moodRequests)
+		})
+	})
+	t.Run("query with both SingleFlight and InboundRequestDeduplication enabled - should deduplicate both", func(t *testing.T) {
+		t.Parallel()
+		testenv.Run(t, &testenv.Config{
+			Subgraphs: testenv.SubgraphsConfig{
+				GlobalDelay: time.Millisecond * 100,
+			},
+			RouterOptions: []core.Option{
+				core.WithEngineExecutionConfig(config.EngineExecutionConfiguration{
+					EnableSingleFlight:                true,
+					ForceEnableSingleFlight:           false,
+					EnableInboundRequestDeduplication: true,
+					MaxConcurrentResolvers:            0,
+				}),
+			},
+		}, func(t *testing.T, xEnv *testenv.Environment) {
+			var (
+				numOfOperations = int64(10)
+				ready, done     sync.WaitGroup
+			)
+			ready.Add(int(numOfOperations))
+			done.Add(int(numOfOperations))
+			trigger := make(chan struct{})
+			for range numOfOperations {
+				go func() {
+					ready.Done()
+					defer done.Done()
+					<-trigger
+					res := xEnv.MakeGraphQLRequestOK(testenv.GraphQLRequest{
+						Query: `{ employee(id: 1) { id details { forename surname } isAvailable currentMood } }`,
+					})
+					require.Contains(t, res.Body, `"employee"`)
+				}()
+			}
+			ready.Wait()
+			close(trigger)
+			done.Wait()
+
+			// With both flags enabled, we should see deduplication at both levels
+			globalRequests := xEnv.SubgraphRequestCount.Global.Load()
+			familyRequests := xEnv.SubgraphRequestCount.Family.Load()
+			availabilityRequests := xEnv.SubgraphRequestCount.Availability.Load()
+			moodRequests := xEnv.SubgraphRequestCount.Mood.Load()
+
+			// The root operation should be deduplicated (less than 10 inbound requests)
+			// and the subgraph requests should also be deduplicated
+			require.Less(t, globalRequests, numOfOperations)
+			require.Less(t, familyRequests, numOfOperations)
+			require.Less(t, availabilityRequests, numOfOperations)
+			require.Less(t, moodRequests, numOfOperations)
+		})
+	})
+	t.Run("query with unique variables - should not deduplicate", func(t *testing.T) {
+		t.Parallel()
+		testenv.Run(t, &testenv.Config{
+			Subgraphs: testenv.SubgraphsConfig{
+				GlobalDelay: time.Millisecond * 100,
+			},
+			RouterOptions: []core.Option{
+				core.WithEngineExecutionConfig(config.EngineExecutionConfiguration{
+					EnableSingleFlight:                true,
+					ForceEnableSingleFlight:           false,
+					EnableInboundRequestDeduplication: true,
+					MaxConcurrentResolvers:            0,
+				}),
+			},
+		}, func(t *testing.T, xEnv *testenv.Environment) {
+			var (
+				numOfOperations = int64(10)
+				ready, done     sync.WaitGroup
+			)
+			ready.Add(int(numOfOperations))
+			done.Add(int(numOfOperations))
+			trigger := make(chan struct{})
+			for i := range numOfOperations {
+				go func(index int64) {
+					ready.Done()
+					defer done.Done()
+					<-trigger
+					res := xEnv.MakeGraphQLRequestOK(testenv.GraphQLRequest{
+						Query:     `query($id: Int!) { employee(id: $id) { id tag details { forename } } }`,
+						Variables: fmt.Appendf(nil, `{"id": %d}`, index),
+					})
+					v, err := astjson.Parse(res.Body)
+					require.NoError(t, err)
+					emp := v.Get("data", "employee")
+					if emp.Type() == astjson.TypeObject {
+						forename := string(emp.GetStringBytes("details", "forename"))
+						require.NotEmpty(t, forename)
+						id := emp.GetInt("id")
+						require.Equal(t, int(index), id)
+					}
+				}(i)
+			}
+			ready.Wait()
+			close(trigger)
+			done.Wait()
+
+			// With unique variables in each request, we should see no deduplication
+			globalRequests := xEnv.SubgraphRequestCount.Global.Load()
+			require.Equal(t, numOfOperations, globalRequests)
+		})
+	})
+	t.Run("query with unique headers - should not deduplicate", func(t *testing.T) {
+		t.Parallel()
+		testenv.Run(t, &testenv.Config{
+			Subgraphs: testenv.SubgraphsConfig{
+				GlobalDelay: time.Millisecond * 100,
+			},
+			RouterOptions: []core.Option{
+				core.WithEngineExecutionConfig(config.EngineExecutionConfiguration{
+					EnableSingleFlight:                true,
+					ForceEnableSingleFlight:           false,
+					EnableInboundRequestDeduplication: true,
+					MaxConcurrentResolvers:            0,
+				}),
+				core.WithHeaderRules(config.HeaderRules{
+					All: &config.GlobalHeaderRule{
+						Request: []*config.RequestHeaderRule{
+							{
+								Named:     "X-Request-ID",
+								Operation: config.HeaderRuleOperationPropagate,
+							},
+						},
+					},
+				}),
+			},
+		}, func(t *testing.T, xEnv *testenv.Environment) {
+			var (
+				numOfOperations = int64(10)
+				ready, done     sync.WaitGroup
+			)
+			ready.Add(int(numOfOperations))
+			done.Add(int(numOfOperations))
+			trigger := make(chan struct{})
+			for i := range numOfOperations {
+				go func(index int64) {
+					ready.Done()
+					defer done.Done()
+					<-trigger
+					res := xEnv.MakeGraphQLRequestOK(testenv.GraphQLRequest{
+						Query: `{ employee(id: 1) { id tag } }`,
+						Header: http.Header{
+							"X-Request-ID": []string{fmt.Sprintf("request-%d", index)},
+						},
+					})
+					require.Contains(t, res.Body, `"employee"`)
+				}(i)
+			}
+			ready.Wait()
+			close(trigger)
+			done.Wait()
+
+			// With unique headers in each request, we should see no deduplication
+			globalRequests := xEnv.SubgraphRequestCount.Global.Load()
+			require.Equal(t, numOfOperations, globalRequests)
+		})
+	})
+	t.Run("different variables with warm cache should not collide in inbound dedup", func(t *testing.T) {
+		t.Parallel()
+		testenv.Run(t, &testenv.Config{
+			Subgraphs: testenv.SubgraphsConfig{
+				GlobalDelay: time.Millisecond * 100,
+			},
+			RouterOptions: []core.Option{
+				core.WithEngineExecutionConfig(config.EngineExecutionConfiguration{
+					EnableSingleFlight:                true,
+					ForceEnableSingleFlight:           false,
+					EnableInboundRequestDeduplication: true,
+					MaxConcurrentResolvers:            0,
+				}),
+			},
+		}, func(t *testing.T, xEnv *testenv.Environment) {
+			variableValues := []int{1, 2, 3, 4, 5}
+
+			// Phase 1: Warm the variables normalization cache with sequential requests
+			for _, id := range variableValues {
+				res := xEnv.MakeGraphQLRequestOK(testenv.GraphQLRequest{
+					Query:     `query($id: Int!) { employee(id: $id) { id details { forename } } }`,
+					Variables: fmt.Appendf(nil, `{"id": %d}`, id),
+				})
+				v, err := astjson.Parse(res.Body)
+				require.NoError(t, err)
+				emp := v.Get("data", "employee")
+				require.NotNil(t, emp, "expected employee object in response for id=%d", id)
+				require.Equal(t, id, emp.GetInt("id"))
+			}
+
+			// Phase 2: Send concurrent requests with different variables (cache is now warm)
+			// Without the fix, all cache-hit requests get VariablesHash=0, causing them to
+			// collide in the inbound singleflight and return wrong data.
+			numPerVariable := 2
+			total := numPerVariable * len(variableValues)
+			var (
+				ready, done sync.WaitGroup
+			)
+			ready.Add(total)
+			trigger := make(chan struct{})
+
+			type result struct {
+				body      string
+				requested int
+			}
+			results := make([]result, total)
+
+			idx := 0
+			for _, id := range variableValues {
+				for range numPerVariable {
+					slot := idx
+					varVal := id
+					done.Go(func() {
+						ready.Done()
+						<-trigger
+						res := xEnv.MakeGraphQLRequestOK(testenv.GraphQLRequest{
+							Query:     `query($id: Int!) { employee(id: $id) { id details { forename } } }`,
+							Variables: fmt.Appendf(nil, `{"id": %d}`, varVal),
+						})
+						results[slot] = result{body: res.Body, requested: varVal}
+					})
+					idx++
+				}
+			}
+			ready.Wait()
+			close(trigger)
+			done.Wait()
+
+			// Verify each response matches its requested variable (no cross-contamination)
+			for _, r := range results {
+				v, err := astjson.Parse(r.body)
+				require.NoError(t, err)
+				emp := v.Get("data", "employee")
+				require.NotNil(t, emp, "expected employee object in response for id=%d", r.requested)
+				actualID := emp.GetInt("id")
+				require.Equal(t, r.requested, actualID,
+					"response for variable id=%d returned employee id=%d (cross-contamination)", r.requested, actualID)
+			}
+		})
+	})
+	t.Run("response header set rule with singleflight followers is internal only", func(t *testing.T) {
+		t.Parallel()
+		testenv.Run(t, &testenv.Config{
+			Subgraphs: testenv.SubgraphsConfig{
+				GlobalDelay: time.Millisecond * 100,
+			},
+			RouterOptions: []core.Option{
+				core.WithEngineExecutionConfig(config.EngineExecutionConfiguration{
+					EnableSingleFlight:     true,
+					MaxConcurrentResolvers: 0,
+				}),
+				core.WithHeaderRules(config.HeaderRules{
+					All: &config.GlobalHeaderRule{
+						Response: []*config.ResponseHeaderRule{
+							{
+								Operation: config.HeaderRuleOperationSet,
+								Name:      "X-Custom-Header",
+								Value:     "test-value",
+							},
+						},
+					},
+				}),
+			},
+		}, func(t *testing.T, xEnv *testenv.Environment) {
+			responses := runConcurrentSingleflightRequests(t, xEnv, `{ employee(id: 1) { id } }`, 5)
+			for i, res := range responses {
+				require.Equal(t, `{"data":{"employee":{"id":1}}}`, res.Body)
+				require.Equal(t, "", res.Response.Header.Get("X-Custom-Header"),
+					"response %d: set response headers should not be forwarded to the client", i)
+			}
+		})
+	})
+	t.Run("cache control propagation with singleflight followers", func(t *testing.T) {
+		t.Parallel()
+		testenv.Run(t, &testenv.Config{
+			CacheControlPolicy: config.CacheControlPolicy{
+				Enabled: true,
+				Value:   "max-age=300",
+			},
+			Subgraphs: testenv.SubgraphsConfig{
+				GlobalDelay: time.Millisecond * 100,
+				Employees: testenv.SubgraphConfig{
+					Middleware: func(handler http.Handler) http.Handler {
+						return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+							w.Header().Set("Cache-Control", "max-age=120")
+							handler.ServeHTTP(w, r)
+						})
+					},
+				},
+			},
+			RouterOptions: []core.Option{
+				core.WithEngineExecutionConfig(config.EngineExecutionConfiguration{
+					EnableSingleFlight:     true,
+					MaxConcurrentResolvers: 0,
+				}),
+			},
+		}, func(t *testing.T, xEnv *testenv.Environment) {
+			// Verify single request works
+			res := xEnv.MakeGraphQLRequestOK(testenv.GraphQLRequest{
+				Query: `{ employee(id: 1) { id } }`,
+			})
+			require.Equal(t, "max-age=120", res.Response.Header.Get("Cache-Control"), "single request should have Cache-Control")
+
+			responses := runConcurrentSingleflightRequests(t, xEnv, `{ employee(id: 1) { id } }`, 5)
+			for i, res := range responses {
+				require.Equal(t, "max-age=120", res.Response.Header.Get("Cache-Control"),
+					"response %d has wrong Cache-Control header", i)
+			}
+		})
+	})
+	t.Run("multiple response set rules with singleflight followers are internal only", func(t *testing.T) {
+		t.Parallel()
+		testenv.Run(t, &testenv.Config{
+			Subgraphs: testenv.SubgraphsConfig{
+				GlobalDelay: time.Millisecond * 100,
+			},
+			RouterOptions: []core.Option{
+				core.WithEngineExecutionConfig(config.EngineExecutionConfiguration{
+					EnableSingleFlight:     true,
+					MaxConcurrentResolvers: 0,
+				}),
+				core.WithHeaderRules(config.HeaderRules{
+					All: &config.GlobalHeaderRule{
+						Response: []*config.ResponseHeaderRule{
+							{
+								Operation: config.HeaderRuleOperationSet,
+								Name:      "X-Header-A",
+								Value:     "value-a",
+							},
+							{
+								Operation: config.HeaderRuleOperationSet,
+								Name:      "X-Header-B",
+								Value:     "value-b",
+							},
+						},
+					},
+				}),
+			},
+		}, func(t *testing.T, xEnv *testenv.Environment) {
+			// Verify single request works — set headers are internal only
+			res := xEnv.MakeGraphQLRequestOK(testenv.GraphQLRequest{
+				Query: `{ employee(id: 1) { id } }`,
+			})
+			require.Equal(t, "", res.Response.Header.Get("X-Header-A"), "set response headers should not be forwarded to the client")
+			require.Equal(t, "", res.Response.Header.Get("X-Header-B"), "set response headers should not be forwarded to the client")
+
+			responses := runConcurrentSingleflightRequests(t, xEnv, `{ employee(id: 1) { id } }`, 5)
+			for i, res := range responses {
+				require.Equal(t, "", res.Response.Header.Get("X-Header-A"),
+					"response %d: set response headers should not be forwarded to the client", i)
+				require.Equal(t, "", res.Response.Header.Get("X-Header-B"),
+					"response %d: set response headers should not be forwarded to the client", i)
+			}
+		})
+	})
+	t.Run("multi-subgraph response set with singleflight is internal only", func(t *testing.T) {
+		t.Parallel()
+		testenv.Run(t, &testenv.Config{
+			Subgraphs: testenv.SubgraphsConfig{
+				GlobalDelay: time.Millisecond * 100,
+			},
+			RouterOptions: []core.Option{
+				core.WithEngineExecutionConfig(config.EngineExecutionConfiguration{
+					EnableSingleFlight:     true,
+					MaxConcurrentResolvers: 0,
+				}),
+				core.WithHeaderRules(config.HeaderRules{
+					All: &config.GlobalHeaderRule{
+						Response: []*config.ResponseHeaderRule{
+							{
+								Operation: config.HeaderRuleOperationSet,
+								Name:      "X-Custom-Header",
+								Value:     "multi-subgraph-value",
+							},
+						},
+					},
+				}),
+			},
+		}, func(t *testing.T, xEnv *testenv.Environment) {
+			// This query fans out to multiple subgraphs: employees, family, availability, mood
+			query := `{ employee(id: 1) { id details { forename surname } isAvailable currentMood } }`
+
+			responses := runConcurrentSingleflightRequests(t, xEnv, query, 5)
+			for i, res := range responses {
+				require.Contains(t, res.Body, `"employee"`)
+				require.Equal(t, "", res.Response.Header.Get("X-Custom-Header"),
+					"response %d: set response headers should not be forwarded to the client", i)
+			}
+		})
+	})
+	t.Run("subgraph-specific response set rule with singleflight is internal only", func(t *testing.T) {
+		t.Parallel()
+		testenv.Run(t, &testenv.Config{
+			Subgraphs: testenv.SubgraphsConfig{
+				GlobalDelay: time.Millisecond * 100,
+			},
+			RouterOptions: []core.Option{
+				core.WithEngineExecutionConfig(config.EngineExecutionConfiguration{
+					EnableSingleFlight:     true,
+					MaxConcurrentResolvers: 0,
+				}),
+				core.WithHeaderRules(config.HeaderRules{
+					Subgraphs: map[string]*config.GlobalHeaderRule{
+						"employees": {
+							Response: []*config.ResponseHeaderRule{
+								{
+									Operation: config.HeaderRuleOperationSet,
+									Name:      "X-Subgraph-Header",
+									Value:     "employees-value",
+								},
+							},
+						},
+					},
+				}),
+			},
+		}, func(t *testing.T, xEnv *testenv.Environment) {
+			// This query hits the employees subgraph, so the subgraph-specific rule should apply
+			responses := runConcurrentSingleflightRequests(t, xEnv, `{ employees { id } }`, 5)
+			for i, res := range responses {
+				require.Equal(t, `{"data":{"employees":[{"id":1},{"id":2},{"id":3},{"id":4},{"id":5},{"id":7},{"id":8},{"id":10},{"id":11},{"id":12}]}}`, res.Body)
+				require.Equal(t, "", res.Response.Header.Get("X-Subgraph-Header"),
+					"response %d: set response headers should not be forwarded to the client", i)
+			}
+		})
+	})
+	t.Run("mixed global and subgraph-specific response set rules with singleflight are internal only", func(t *testing.T) {
+		t.Parallel()
+		testenv.Run(t, &testenv.Config{
+			Subgraphs: testenv.SubgraphsConfig{
+				GlobalDelay: time.Millisecond * 100,
+			},
+			RouterOptions: []core.Option{
+				core.WithEngineExecutionConfig(config.EngineExecutionConfiguration{
+					EnableSingleFlight:     true,
+					MaxConcurrentResolvers: 0,
+				}),
+				core.WithHeaderRules(config.HeaderRules{
+					All: &config.GlobalHeaderRule{
+						Response: []*config.ResponseHeaderRule{
+							{
+								Operation: config.HeaderRuleOperationSet,
+								Name:      "X-Global-Header",
+								Value:     "global-value",
+							},
+						},
+					},
+					Subgraphs: map[string]*config.GlobalHeaderRule{
+						"employees": {
+							Response: []*config.ResponseHeaderRule{
+								{
+									Operation: config.HeaderRuleOperationSet,
+									Name:      "X-Employees-Header",
+									Value:     "employees-value",
+								},
+							},
+						},
+						"family": {
+							Response: []*config.ResponseHeaderRule{
+								{
+									Operation: config.HeaderRuleOperationSet,
+									Name:      "X-Family-Header",
+									Value:     "family-value",
+								},
+							},
+						},
+					},
+				}),
+			},
+		}, func(t *testing.T, xEnv *testenv.Environment) {
+			// This query fans out to employees (root) and family (entity resolution for hasChildren)
+			query := `{ employee(id: 1) { id details { forename hasChildren } } }`
+
+			responses := runConcurrentSingleflightRequests(t, xEnv, query, 5)
+			for i, res := range responses {
+				require.Contains(t, res.Body, `"employee"`)
+				require.Equal(t, "", res.Response.Header.Get("X-Global-Header"),
+					"response %d: set response headers should not be forwarded to the client", i)
+				require.Equal(t, "", res.Response.Header.Get("X-Employees-Header"),
+					"response %d: set response headers should not be forwarded to the client", i)
+				require.Equal(t, "", res.Response.Header.Get("X-Family-Header"),
+					"response %d: set response headers should not be forwarded to the client", i)
+			}
+		})
+	})
+	t.Run("propagate named response header with singleflight followers", func(t *testing.T) {
+		t.Parallel()
+		testenv.Run(t, &testenv.Config{
+			Subgraphs: testenv.SubgraphsConfig{
+				GlobalDelay: time.Millisecond * 100,
+				Employees: testenv.SubgraphConfig{
+					Middleware: func(handler http.Handler) http.Handler {
+						return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+							w.Header().Set("X-Custom-Header", "custom-value")
+							handler.ServeHTTP(w, r)
+						})
+					},
+				},
+			},
+			RouterOptions: []core.Option{
+				core.WithEngineExecutionConfig(config.EngineExecutionConfiguration{
+					EnableSingleFlight:     true,
+					MaxConcurrentResolvers: 0,
+				}),
+				core.WithHeaderRules(config.HeaderRules{
+					All: &config.GlobalHeaderRule{
+						Response: []*config.ResponseHeaderRule{
+							{
+								Operation: config.HeaderRuleOperationPropagate,
+								Named:     "X-Custom-Header",
+								Algorithm: config.ResponseHeaderRuleAlgorithmLastWrite,
+							},
+						},
+					},
+				}),
+			},
+		}, func(t *testing.T, xEnv *testenv.Environment) {
+			responses := runConcurrentSingleflightRequests(t, xEnv, `{ employee(id: 1) { id } }`, 5)
+			for i, res := range responses {
+				require.Equal(t, `{"data":{"employee":{"id":1}}}`, res.Body)
+				require.Equal(t, "custom-value", res.Response.Header.Get("X-Custom-Header"),
+					"response %d missing propagated X-Custom-Header", i)
+			}
+		})
+	})
+	t.Run("most restrictive cache control with two subgraphs and singleflight", func(t *testing.T) {
+		t.Parallel()
+		testenv.Run(t, &testenv.Config{
+			CacheControlPolicy: config.CacheControlPolicy{
+				Enabled: true,
+			},
+			Subgraphs: testenv.SubgraphsConfig{
+				GlobalDelay: time.Millisecond * 100,
+				Employees: testenv.SubgraphConfig{
+					Middleware: func(handler http.Handler) http.Handler {
+						return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+							w.Header().Set("Cache-Control", "max-age=120")
+							handler.ServeHTTP(w, r)
+						})
+					},
+				},
+				Hobbies: testenv.SubgraphConfig{
+					Middleware: func(handler http.Handler) http.Handler {
+						return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+							w.Header().Set("Cache-Control", "max-age=60")
+							handler.ServeHTTP(w, r)
+						})
+					},
+				},
+			},
+			RouterOptions: []core.Option{
+				core.WithEngineExecutionConfig(config.EngineExecutionConfiguration{
+					EnableSingleFlight:     true,
+					MaxConcurrentResolvers: 0,
+				}),
+			},
+		}, func(t *testing.T, xEnv *testenv.Environment) {
+			// Query that fans out to employees + hobbies
+			query := `{ employee(id: 1) { id hobbies { ... on Gaming { name } } } }`
+
+			responses := runConcurrentSingleflightRequests(t, xEnv, query, 5)
+			for i, res := range responses {
+				require.Contains(t, res.Body, `"employee"`)
+				require.Equal(t, "max-age=60", res.Response.Header.Get("Cache-Control"),
+					"response %d should have most restrictive Cache-Control (max-age=60)", i)
+			}
+		})
+	})
+	t.Run("subgraph-specific propagate rule with entity resolution and singleflight", func(t *testing.T) {
+		t.Parallel()
+		testenv.Run(t, &testenv.Config{
+			Subgraphs: testenv.SubgraphsConfig{
+				GlobalDelay: time.Millisecond * 100,
+				Family: testenv.SubgraphConfig{
+					Middleware: func(handler http.Handler) http.Handler {
+						return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+							w.Header().Set("X-Family-Data", "family-resolved")
+							handler.ServeHTTP(w, r)
+						})
+					},
+				},
+			},
+			RouterOptions: []core.Option{
+				core.WithEngineExecutionConfig(config.EngineExecutionConfiguration{
+					EnableSingleFlight:     true,
+					MaxConcurrentResolvers: 0,
+				}),
+				core.WithHeaderRules(config.HeaderRules{
+					Subgraphs: map[string]*config.GlobalHeaderRule{
+						"family": {
+							Response: []*config.ResponseHeaderRule{
+								{
+									Operation: config.HeaderRuleOperationPropagate,
+									Named:     "X-Family-Data",
+									Algorithm: config.ResponseHeaderRuleAlgorithmLastWrite,
+								},
+							},
+						},
+					},
+				}),
+			},
+		}, func(t *testing.T, xEnv *testenv.Environment) {
+			// Query triggers entity resolution to family subgraph for hasChildren
+			query := `{ employee(id: 1) { id details { forename hasChildren } } }`
+
+			responses := runConcurrentSingleflightRequests(t, xEnv, query, 5)
+			for i, res := range responses {
+				require.Contains(t, res.Body, `"employee"`)
+				require.Equal(t, "family-resolved", res.Response.Header.Get("X-Family-Data"),
+					"response %d missing propagated X-Family-Data from entity resolution", i)
+			}
+		})
+	})
+}
+
+// runConcurrentSingleflightRequests sends n identical GraphQL requests concurrently,
+// using a barrier to maximize overlap and trigger singleflight deduplication.
+func runConcurrentSingleflightRequests(t *testing.T, xEnv *testenv.Environment, query string, n int) []*testenv.TestResponse {
+	t.Helper()
+	var ready, done sync.WaitGroup
+	ready.Add(n)
+	trigger := make(chan struct{})
+	responses := make([]*testenv.TestResponse, n)
+	for i := range n {
+		idx := i
+		done.Go(func() {
+			ready.Done()
+			<-trigger
+			resp, err := xEnv.MakeGraphQLRequest(testenv.GraphQLRequest{Query: query})
+			require.NoError(t, err)
+			require.Equal(t, http.StatusOK, resp.Response.StatusCode)
+			responses[idx] = resp
+		})
+	}
+	ready.Wait()
+	close(trigger)
+	done.Wait()
+	return responses
+}

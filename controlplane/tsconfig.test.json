@@ -1,0 +1,16 @@
+{
+  "extends": "../tsconfig.base.json",
+  "compilerOptions": {
+    "moduleResolution": "NodeNext",
+    "declaration": false,
+    "target": "esnext",
+    "lib": ["ESNext", "DOM"],
+    "sourceMap": true,
+    "outDir": "./dist",
+    "rootDir": "..",
+    "module": "NodeNext",
+    "noEmit": true
+  },
+  "include": ["test/**/*", "src/redlock.d.ts"],
+  "exclude": ["node_modules"]
+}

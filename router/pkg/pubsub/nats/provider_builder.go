@@ -1,0 +1,202 @@
+package nats
+
+import (
+	"context"
+	"crypto/tls"
+	"crypto/x509"
+	"errors"
+	"fmt"
+	"os"
+	"time"
+
+	"github.com/nats-io/nats.go"
+	nodev1 "github.com/wundergraph/cosmo/router/gen/proto/wg/cosmo/node/v1"
+	"github.com/wundergraph/cosmo/router/pkg/config"
+	"github.com/wundergraph/cosmo/router/pkg/pubsub/datasource"
+	"go.uber.org/zap"
+)
+
+const providerTypeID = "nats"
+
+type ProviderBuilder struct {
+	ctx              context.Context
+	logger           *zap.Logger
+	hostName         string
+	routerListenAddr string
+}
+
+func (p *ProviderBuilder) TypeID() string {
+	return providerTypeID
+}
+
+func (p *ProviderBuilder) BuildEngineDataSourceFactory(data *nodev1.NatsEventConfiguration, providers map[string]datasource.Provider) (datasource.EngineDataSourceFactory, error) {
+	providerId := data.GetEngineEventConfiguration().GetProviderId()
+	provider, ok := providers[providerId]
+	if !ok {
+		return nil, fmt.Errorf("failed to get adapter for provider %s with ID %s", p.TypeID(), providerId)
+	}
+
+	var eventType EventType
+	switch data.GetEngineEventConfiguration().GetType() {
+	case nodev1.EventType_PUBLISH:
+		eventType = EventTypePublish
+	case nodev1.EventType_SUBSCRIBE:
+		eventType = EventTypeSubscribe
+	case nodev1.EventType_REQUEST:
+		eventType = EventTypeRequest
+	default:
+		return nil, fmt.Errorf("unsupported event type: %s", data.GetEngineEventConfiguration().GetType())
+	}
+	dataSourceFactory := &EngineDataSourceFactory{
+		NatsAdapter:             provider,
+		fieldName:               data.GetEngineEventConfiguration().GetFieldName(),
+		eventType:               eventType,
+		subjects:                data.GetSubjects(),
+		providerId:              providerId,
+		withStreamConfiguration: data.GetStreamConfiguration() != nil,
+		logger:                  p.logger,
+		deliveryGuaranteeMode:   datasource.NewDeliveryGuaranteeMode(data.GetEngineEventConfiguration()),
+	}
+
+	if data.GetStreamConfiguration() != nil {
+		dataSourceFactory.withStreamConfiguration = true
+		dataSourceFactory.consumerName = data.GetStreamConfiguration().GetConsumerName()
+		dataSourceFactory.streamName = data.GetStreamConfiguration().GetStreamName()
+		dataSourceFactory.consumerInactiveThreshold = data.GetStreamConfiguration().GetConsumerInactiveThreshold()
+	}
+
+	return dataSourceFactory, nil
+}
+
+func (p *ProviderBuilder) BuildProvider(provider config.NatsEventSource, providerOpts datasource.ProviderOpts) (datasource.Provider, error) {
+	pubSubProvider, err := buildProvider(p.ctx, provider, p.logger, p.hostName, p.routerListenAddr, providerOpts)
+	if err != nil {
+		return nil, err
+	}
+
+	return pubSubProvider, nil
+}
+
+func buildNatsOptions(eventSource config.NatsEventSource, logger *zap.Logger, skipUnavailable bool) ([]nats.Option, error) {
+	opts := []nats.Option{
+		nats.Name(fmt.Sprintf("cosmo.router.edfs.nats.%s", eventSource.ID)),
+		nats.ReconnectJitter(500*time.Millisecond, 2*time.Second),
+		nats.ClosedHandler(func(conn *nats.Conn) {
+			logger.Info("NATS connection closed", zap.String("provider_id", eventSource.ID), zap.Error(conn.LastError()))
+		}),
+		nats.ConnectHandler(func(nc *nats.Conn) {
+			logger.Info("NATS connection established", zap.String("provider_id", eventSource.ID), zap.String("url", nc.ConnectedUrlRedacted()))
+		}),
+		nats.DisconnectErrHandler(func(nc *nats.Conn, err error) {
+			if err != nil {
+				logger.Error("NATS disconnected; will attempt to reconnect", zap.Error(err), zap.String("provider_id", eventSource.ID))
+			} else {
+				logger.Info("NATS disconnected", zap.String("provider_id", eventSource.ID))
+			}
+		}),
+		nats.ErrorHandler(func(conn *nats.Conn, subscription *nats.Subscription, err error) {
+			if errors.Is(err, nats.ErrSlowConsumer) {
+				logger.Warn(
+					"NATS slow consumer detected. Events are being dropped. Please consider increasing the buffer size or reducing the number of messages being sent.",
+					zap.Error(err),
+					zap.String("provider_id", eventSource.ID),
+				)
+			} else {
+				logger.Error("NATS error", zap.Error(err))
+			}
+		}),
+		nats.ReconnectHandler(func(conn *nats.Conn) {
+			logger.Info("NATS reconnected", zap.String("provider_id", eventSource.ID), zap.String("url", conn.ConnectedUrlRedacted()))
+		}),
+	}
+
+	if eventSource.Authentication != nil {
+		if eventSource.Authentication.Token != nil {
+			opts = append(opts, nats.Token(*eventSource.Authentication.Token))
+		} else if eventSource.Authentication.UserInfo.Username != nil && eventSource.Authentication.UserInfo.Password != nil {
+			opts = append(opts, nats.UserInfo(*eventSource.Authentication.UserInfo.Username, *eventSource.Authentication.UserInfo.Password))
+		}
+	}
+
+	if eventSource.TLS != nil {
+		tlsCfg := &tls.Config{
+			InsecureSkipVerify: eventSource.TLS.InsecureSkipCaVerification,
+		}
+
+		if eventSource.TLS.InsecureSkipCaVerification {
+			logger.Warn("TLS InsecureSkipCaVerification is enabled for NATS provider. This is not recommended for production environments.", zap.String("provider_id", eventSource.ID))
+		}
+
+		if eventSource.TLS.CaFile != "" {
+			caPEM, err := os.ReadFile(eventSource.TLS.CaFile)
+			if err != nil {
+				return nil, fmt.Errorf("failed to read CA file %q: %w", eventSource.TLS.CaFile, err)
+			}
+			pool := x509.NewCertPool()
+			if !pool.AppendCertsFromPEM(caPEM) {
+				return nil, fmt.Errorf("failed to parse CA certificate from %q", eventSource.TLS.CaFile)
+			}
+			tlsCfg.RootCAs = pool
+		}
+
+		if eventSource.TLS.CertFile != "" || eventSource.TLS.KeyFile != "" {
+			if eventSource.TLS.CertFile == "" || eventSource.TLS.KeyFile == "" {
+				return nil, fmt.Errorf("both cert_file and key_file must be provided for mTLS on NATS provider %q", eventSource.ID)
+			}
+			cert, err := tls.LoadX509KeyPair(eventSource.TLS.CertFile, eventSource.TLS.KeyFile)
+			if err != nil {
+				return nil, fmt.Errorf("failed to load mTLS certificate/key for NATS provider %q: %w", eventSource.ID, err)
+			}
+			tlsCfg.Certificates = []tls.Certificate{cert}
+		}
+
+		opts = append(opts, nats.Secure(tlsCfg))
+	}
+
+	if skipUnavailable {
+		// Lenient mode (events.skip_unavailable_providers): do not fail the initial connect
+		// when the broker is unreachable. nats.Connect then returns a client in the
+		// reconnecting state instead of an error, and unlimited reconnects ensure the
+		// provider recovers on its own once the broker becomes reachable — no restart needed.
+		opts = append(opts,
+			nats.RetryOnFailedConnect(true),
+			nats.MaxReconnects(-1),
+		)
+	}
+
+	return opts, nil
+}
+
+func buildProvider(ctx context.Context, provider config.NatsEventSource, logger *zap.Logger, hostName string, routerListenAddr string, providerOpts datasource.ProviderOpts) (datasource.Provider, error) {
+	options, err := buildNatsOptions(provider, logger, providerOpts.SkipUnavailableProviders)
+	if err != nil {
+		return nil, fmt.Errorf("failed to build options for Nats provider with ID \"%s\": %w", provider.ID, err)
+	}
+
+	adapter, err := NewAdapter(ctx, logger, provider.URL, options, hostName, routerListenAddr, provider.DeleteDurableConsumersOnShutdown, providerOpts)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create adapter for Nats provider with ID \"%s\": %w", provider.ID, err)
+	}
+
+	eventBuilder := func(data []byte) datasource.MutableStreamEvent {
+		return &MutableEvent{Data: data}
+	}
+
+	pubSubProvider := datasource.NewPubSubProvider(provider.ID, providerTypeID, adapter, logger, eventBuilder)
+
+	return pubSubProvider, nil
+}
+
+func NewProviderBuilder(
+	ctx context.Context,
+	logger *zap.Logger,
+	hostName string,
+	routerListenAddr string,
+) datasource.ProviderBuilder[config.NatsEventSource, *nodev1.NatsEventConfiguration] {
+	return &ProviderBuilder{
+		ctx:              ctx,
+		logger:           logger,
+		hostName:         hostName,
+		routerListenAddr: routerListenAddr,
+	}
+}

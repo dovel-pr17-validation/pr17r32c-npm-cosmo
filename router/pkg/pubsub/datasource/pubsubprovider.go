@@ -1,0 +1,137 @@
+package datasource
+
+import (
+	"context"
+	"fmt"
+	"slices"
+
+	streamsv1 "github.com/wundergraph/cosmo/router/gen/proto/wg/cosmo/streams/v1"
+	"go.uber.org/zap"
+	"go.uber.org/zap/zapcore"
+)
+
+type PubSubProvider struct {
+	id           string
+	typeID       string
+	Adapter      Adapter
+	Logger       *zap.Logger
+	hooks        Hooks
+	eventBuilder EventBuilderFn
+}
+
+// applyPublishEventHooks processes events through a chain of hook functions
+// Each hook receives the result from the previous hook, creating a proper middleware pipeline
+func (p *PubSubProvider) applyPublishEventHooks(ctx context.Context, cfg PublishEventConfiguration, events []StreamEvent) (currentEvents []StreamEvent, err error) {
+	defer func() {
+		if r := recover(); r != nil {
+			p.Logger.
+				WithOptions(zap.AddStacktrace(zapcore.ErrorLevel)).
+				Error("[Recovery from handler panic]", zap.Any("error", r))
+
+			switch v := r.(type) {
+			case error:
+				err = v
+			default:
+				err = fmt.Errorf("%v", r)
+			}
+		}
+	}()
+
+	currentEvents = events
+
+	for _, hook := range p.hooks.OnPublishEvents.Handlers {
+		currentEvents, err = hook(ctx, cfg, currentEvents, p.eventBuilder)
+		if err != nil {
+			break
+		}
+	}
+
+	currentEvents = slices.DeleteFunc(currentEvents, func(event StreamEvent) bool {
+		return event == nil
+	})
+
+	return currentEvents, err
+}
+
+func (p *PubSubProvider) ID() string {
+	return p.id
+}
+
+func (p *PubSubProvider) TypeID() string {
+	return p.typeID
+}
+
+func (p *PubSubProvider) Startup(ctx context.Context) error {
+	if err := p.Adapter.Startup(ctx); err != nil {
+		return err
+	}
+	return nil
+}
+
+func (p *PubSubProvider) Shutdown(ctx context.Context) error {
+	// The adapter is always torn down, including when the provider could not connect at
+	// startup under events.skip_unavailable_providers: in that case the adapter still holds
+	// a resilient client that is reconnecting in the background, and it must be closed to
+	// avoid leaking that goroutine. Adapters guard their (possibly nil) connection fields,
+	// so this is safe even if startup never established a connection.
+	if err := p.Adapter.Shutdown(ctx); err != nil {
+		return err
+	}
+	return nil
+}
+
+func (p *PubSubProvider) Subscribe(ctx context.Context, cfg SubscriptionEventConfiguration, guarantee DeliveryGuarantee, updater SubscriptionEventUpdater) error {
+	return p.Adapter.Subscribe(ctx, cfg, guarantee, updater)
+}
+
+func (p *PubSubProvider) supportsCursorResume() bool {
+	_, ok := p.Adapter.(SeekableAdapter)
+	return ok
+}
+
+// SubscribeFrom forwards to the wrapped adapter if it can resume from a cursor, so the
+// provider satisfies SeekableAdapter exactly when its adapter does.
+func (p *PubSubProvider) SubscribeFrom(ctx context.Context, cfg SubscriptionEventConfiguration, cursor *streamsv1.Cursor, updater SubscriptionEventUpdater) error {
+	seekable, ok := p.Adapter.(SeekableAdapter)
+	if !ok {
+		return &DeliveryGuaranteeError{
+			Code:      DeliveryGuaranteeErrorCodeUnsupported,
+			Supported: SupportedDeliveryGuarantees(cfg.DeliveryGuaranteeMode()),
+			Message:   "This provider can't resume a subscription from a cursor",
+		}
+	}
+	return seekable.SubscribeFrom(ctx, cfg, cursor, updater)
+}
+
+func (p *PubSubProvider) Publish(ctx context.Context, cfg PublishEventConfiguration, events []StreamEvent) error {
+	if len(p.hooks.OnPublishEvents.Handlers) == 0 {
+		return p.Adapter.Publish(ctx, cfg, events)
+	}
+
+	processedEvents, hooksErr := p.applyPublishEventHooks(ctx, cfg, events)
+
+	errPublish := p.Adapter.Publish(ctx, cfg, processedEvents)
+	if errPublish != nil {
+		return errPublish
+	}
+
+	return hooksErr
+}
+
+func (p *PubSubProvider) SetHooks(hooks Hooks) {
+	p.hooks = hooks
+}
+
+func NewPubSubProvider(id string, typeID string, adapter Adapter, logger *zap.Logger, eventBuilder EventBuilderFn) *PubSubProvider {
+	if logger == nil {
+		logger = zap.NewNop()
+	}
+
+	return &PubSubProvider{
+		id:           id,
+		typeID:       typeID,
+		Adapter:      adapter,
+		Logger:       logger,
+		eventBuilder: eventBuilder,
+	}
+}

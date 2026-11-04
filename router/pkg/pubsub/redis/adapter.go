@@ -1,0 +1,281 @@
+package redis
+
+import (
+	"context"
+	"errors"
+	"fmt"
+	"strings"
+	"sync"
+	"time"
+
+	"github.com/wundergraph/cosmo/router/pkg/metric"
+
+	rd "github.com/wundergraph/cosmo/router/internal/rediscloser"
+	"github.com/wundergraph/cosmo/router/pkg/pubsub/datasource"
+	"go.uber.org/zap"
+)
+
+const (
+	redisPublish = "publish"
+	redisReceive = "receive"
+)
+
+// Ensure ProviderAdapter implements ProviderSubscriptionHooks
+var _ datasource.Adapter = (*ProviderAdapter)(nil)
+
+func NewProviderAdapter(ctx context.Context, logger *zap.Logger, urls []string, clusterEnabled bool, opts datasource.ProviderOpts) datasource.Adapter {
+	ctx, cancel := context.WithCancel(ctx)
+	if logger == nil {
+		logger = zap.NewNop()
+	}
+
+	var store metric.StreamMetricStore
+	if opts.StreamMetricStore != nil {
+		store = opts.StreamMetricStore
+	} else {
+		store = metric.NewNoopStreamMetricStore()
+	}
+
+	return &ProviderAdapter{
+		ctx:               ctx,
+		cancel:            cancel,
+		logger:            logger,
+		urls:              urls,
+		clusterEnabled:    clusterEnabled,
+		streamMetricStore: store,
+		skipUnavailable:   opts.SkipUnavailableProviders,
+	}
+}
+
+type ProviderAdapter struct {
+	ctx               context.Context
+	cancel            context.CancelFunc
+	conn              rd.RDCloser
+	logger            *zap.Logger
+	closeWg           sync.WaitGroup
+	urls              []string
+	clusterEnabled    bool
+	streamMetricStore metric.StreamMetricStore
+	// skipUnavailable mirrors events.skip_unavailable_providers. When true, Startup keeps
+	// the resilient client even if the initial connection check fails, so go-redis can
+	// reconnect on a later command and the provider recovers without a restart.
+	skipUnavailable bool
+}
+
+func (p *ProviderAdapter) Startup(ctx context.Context) error {
+	// Bound the initial connectivity check so a black-holed broker (SYN dropped) cannot block
+	// Startup for the full go-redis dial timeout, which could exceed the caller's startup
+	// timeout and leave this call running in a leaked goroutine.
+	pingCtx, cancel := context.WithTimeout(ctx, 3*time.Second)
+	defer cancel()
+	rdCloser, err := rd.NewRedisCloser(&rd.RedisCloserOptions{
+		Logger:         p.logger,
+		URLs:           p.urls,
+		ClusterEnabled: p.clusterEnabled,
+		Context:        pingCtx,
+	})
+	if err != nil {
+		if p.skipUnavailable && rdCloser != nil {
+			// Lenient mode: retain the client even though the initial connection check
+			// failed. go-redis is lazy and reconnects on the next command, so the provider
+			// recovers without a restart once the broker is reachable. The error is still
+			// returned so the caller can log a distinct "could not connect" message.
+			p.conn = rdCloser
+			return err
+		}
+		// Strict mode: the router will abort startup, so close the client we won't keep.
+		if rdCloser != nil {
+			_ = rdCloser.Close()
+		}
+		return err
+	}
+
+	p.conn = rdCloser
+
+	return nil
+}
+
+func (p *ProviderAdapter) Shutdown(ctx context.Context) error {
+	if p.conn == nil {
+		return nil
+	}
+
+	// Cancel the context to stop the subscriptions
+	p.cancel()
+
+	// Wait for the subscriptions to be closed
+	p.closeWg.Wait()
+
+	// Close the connection
+	return p.conn.Close()
+}
+
+func (p *ProviderAdapter) Subscribe(ctx context.Context, conf datasource.SubscriptionEventConfiguration, _ datasource.DeliveryGuarantee, updater datasource.SubscriptionEventUpdater) error {
+	subConf, ok := conf.(*SubscriptionEventConfiguration)
+	if !ok {
+		return datasource.NewError("subscription event not supported by redis provider", nil)
+	}
+
+	log := p.logger.With(
+		zap.String("provider_id", conf.ProviderID()),
+		zap.String("method", "subscribe"),
+		zap.Strings("channels", subConf.Channels),
+	)
+
+	// Guard the possibly-nil connection: in strict mode a failed Startup leaves p.conn nil
+	// (under skip_unavailable_providers the resilient client is retained instead), so return
+	// an error rather than panicking if Subscribe is somehow reached without a connection.
+	if p.conn == nil {
+		return datasource.NewError("redis connection not initialized", nil)
+	}
+
+	// Redis matches every PUBLISH against every registered pattern, so pattern
+	// subscriptions on literal channel names make each publish O(patterns). Only
+	// channels with glob syntax need PSUBSCRIBE.
+	var channels, patterns []string
+	for _, channel := range subConf.Channels {
+		if strings.ContainsAny(channel, `*?[\`) {
+			patterns = append(patterns, channel)
+		} else {
+			channels = append(channels, channel)
+		}
+	}
+
+	sub := p.conn.Subscribe(ctx, channels...)
+	if len(patterns) > 0 {
+		_ = sub.PSubscribe(ctx, patterns...)
+	}
+	msgChan := sub.Channel()
+
+	cleanup := func() {
+		if err := sub.Close(); err != nil {
+			log.Error("error closing redis subscription", zap.Error(err))
+		}
+	}
+
+	p.closeWg.Go(func() {
+		defer cleanup()
+
+		for {
+			select {
+			case msg, ok := <-msgChan:
+				if !ok {
+					log.Debug("subscription closed, stopping")
+					return
+				}
+				if msg == nil {
+					log.Debug("empty message received on subscription update, skipping")
+					return
+				}
+				log.Debug("subscription update", zap.String("message_channel", msg.Channel), zap.String("data", msg.Payload))
+				p.streamMetricStore.Consume(ctx, metric.StreamsEvent{
+					ProviderId:          conf.ProviderID(),
+					StreamOperationName: redisReceive,
+					ProviderType:        metric.ProviderTypeRedis,
+					DestinationName:     msg.Channel,
+				})
+				updater.Update([]datasource.StreamEvent{
+					&Event{evt: &MutableEvent{
+						Data: []byte(msg.Payload),
+					}},
+				})
+			case <-p.ctx.Done():
+				// When the application context is done, we stop the subscription if it is not already done
+				log.Debug("application context done, stopping subscription")
+				return
+			case <-ctx.Done():
+				// When the subscription context is done, we stop the subscription if it is not already done
+				log.Debug("subscription context done, stopping subscription")
+				return
+			}
+		}
+	})
+
+	return nil
+}
+
+func (p *ProviderAdapter) Publish(ctx context.Context, conf datasource.PublishEventConfiguration, events []datasource.StreamEvent) error {
+	pubConf, ok := conf.(*PublishEventConfiguration)
+	if !ok {
+		return datasource.NewError("publish event not supported by redis provider", nil)
+	}
+
+	log := p.logger.With(
+		zap.String("provider_id", conf.ProviderID()),
+		zap.String("method", "publish"),
+		zap.String("channel", pubConf.Channel),
+	)
+
+	if p.conn == nil {
+		return datasource.NewError("redis connection not initialized", nil)
+	}
+
+	if len(events) == 0 {
+		return nil
+	}
+
+	log.Debug("publish", zap.Int("event_count", len(events)))
+
+	var errs []error
+
+	for _, streamEvent := range events {
+		redisEvent, err := castToMutableEvent(streamEvent)
+		if err != nil {
+			errs = append(errs, err)
+			continue
+		}
+
+		data, dataErr := redisEvent.Data.MarshalJSON()
+		if dataErr != nil {
+			errs = append(errs, fmt.Errorf("error marshalling data: %w", dataErr))
+			continue
+		}
+
+		intCmd := p.conn.Publish(ctx, pubConf.Channel, data)
+		if intCmd.Err() != nil {
+			errs = append(errs, intCmd.Err())
+		}
+	}
+
+	// Produce metrics for all failed and successfully published events
+	successCount := len(events) - len(errs)
+	for range successCount {
+		p.streamMetricStore.Produce(ctx, metric.StreamsEvent{
+			ProviderId:          pubConf.ProviderID(),
+			StreamOperationName: redisPublish,
+			ProviderType:        metric.ProviderTypeRedis,
+			DestinationName:     pubConf.Channel,
+		})
+	}
+	for range len(errs) {
+		p.streamMetricStore.Produce(ctx, metric.StreamsEvent{
+			ProviderId:          pubConf.ProviderID(),
+			StreamOperationName: redisPublish,
+			ProviderType:        metric.ProviderTypeRedis,
+			ErrorType:           "publish_error",
+			DestinationName:     pubConf.Channel,
+		})
+	}
+
+	// Collect and return all errors if any occurred
+	if len(errs) > 0 {
+		combinedErr := errors.Join(errs...)
+		log.Error("publish errors", zap.Error(combinedErr), zap.Int("failed_count", len(errs)), zap.Int("total_count", len(events)))
+		return datasource.NewError(
+			fmt.Sprintf("error publishing %d/%d events to Redis PubSub channel %s", len(errs), len(events), pubConf.Channel), combinedErr,
+		)
+	}
+
+	return nil
+}
+
+func castToMutableEvent(event datasource.StreamEvent) (*MutableEvent, error) {
+	switch evt := event.(type) {
+	case *Event:
+		return evt.evt, nil
+	case *MutableEvent:
+		return evt, nil
+	default:
+		return nil, errors.New("invalid event type for Redis adapter")
+	}
+}

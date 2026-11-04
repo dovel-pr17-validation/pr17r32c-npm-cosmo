@@ -1,0 +1,45 @@
+name: Shared CI
+on:
+  pull_request:
+    paths:
+      - 'pnpm-lock.yaml'
+      - 'pnpm-workspace.yaml'
+      - '.github/workflows/shared-ci.yaml'
+      - 'composition/**/*'
+      - 'connect/**/*'
+      - 'shared/**/*'
+
+concurrency:
+  group: ${{github.workflow}}-${{github.head_ref}}
+  cancel-in-progress: true
+
+env:
+  CI: true
+  DO_NOT_TRACK: '1'
+
+jobs:
+  build_test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: pnpm/setup@84cb39b217b10273981911c288cd62326dc7c6d2 # v2
+        with:
+          cache: true
+          install: false
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Generate code
+        run: pnpm buf generate --template buf.ts.gen.yaml
+
+      - name: Check if git is not dirty after generating files
+        run: git diff --no-ext-diff --exit-code
+
+      - name: Build
+        run: pnpm run --filter ./connect --filter ./shared --filter ./connect --filter ./composition build
+
+      - name: Test
+        run: pnpm run --filter ./shared test

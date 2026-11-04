@@ -1,0 +1,43 @@
+{
+  "name": "@wundergraph/cosmo-connect",
+  "version": "0.163.0",
+  "description": "TypeScript Connect client for WunderGraph Cosmo",
+  "scripts": {
+    "build": "rm -rf dist && tsc"
+  },
+  "license": "Apache-2.0",
+  "publishConfig": {
+    "access": "public"
+  },
+  "repository": {
+    "url": "https://github.com/wundergraph/cosmo"
+  },
+  "files": [
+    "dist"
+  ],
+  "type": "module",
+  "exports": {
+    "./dist/*": {
+      "types": "./dist/*.d.ts",
+      "default": "./dist/*.js"
+    }
+  },
+  "dependencies": {
+    "@bufbuild/protobuf": "catalog:",
+    "@connectrpc/connect-query": "catalog:"
+  },
+  "devDependencies": {
+    "del-cli": "catalog:",
+    "typescript": "catalog:"
+  },
+  "keywords": [
+    "wundergraph",
+    "connect",
+    "client",
+    "wundergraph-cosmo"
+  ],
+  "author": {
+    "name": "WunderGraph Maintainers",
+    "email": "info@wundergraph.com"
+  }
+}

@@ -1,0 +1,120 @@
+import { existsSync } from 'node:fs';
+import { readFile } from 'node:fs/promises';
+import { create } from '@bufbuild/protobuf';
+import { Command, program } from 'commander';
+import { resolve } from 'pathe';
+import pc from 'picocolors';
+import { VCSContextSchema } from '@wundergraph/cosmo-connect/dist/platform/v1/platform_pb';
+import type { VCSContext } from '@wundergraph/cosmo-connect/dist/platform/v1/platform_pb';
+import { splitLabel } from '@wundergraph/cosmo-shared';
+import { config, getBaseHeaders } from '../../../core/config.js';
+import { BaseCommandOptions } from '../../../core/types/types.js';
+import { verifyGitHubIntegration } from '../../../github.js';
+import { handleCheckResult } from '../../../handle-check-result.js';
+import { limitMaxValue } from '../../../constants.js';
+
+export default (opts: BaseCommandOptions) => {
+  const command = new Command('check');
+  command.description(
+    'Checks for breaking changes and composition errors across all connected federated graphs, including feature flag compositions; also runs when the target is a feature subgraph.',
+  );
+  command.argument('<name>', 'The name of the subgraph on which the check operation is to be performed.');
+  command.option('-n, --namespace [string]', 'The namespace of the subgraph.');
+  command.option('--schema <path-to-schema>', 'The path of the new schema file.');
+  command.option('--delete', 'Run checks in case the subgraph is deleted.');
+  command.option(
+    '--skip-traffic-check',
+    'This will skip checking for client traffic and any breaking change will fail the run.',
+  );
+  command.option(
+    '--label [labels...]',
+    'The labels to apply to the subgraph. The labels are passed in the format <key>=<value> <key>=<value>.' +
+      ' This parameter is always ignored if the subgraph already exists.',
+    [],
+  );
+  command.option(
+    '--disable-resolvability-validation',
+    'This flag will disable the validation for whether all nodes of the federated graph are resolvable. Do NOT use unless troubleshooting.',
+  );
+  command.option('-l, --limit [number]', 'The amount of entries shown in the schema checks output.', '50');
+  command.option('-j, --json', 'Prints to the console in json format instead of table');
+  command.option('-o, --out [string]', 'Destination file for the json output.');
+
+  command.action(async (name, options) => {
+    let schemaFile;
+    let outFile;
+
+    if (!options.schema && !options.delete) {
+      program.error("required option '--schema <path-to-schema>' or '--delete' not specified.");
+    }
+
+    if (options.schema) {
+      schemaFile = resolve(options.schema);
+      if (!existsSync(schemaFile)) {
+        program.error(
+          pc.red(
+            pc.bold(`The schema file '${pc.bold(schemaFile)}' does not exist. Please check the path and try again.`),
+          ),
+        );
+      }
+    }
+
+    if (options.out) {
+      outFile = resolve(options.out);
+    }
+
+    const limit = Number(options.limit);
+    if (Number.isNaN(limit) || limit <= 0 || limit > limitMaxValue) {
+      program.error(
+        pc.red(`The limit must be a valid number between 1 and ${limitMaxValue}. Received: '${options.limit}'`),
+      );
+    }
+
+    const { gitInfo, ignoreErrorsDueToGitHubIntegration } = await verifyGitHubIntegration(opts.client);
+    let vcsContext: VCSContext | undefined;
+
+    if (config.checkAuthor || config.checkCommitSha || config.checkBranch) {
+      vcsContext = create(VCSContextSchema, {
+        author: config.checkAuthor,
+        commitSha: config.checkCommitSha,
+        branch: config.checkBranch,
+      });
+    }
+
+    // submit an empty schema in case of a delete check
+    const schema = schemaFile ? await readFile(schemaFile) : Buffer.from('');
+
+    const resp = await opts.client.platform.checkSubgraphSchema(
+      {
+        delete: options.delete,
+        disableResolvabilityValidation: options.disableResolvabilityValidation,
+        gitInfo,
+        namespace: options.namespace,
+        labels: options.label.map((label: string) => splitLabel(label)),
+        schema: new Uint8Array(schema),
+        skipTrafficCheck: options.skipTrafficCheck,
+        subgraphName: name,
+        limit,
+        vcsContext,
+      },
+      {
+        headers: getBaseHeaders(),
+      },
+    );
+
+    const success = await handleCheckResult({
+      response: resp,
+      rowLimit: limit,
+      shouldOutputJson: options.json || !!outFile,
+      outFile,
+    });
+
+    if (!success && !ignoreErrorsDueToGitHubIntegration) {
+      process.exitCode = 1;
+      // eslint-disable-next-line no-useless-return
+      return;
+    }
+  });
+
+  return command;
+};

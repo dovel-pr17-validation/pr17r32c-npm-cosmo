@@ -1,0 +1,36 @@
+node_modules
+
+# Package manager
+pnpm-lock.yaml
+*lock.json
+
+# Output
+gen
+dist
+connect/src/wg
+
+# Next.js build output
+.next
+out
+
+# Logs
+logs
+*.log
+
+# IDE
+.vscode
+.idea
+
+CHANGELOG.md
+CHANGELOG
+.husky
+**/testdata
+docs-website
+
+# Package-level .prettierignore files only apply when prettier runs from that package,
+# but the pre-commit hook runs from the root.
+composition/tests/unstaged-tests
+composition/coverage
+controlplane/migrations
+controlplane/src/templates/emails
+shared/test/__snapshots__

@@ -1,0 +1,32 @@
+node_modules
+/.bin/
+.husky/_
+.idea
+.vscode
+.zed
+**/*.env
+**/*.env.*
+!**/*.env.example
+.auto.tfvars
+# docker volumes
+**/_docker
+tsconfig.tsbuildinfo
+#lerna
+lerna-debug.log
+.DS_Store
+/demo/cmd/subscriptiontest/subscriptiontest
+.github/scripts/keycloak-22.0.4/**
+.github/scripts/keycloak-22.0.4.zip
+
+# Go workspace files
+go.work
+go.work.sum
+
+# Mise local config
+**/mise.local.toml
+
+# Serena
+.serena/
+
+# Claude Code
+.claude/worktrees/

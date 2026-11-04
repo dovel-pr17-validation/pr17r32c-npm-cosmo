@@ -1,0 +1,255 @@
+import crypto from 'node:crypto';
+import { readFile } from 'node:fs/promises';
+
+import { create } from '@bufbuild/protobuf';
+
+import { Command } from 'commander';
+import pc from 'picocolors';
+import cliProgress from 'cli-progress';
+
+import { EnumStatusCode } from '@wundergraph/cosmo-connect/dist/common/common_pb';
+import {
+  PersistedOperationSchema,
+  PublishedOperationStatus,
+} from '@wundergraph/cosmo-connect/dist/platform/v1/platform_pb';
+import type { PublishedOperation, PersistedOperation } from '@wundergraph/cosmo-connect/dist/platform/v1/platform_pb';
+
+import { BaseCommandOptions } from '../../../core/types/types.js';
+import { getBaseHeaders } from '../../../core/config.js';
+
+type OperationOutputStatus = 'created' | 'up_to_date' | 'conflict';
+
+interface OperationOutput {
+  hash: string;
+  contents: string;
+  status: OperationOutputStatus;
+  operationNames: string[];
+}
+
+const OPERATION_BATCH_SIZE = 100;
+
+const collect = (value: string, previous: string[]): string[] => {
+  return [...previous, value];
+};
+
+interface ApolloPersistedQueryManifest {
+  format: 'apollo-persisted-query-manifest';
+  version?: number;
+  operations?: [
+    {
+      id?: string;
+      name?: string;
+      type?: string;
+      body?: string;
+    },
+  ];
+}
+
+const parseApolloPersistedQueryManifest = (data: ApolloPersistedQueryManifest): PersistedOperation[] => {
+  if (data.version !== 1) {
+    throw new Error(`unknown Apollo persisted query manifest version ${data.version}`);
+  }
+  return (
+    data.operations
+      ?.filter((op) => op.id && op.body)
+      .map((op) => create(PersistedOperationSchema, { id: op.id, contents: op.body })) ?? []
+  );
+};
+
+const isRelayQueryMap = (data: any): boolean => {
+  // Check if all elements are 2-element arrays of strings. In that case
+  // the data is a relay query map
+  return (
+    Array.isArray(data) &&
+    data.length ===
+      data.filter((x) => Array.isArray(x) && x.length === 2 && typeof x[0] === 'string' && typeof x[1] === 'string')
+        .length
+  );
+};
+
+const parseRelayQueryMap = (data: Array<any>): PersistedOperation[] => {
+  return data.map((x: any) => create(PersistedOperationSchema, { id: x[0], contents: x[1] }));
+};
+
+const isRelayQueryObject = (data: any): boolean => {
+  return Object.keys(data).every((key) => typeof key === 'string' && typeof data[key] === 'string');
+};
+
+const parseRelayQueryObject = (data: any): PersistedOperation[] => {
+  return Object.keys(data).map((key) => create(PersistedOperationSchema, { id: key, contents: data[key] }));
+};
+
+const parseOperationsJson = (data: any): PersistedOperation[] => {
+  if (data.format === 'apollo-persisted-query-manifest') {
+    return parseApolloPersistedQueryManifest(data);
+  }
+  if (isRelayQueryMap(data)) {
+    return parseRelayQueryMap(data);
+  }
+  if (isRelayQueryObject(data)) {
+    return parseRelayQueryObject(data);
+  }
+  throw new Error(`unknown data format`);
+};
+
+const humanReadableOperationStatus = (status: PublishedOperationStatus): string => {
+  switch (status) {
+    case PublishedOperationStatus.CREATED: {
+      return 'created';
+    }
+    case PublishedOperationStatus.UP_TO_DATE: {
+      return 'up to date';
+    }
+    case PublishedOperationStatus.CONFLICT: {
+      return 'conflict';
+    }
+  }
+  throw new Error('unknown operation status');
+};
+
+const jsonOperationStatus = (status: PublishedOperationStatus): OperationOutputStatus => {
+  switch (status) {
+    case PublishedOperationStatus.CREATED: {
+      return 'created';
+    }
+    case PublishedOperationStatus.UP_TO_DATE: {
+      return 'up_to_date';
+    }
+    case PublishedOperationStatus.CONFLICT: {
+      return 'conflict';
+    }
+  }
+  throw new Error('unknown operation status');
+};
+
+export const parseOperations = (contents: string): PersistedOperation[] => {
+  let data: any;
+  try {
+    data = JSON.parse(contents);
+  } catch {
+    // Assume it's plain graphql
+    const id = crypto.createHash('sha256').update(contents).digest('hex');
+    return [create(PersistedOperationSchema, { id, contents })];
+  }
+  return parseOperationsJson(data);
+};
+
+export default (opts: BaseCommandOptions) => {
+  const command = new Command('push');
+  command.description('Pushes new operations to the registry');
+  command.argument(
+    '<graph_name>',
+    'The name of the federated graph or monograph on which the check operations are stored.',
+  );
+  command.requiredOption('-c, --client <client-name>', 'The client identifier to register the operations to');
+  command.requiredOption(
+    '-f, --file <file>',
+    'The file with the operations to push - supports .graphql, .gql and .json manifests from Apollo and Relay',
+    collect,
+    [],
+  );
+  command.option('-n, --namespace [string]', 'The namespace of the federated graph or monograph.');
+  command.option('-q, --quiet', 'Do not print any output', false);
+  command.option('--allow-conflicts', 'Exit with success even if there are conflicts', false);
+  command.option('--format <output-format>', 'Output format: supported ones are text and json', 'text');
+  command.action(async (name, options) => {
+    if (options.file.length === 0) {
+      command.error(pc.red('No files provided'));
+    }
+    const operations: PersistedOperation[] = [];
+    for (const file of options.file) {
+      const contents = await readFile(file, 'utf8');
+      try {
+        operations.push(...parseOperations(contents));
+      } catch (e: any) {
+        command.error(pc.red(`Failed to parse ${file}: ${e.message}`));
+      }
+    }
+
+    const publishedOperations: PublishedOperation[] = [];
+    const showProgress = !options.quiet && options.format === 'text' && operations.length > 0;
+    const bar = showProgress ? new cliProgress.SingleBar({}) : null;
+    try {
+      let processed = 0;
+      if (bar) {
+        bar.start(operations.length, 0);
+      }
+      for (let start = 0; start < operations.length; start += OPERATION_BATCH_SIZE) {
+        const chunk = operations.slice(start, start + OPERATION_BATCH_SIZE);
+        const result = await opts.client.platform.publishPersistedOperations(
+          {
+            fedGraphName: name,
+            namespace: options.namespace,
+            clientName: options.client,
+            operations: chunk,
+          },
+          { headers: getBaseHeaders() },
+        );
+        if (result.response?.code !== EnumStatusCode.OK) {
+          if (bar) {
+            bar.stop();
+          }
+          command.error(pc.red(`could not push operations: ${result.response?.details ?? 'unknown error'}`));
+        }
+        publishedOperations.push(...result.operations);
+        processed += chunk.length;
+        if (bar) {
+          bar.update(processed);
+        }
+      }
+    } finally {
+      if (bar) {
+        bar.stop();
+      }
+    }
+    if (options.quiet) {
+      return;
+    }
+    switch (options.format) {
+      case 'text': {
+        for (const op of publishedOperations) {
+          const message: string[] = [`pushed operation ${op.id}`];
+          if (op.hash !== op.id) {
+            message.push(`(${op.hash})`);
+          }
+          message.push(`(${humanReadableOperationStatus(op.status)})`);
+          const opNames = op.operationNames ?? [];
+          if (opNames.length > 0) {
+            message.push(`: ${opNames.join(', ')}`);
+          }
+          console.log(message.join(' '));
+        }
+        const upToDate = (publishedOperations?.filter((op) => op.status === PublishedOperationStatus.UP_TO_DATE) ?? [])
+          .length;
+        const created = (publishedOperations?.filter((op) => op.status === PublishedOperationStatus.CREATED) ?? [])
+          .length;
+        const conflict = (publishedOperations?.filter((op) => op.status === PublishedOperationStatus.CONFLICT) ?? [])
+          .length;
+        const color = conflict === 0 ? pc.green : pc.yellow;
+        console.log(
+          color(
+            `pushed ${publishedOperations?.length ?? 0} operations: ${created} created, ${upToDate} up to date, ${conflict} conflicts`,
+          ),
+        );
+        if (conflict > 0 && !options.allowConflicts) {
+          command.error(pc.red('conflicts detected'));
+        }
+        break;
+      }
+      case 'json': {
+        const returnedOperations: Record<string, OperationOutput> = {};
+        for (const [ii, op] of publishedOperations.entries()) {
+          returnedOperations[op.id] = {
+            hash: op.hash,
+            contents: operations[ii].contents,
+            status: jsonOperationStatus(op.status),
+            operationNames: op.operationNames ?? [],
+          };
+        }
+        console.log(JSON.stringify(returnedOperations, null, 2));
+        break;
+      }
+    }
+  });
+  return command;
+};

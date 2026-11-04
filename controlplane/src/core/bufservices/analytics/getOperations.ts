@@ -1,0 +1,275 @@
+import { create, type MessageInitShape } from '@bufbuild/protobuf';
+import { HandlerContext } from '@connectrpc/connect';
+import { EnumStatusCode } from '@wundergraph/cosmo-connect/dist/common/common_pb';
+import {
+  AnalyticsFilterSchema,
+  AnalyticsViewFilterOperator,
+  GetOperationsRequest,
+  GetOperationsResponse,
+  GetOperationsResponse_OperationSchema,
+  GetOperationsResponse_OperationType,
+  OperationsFetchBasedOn,
+  SortDirection,
+  type AnalyticsFilter,
+  type GetOperationsResponse_Operation,
+} from '@wundergraph/cosmo-connect/dist/platform/v1/platform_pb';
+import { buildASTSchema } from '@wundergraph/composition';
+import { parse } from 'graphql';
+import { deafultRangeInHoursForGetOperations } from '../../constants.js';
+import { MetricsRepository } from '../../repositories/analytics/MetricsRepository.js';
+import { UsageRepository } from '../../repositories/analytics/UsageRepository.js';
+import { CacheWarmerRepository } from '../../repositories/CacheWarmerRepository.js';
+import { FederatedGraphRepository } from '../../repositories/FederatedGraphRepository.js';
+import { OrganizationRepository } from '../../repositories/OrganizationRepository.js';
+import { SubgraphRepository } from '../../repositories/SubgraphRepository.js';
+import type { RouterOptions } from '../../routes.js';
+import SchemaGraphPruner from '../../services/SchemaGraphPruner.js';
+import { enrichLogger, getLogger, handleError, validateDateRanges } from '../../util.js';
+import type { PlainMessage } from '../../../types/index.js';
+import { UnauthorizedError } from '../../errors/errors.js';
+
+export function getOperations(
+  opts: RouterOptions,
+  req: GetOperationsRequest,
+  ctx: HandlerContext,
+): Promise<PlainMessage<GetOperationsResponse>> {
+  let logger = getLogger(ctx, opts.logger);
+
+  return handleError<PlainMessage<GetOperationsResponse>>(ctx, logger, async () => {
+    if (!opts.chClient) {
+      return {
+        response: {
+          code: EnumStatusCode.ERR_ANALYTICS_DISABLED,
+        },
+        operations: [],
+      };
+    }
+    const authContext = await opts.authenticator.authenticate(ctx.requestHeader);
+    logger = enrichLogger(ctx, logger, authContext);
+
+    const metricsRepo = new MetricsRepository(opts.chClient);
+    const cacheWarmerRepo = new CacheWarmerRepository(opts.chClient, opts.db);
+    const fedGraphRepo = new FederatedGraphRepository(logger, opts.db, authContext.organizationId);
+    const subgraphRepo = new SubgraphRepository(logger, opts.db, authContext.organizationId);
+    const usageRepo = new UsageRepository(opts.chClient);
+    const orgRepo = new OrganizationRepository(logger, opts.db, opts.billingDefaultPlanId);
+
+    const graph = await fedGraphRepo.byName(req.federatedGraphName, req.namespace);
+    if (!graph) {
+      return {
+        response: {
+          code: EnumStatusCode.ERR_NOT_FOUND,
+          details: `Federated graph '${req.federatedGraphName}' not found`,
+        },
+        operations: [],
+      };
+    }
+
+    if (!authContext.rbac.hasFederatedGraphReadAccess(graph)) {
+      throw new UnauthorizedError();
+    }
+
+    req.limit = req.limit ?? 100;
+    req.offset = req.offset ?? 0;
+    // Validate limit is within reasonable bounds
+    if (req.limit < 1 || req.limit > 1000) {
+      return {
+        response: {
+          code: EnumStatusCode.ERR,
+          details: 'Limit must be between 1 and 1000',
+        },
+        operations: [],
+      };
+    }
+
+    // Validate offset
+    if (req.offset < 0) {
+      return {
+        response: {
+          code: EnumStatusCode.ERR,
+          details: 'Offset must be >= 0',
+        },
+        operations: [],
+      };
+    }
+
+    // Convert enum to string for repository method, default to latency for backwards compatibility
+    const fetchBasedOn = req.fetchBasedOn ?? OperationsFetchBasedOn.LATENCY;
+    const sortField =
+      fetchBasedOn === OperationsFetchBasedOn.REQUESTS
+        ? 'requests'
+        : fetchBasedOn === OperationsFetchBasedOn.ERRORS
+          ? 'errors'
+          : 'latency'; // default to latency
+
+    const analyticsRetention = await orgRepo.getFeature({
+      organizationId: authContext.organizationId,
+      featureId: 'analytics-retention',
+    });
+
+    // Use provided range/dateRange or fall back to default
+    const inputRange = req.range ?? (req.dateRange ? undefined : deafultRangeInHoursForGetOperations);
+    const { range, dateRange } = validateDateRanges({
+      limit: analyticsRetention?.limit ?? 7,
+      range: inputRange,
+      dateRange: req.dateRange,
+    });
+
+    if (!range && !dateRange) {
+      return {
+        response: {
+          code: EnumStatusCode.ERR,
+          details: 'Invalid date range',
+        },
+        operations: [],
+      };
+    }
+
+    // Default includeContent to false if not explicitly set to true
+    const shouldIncludeContent = req.includeContent === true;
+
+    // Only fetch deprecated fields info when includeHasDeprecatedFields is true
+    const shouldIncludeHasDeprecatedFields = req.includeHasDeprecatedFields === true;
+    let deprecatedFields: { name: string; typeNames: string[] }[] = [];
+    if (shouldIncludeHasDeprecatedFields) {
+      try {
+        const latestValidSchemaVersion = await fedGraphRepo.getLatestValidSchemaVersion({
+          targetId: graph.targetId,
+        });
+        if (latestValidSchemaVersion && latestValidSchemaVersion.schema) {
+          const parsedSchema = parse(latestValidSchemaVersion.schema);
+          const newGraphQLSchema = buildASTSchema(parsedSchema, { assumeValid: true, assumeValidSDL: true });
+          const schemaGraphPruner = new SchemaGraphPruner(fedGraphRepo, subgraphRepo, usageRepo, newGraphQLSchema);
+          const deprecatedFieldsList = schemaGraphPruner.getAllFields({
+            schema: newGraphQLSchema,
+            onlyDeprecated: true,
+          });
+          deprecatedFields = deprecatedFieldsList.map((field) => ({
+            name: field.name,
+            typeNames: [field.typeName],
+          }));
+        }
+      } catch (error) {
+        logger.error(error, 'Error getting latest valid schema version');
+      }
+    }
+
+    const filters: AnalyticsFilter[] = [];
+    if (req.clientNames && req.clientNames.length > 0) {
+      // Create an EQUALS filter for each client name
+      // Multiple filters with the same field are combined with OR
+      for (const clientName of req.clientNames) {
+        filters.push(
+          create(AnalyticsFilterSchema, {
+            field: 'clientName',
+            operator: AnalyticsViewFilterOperator.EQUALS,
+            value: clientName,
+          }),
+        );
+      }
+    }
+
+    // Only get hasDeprecatedFields information when includeHasDeprecatedFields is true
+    // Only filter by deprecated fields when includeOperationsWithDeprecatedFieldsOnly is true
+    const sortDirectionStr =
+      req.sortDirection === SortDirection.ASC ? 'asc' : req.sortDirection === SortDirection.DESC ? 'desc' : 'desc'; // default to desc
+
+    const operations = await metricsRepo.getOperations({
+      range,
+      dateRange,
+      organizationId: authContext.organizationId,
+      graphId: graph.id,
+      filters,
+      limit: req.limit,
+      offset: req.offset,
+      fetchBasedOn: sortField,
+      sortDirection: sortDirectionStr,
+      searchQuery: req.searchQuery,
+      deprecatedFields,
+      includeOperationsWithDeprecatedFieldsOnly: req.includeOperationsWithDeprecatedFieldsOnly === true,
+    });
+
+    if (operations.length === 0) {
+      return {
+        response: {
+          code: EnumStatusCode.OK,
+        },
+        operations: [],
+      };
+    }
+
+    // Fetch operation content for the operations we'll return
+    let operationContentMap = new Map<string, string>();
+    if (shouldIncludeContent && operations.length > 0) {
+      const operationHashes = operations.map((op) => op.operationHash);
+      operationContentMap = await cacheWarmerRepo.getOperationContent({
+        operationHashes,
+        federatedGraphID: graph.id,
+        organizationID: authContext.organizationId,
+        rangeInHours: range,
+        dateRange,
+      });
+    }
+
+    const computedOperations: GetOperationsResponse_Operation[] = [];
+    for (const operation of operations) {
+      // Determine the metric based on fetchBasedOn
+      let metric: MessageInitShape<typeof GetOperationsResponse_OperationSchema>['metric'];
+      if (fetchBasedOn === OperationsFetchBasedOn.REQUESTS) {
+        metric = {
+          case: 'requestCount',
+          value: BigInt(operation.requestCount || 0),
+        };
+      } else if (fetchBasedOn === OperationsFetchBasedOn.ERRORS) {
+        metric = {
+          case: 'errorPercentage',
+          value: operation.errorPercentage || 0,
+        };
+      } else {
+        // Default to latency
+        metric = {
+          case: 'latency',
+          value: operation.latency,
+        };
+      }
+
+      computedOperations.push(
+        create(GetOperationsResponse_OperationSchema, {
+          name: operation.operationName,
+          hash: operation.operationHash,
+          type:
+            operation.operationType === 'query'
+              ? GetOperationsResponse_OperationType.QUERY
+              : operation.operationType === 'mutation'
+                ? GetOperationsResponse_OperationType.MUTATION
+                : GetOperationsResponse_OperationType.SUBSCRIPTION,
+          content: shouldIncludeContent ? operationContentMap.get(operation.operationHash) || '' : undefined,
+          hasDeprecatedFields: shouldIncludeHasDeprecatedFields ? operation.hasDeprecatedFields || false : undefined,
+          metric,
+        }),
+      );
+    }
+
+    let totalCount: number | undefined;
+    if (req.includeTotalCount) {
+      totalCount = await metricsRepo.getOperationsCount({
+        range,
+        dateRange,
+        organizationId: authContext.organizationId,
+        graphId: graph.id,
+        filters,
+        searchQuery: req.searchQuery,
+        deprecatedFields,
+        includeOperationsWithDeprecatedFieldsOnly: req.includeOperationsWithDeprecatedFieldsOnly === true,
+      });
+    }
+
+    return {
+      response: {
+        code: EnumStatusCode.OK,
+      },
+      operations: computedOperations,
+      totalCount: totalCount ? Number(totalCount) : undefined,
+    };
+  });
+}

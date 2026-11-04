@@ -1,0 +1,469 @@
+package core
+
+import (
+	"context"
+	"errors"
+	"fmt"
+	"net/http"
+	"slices"
+	"strings"
+	"sync/atomic"
+	"time"
+
+	cachedirective "github.com/pquerna/cachecontrol/cacheobject"
+
+	"github.com/wundergraph/cosmo/router/internal/expr"
+
+	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/codes"
+	otelmetric "go.opentelemetry.io/otel/metric"
+	sdktrace "go.opentelemetry.io/otel/sdk/trace"
+	semconv "go.opentelemetry.io/otel/semconv/v1.21.0"
+	"go.opentelemetry.io/otel/trace"
+	"go.uber.org/zap"
+
+	rcontext "github.com/wundergraph/cosmo/router/internal/context"
+	"github.com/wundergraph/cosmo/router/internal/requestlogger"
+	"github.com/wundergraph/cosmo/router/internal/traceclient"
+	"github.com/wundergraph/cosmo/router/internal/unique"
+	"github.com/wundergraph/cosmo/router/pkg/metric"
+	rotel "github.com/wundergraph/cosmo/router/pkg/otel"
+	rtrace "github.com/wundergraph/cosmo/router/pkg/trace"
+	"github.com/wundergraph/graphql-go-tools/v2/pkg/caching"
+	"github.com/wundergraph/graphql-go-tools/v2/pkg/engine/cache"
+	"github.com/wundergraph/graphql-go-tools/v2/pkg/engine/resolve"
+)
+
+var _ resolve.LoaderHooks = (*engineLoaderHooks)(nil)
+
+type multiError = interface{ Unwrap() []error }
+
+const (
+	EngineLoaderHooksScopeName    = "wundergraph/cosmo/router/engine/loader"
+	EngineLoaderHooksScopeVersion = "0.0.1"
+)
+
+// engineLoaderHooks implements resolve.LoaderHooks
+// It is used to trace and measure the performance of the engine loader
+type engineLoaderHooks struct {
+	tracer       trace.Tracer
+	metricStore  metric.Store
+	accessLogger *requestlogger.SubgraphAccessLogger
+
+	tracingAttributeExpressions   *attributeExpressions
+	telemetryAttributeExpressions *attributeExpressions
+	metricAttributeExpressions    *attributeExpressions
+
+	storeSubgraphResponseBody bool
+	headerPropagation         *HeaderPropagation
+	// responseCacheEnabled gates the cache status attribute: without a cache
+	// every fetch would read as a miss, which is noise rather than a signal.
+	responseCacheEnabled bool
+	// responseCacheMetrics is nil while the response cache metrics are not enabled.
+	responseCacheMetrics metric.ResponseCacheMetricStore
+}
+
+// fetchTypeNames names the types a fetch resolves fields of, for an entity
+// fetch the entity type. Several types are sorted and joined with a comma.
+func fetchTypeNames(rootFields []resolve.GraphCoordinate) string {
+	names := make([]string, 0, len(rootFields))
+	for _, field := range rootFields {
+		names = append(names, field.TypeName)
+	}
+	slices.Sort(names)
+	return strings.Join(slices.Compact(names), ",")
+}
+
+type engineLoaderHooksRequestContext struct {
+	startTime time.Time
+}
+
+func NewEngineRequestHooks(
+	metricStore metric.Store,
+	logger *requestlogger.SubgraphAccessLogger,
+	tracerProvider *sdktrace.TracerProvider,
+	tracingAttributes *attributeExpressions,
+	telemetryAttributes *attributeExpressions,
+	metricAttributes *attributeExpressions,
+	storeSubgraphResponseBody bool,
+	headerPropagation *HeaderPropagation,
+	responseCacheEnabled bool,
+	responseCacheMetrics metric.ResponseCacheMetricStore,
+) resolve.LoaderHooks {
+	var tracer trace.Tracer
+	if tracerProvider != nil {
+		tracer = tracerProvider.Tracer(
+			EngineLoaderHooksScopeName,
+			trace.WithInstrumentationVersion(EngineLoaderHooksScopeVersion),
+		)
+	} else {
+		tracer = otel.GetTracerProvider().Tracer(
+			EngineLoaderHooksScopeName,
+			trace.WithInstrumentationVersion(EngineLoaderHooksScopeVersion),
+		)
+	}
+
+	return &engineLoaderHooks{
+		tracer:                        tracer,
+		metricStore:                   metricStore,
+		telemetryAttributeExpressions: telemetryAttributes,
+		tracingAttributeExpressions:   tracingAttributes,
+		metricAttributeExpressions:    metricAttributes,
+		accessLogger:                  logger,
+		storeSubgraphResponseBody:     storeSubgraphResponseBody,
+		headerPropagation:             headerPropagation,
+		responseCacheEnabled:          responseCacheEnabled,
+		responseCacheMetrics:          responseCacheMetrics,
+	}
+}
+
+func (f *engineLoaderHooks) OnLoad(ctx context.Context, ds resolve.DataSourceInfo) context.Context {
+	if resolve.IsIntrospectionDataSource(ds.ID) {
+		return ctx
+	}
+
+	start := time.Now()
+
+	ctx = context.WithValue(ctx, rcontext.CurrentSubgraphContextKey{}, ds.Name)
+
+	duration := atomic.Int64{}
+	ctx = context.WithValue(ctx, rcontext.FetchTimingKey, &duration)
+	ctx = traceclient.WithClientTraceResults(ctx)
+
+	reqContext := getRequestContext(ctx)
+	if reqContext == nil {
+		return ctx
+	}
+
+	ctx, _ = f.tracer.Start(ctx, "Engine - Fetch",
+		trace.WithAttributes([]attribute.KeyValue{
+			rotel.WgSubgraphName.String(ds.Name),
+			rotel.WgSubgraphID.String(ds.ID),
+		}...),
+	)
+
+	return context.WithValue(ctx, rcontext.EngineLoaderHooksContextKey, &engineLoaderHooksRequestContext{
+		startTime: start,
+	})
+}
+
+// ttlToCacheControl renders the life a cache hit has left. A TTL of zero is
+// valid and means stale as of now, which is no-cache: max-age=0 would be dropped by
+// the most restrictive algorithm and let a longer default win instead.
+func ttlToCacheControl(ttl time.Duration, private bool) string {
+	maxAge := cache.ToDeltaSeconds(ttl)
+	if maxAge <= 0 {
+		if private {
+			return "private, " + noCache
+		}
+		// Still public: the merge only keeps public when every fetch says it.
+		return "public, " + noCache
+	}
+	if private {
+		return fmt.Sprintf("private, max-age=%d", maxAge)
+	}
+	cacheControl := cache.CacheControlResponse{Public: true, MaxAge: &maxAge}
+	return cacheControl.ToHeaderString()
+}
+
+// applyResponseCacheLifetime puts the TTL left on the cached entries a fetch was
+// served from into its Cache-Control, where the most restrictive algorithm reads it.
+func applyResponseCacheLifetime(headers http.Header, info *resolve.ResponseInfo) {
+	switch info.ResponseCache.Status {
+	case resolve.ResponseCacheStatusHit, resolve.ResponseCacheStatusPartialHit:
+	default:
+		return
+	}
+	cached := ttlToCacheControl(info.ResponseCacheTTL, info.ResponseCachePrivate)
+
+	origin := cacheControlValue(headers)
+	if origin == "" {
+		headers.Set(cacheControlKey, cached)
+		return
+	}
+	originDirectives, err := cachedirective.ParseResponseCacheControl(origin)
+	if err != nil {
+		return
+	}
+	cachedDirectives, err := cachedirective.ParseResponseCacheControl(cached)
+	if err != nil {
+		return
+	}
+	_, merged := createMostRestrictivePolicy([]*cachedirective.Object{
+		{RespDirectives: originDirectives},
+		{RespDirectives: cachedDirectives},
+	})
+	headers.Set(cacheControlKey, merged)
+}
+
+func (f *engineLoaderHooks) OnFinished(ctx context.Context, ds resolve.DataSourceInfo, responseInfo *resolve.ResponseInfo) {
+	if resolve.IsIntrospectionDataSource(ds.ID) {
+		return
+	}
+
+	if responseInfo == nil {
+		responseInfo = &resolve.ResponseInfo{}
+	}
+
+	// Apply response header rules for ALL fetches (primary, entity resolution,
+	// singleflight leaders and followers). Must run before the tracing/metrics
+	// early returns below, which may not pass for all fetch contexts.
+	if f.headerPropagation != nil {
+		if responseInfo.ResponseHeaders == nil {
+			responseInfo.ResponseHeaders = make(http.Header)
+		}
+		headers := responseInfo.ResponseHeaders
+		// The TTL is only for the most restrictive algorithm.
+		if f.headerPropagation.usesMostRestrictiveCacheControl(ds.Name) {
+			applyResponseCacheLifetime(headers, responseInfo)
+		}
+		f.headerPropagation.ApplyResponseHeaderRules(ctx, headers, ds.Name, responseInfo.StatusCode, responseInfo.Request)
+	}
+
+	reqContext := getRequestContext(ctx)
+
+	if reqContext == nil {
+		return
+	}
+
+	cacheStatus := responseInfo.ResponseCache.Status
+	storeDecision := responseInfo.ResponseCache.StoreDecision
+	var cacheStatusName, storeDecisionName, typeNames string
+	if f.responseCacheEnabled {
+		cacheStatusName = cacheStatus.String()
+		storeDecisionName = "empty"
+		if storeDecision != caching.StoreDecisionNone {
+			storeDecisionName = storeDecision.String()
+		}
+		typeNames = fetchTypeNames(responseInfo.RootFields)
+		reqContext.responseCache.record(cacheStatus)
+
+		if f.responseCacheMetrics != nil {
+			// No decision, no attribute, as on the span.
+			var metricDecision string
+			if storeDecision != caching.StoreDecisionNone {
+				metricDecision = storeDecisionName
+			}
+			f.responseCacheMetrics.MeasureFetch(ctx, ds.Name, typeNames, cacheStatusName, metricDecision)
+		}
+	}
+
+	hookCtx, ok := ctx.Value(rcontext.EngineLoaderHooksContextKey).(*engineLoaderHooksRequestContext)
+	if !ok {
+		return
+	}
+
+	latency := time.Since(hookCtx.startTime)
+
+	span := trace.SpanFromContext(ctx)
+	defer span.End()
+
+	commonAttrs := []attribute.KeyValue{
+		semconv.HTTPStatusCode(responseInfo.StatusCode),
+		rotel.WgSubgraphID.String(ds.ID),
+		rotel.WgSubgraphName.String(ds.Name),
+	}
+
+	if f.responseCacheEnabled {
+		commonAttrs = append(commonAttrs, rotel.WgResponseCacheStatus.String(cacheStatusName))
+	}
+
+	traceAttrs := *reqContext.telemetry.AcquireAttributes()
+	defer reqContext.telemetry.ReleaseAttributes(&traceAttrs)
+	traceAttrs = append(traceAttrs, reqContext.telemetry.traceAttrs...)
+	traceAttrs = append(traceAttrs, rotel.WgComponentName.String("engine-loader"))
+	traceAttrs = append(traceAttrs, commonAttrs...)
+
+	// On the span only, a metric of every fetch is not split by them.
+	if f.responseCacheEnabled {
+		if typeNames != "" {
+			traceAttrs = append(traceAttrs, rotel.WgEntityType.String(typeNames))
+		}
+		if storeDecision != caching.StoreDecisionNone {
+			traceAttrs = append(traceAttrs, rotel.WgResponseCacheStoreDecision.String(storeDecisionName))
+		}
+		if cacheStatus != resolve.ResponseCacheStatusNotCacheable {
+			lookup := float64(responseInfo.ResponseCache.LookupDuration) / float64(time.Millisecond)
+			traceAttrs = append(traceAttrs, rotel.WgResponseCacheLookupDurationMs.Float64(lookup))
+		}
+	}
+
+	exprCtx := reqContext.expressionContext.Clone()
+	exprCtx.Subgraph.Id = ds.ID
+	exprCtx.Subgraph.Name = ds.Name
+	exprCtx.Subgraph.Request.Error = WrapExprError(responseInfo.Err)
+	// Expose the start of the subgraph latency measurement (OnLoad) as a Unix epoch in
+	// milliseconds
+	exprCtx.Subgraph.Request.StartTime = hookCtx.startTime.UnixMilli()
+	// Expose the subgraph response headers (after response header rules have been applied above)
+	// so expressions can read them, e.g. subgraph.response.header.Get('X-Custom-Header'). A nil
+	// header map is safe; http.Header.Get returns an empty string.
+	exprCtx.Subgraph.Response.Header = expr.Headers{Header: responseInfo.ResponseHeaders}
+	exprCtx.Subgraph.Response.Cache.Status = cacheStatusName
+	exprCtx.Subgraph.Response.Cache.StoreDecision = storeDecisionName
+	exprCtx.Subgraph.Response.Cache.LookupDuration = responseInfo.ResponseCache.LookupDuration
+	exprCtx.Subgraph.Response.Cache.EntityType = typeNames
+
+	// Get trace results from the context, that were introduced in OnLoad
+	if results := traceclient.ClientTraceResultsFromContext(ctx); results != nil {
+		exprCtx.Subgraph.Request.ClientTrace = *results
+	}
+
+	if value := ctx.Value(rcontext.FetchTimingKey); value != nil {
+		if fetchTiming, ok := value.(*atomic.Int64); ok {
+			exprCtx.Subgraph.Request.ClientTrace.FetchDuration = time.Duration(fetchTiming.Load())
+		}
+	}
+
+	if f.storeSubgraphResponseBody {
+		exprCtx.Subgraph.Response.Body.Raw = responseInfo.GetResponseBody()
+	}
+
+	metricAttrs := *reqContext.telemetry.AcquireAttributes()
+	defer reqContext.telemetry.ReleaseAttributes(&metricAttrs)
+	metricAttrs = append(metricAttrs, reqContext.telemetry.metricAttrs...)
+	metricAttrs = append(metricAttrs, commonAttrs...)
+
+	addExpressions(AddExprOpts{
+		logger:      reqContext.logger,
+		expressions: f.telemetryAttributeExpressions,
+		key:         expr.BucketSubgraph,
+		currSpan:    span,
+		exprCtx:     exprCtx,
+		attrAddFunc: func(telemetryValues ...attribute.KeyValue) {
+			traceAttrs = append(traceAttrs, telemetryValues...)
+			metricAttrs = append(metricAttrs, telemetryValues...)
+		},
+	})
+	addExpressions(AddExprOpts{
+		logger:      reqContext.logger,
+		expressions: f.tracingAttributeExpressions,
+		key:         expr.BucketSubgraph,
+		currSpan:    span,
+		exprCtx:     exprCtx,
+		attrAddFunc: func(telemetryValues ...attribute.KeyValue) {
+			traceAttrs = append(traceAttrs, telemetryValues...)
+		},
+	})
+	addExpressions(AddExprOpts{
+		logger:      reqContext.logger,
+		expressions: f.metricAttributeExpressions,
+		key:         expr.BucketSubgraph,
+		exprCtx:     exprCtx,
+		attrAddFunc: func(telemetryValues ...attribute.KeyValue) {
+			metricAttrs = append(metricAttrs, telemetryValues...)
+		},
+	})
+
+	metricAddOpt := otelmetric.WithAttributeSet(attribute.NewSet(metricAttrs...))
+
+	if f.accessLogger != nil {
+		fields := []zap.Field{
+			zap.String("subgraph_name", ds.Name),
+			zap.String("subgraph_id", ds.ID),
+			zap.Int("status", responseInfo.StatusCode),
+			zap.Duration("latency", latency),
+		}
+		fields = append(fields, f.accessLogger.RequestFields(ctx, responseInfo, exprCtx)...)
+		path := ds.Name
+		if responseInfo.Request != nil && responseInfo.Request.URL != nil {
+			path = responseInfo.Request.URL.Path
+		}
+
+		// Only suppress the log. Error recording, metrics and span attributes still run below.
+		if f.accessLogger.ShouldLog(exprCtx, fields) {
+			if responseInfo.Err != nil && !errors.Is(responseInfo.Err, context.Canceled) {
+				f.accessLogger.Error(path, fields)
+			} else {
+				f.accessLogger.Info(path, fields)
+			}
+		}
+	}
+
+	measureSliceAttrs := reqContext.telemetry.metricSliceAttrs
+
+	if responseInfo.Err != nil {
+		// Client disconnections (context.Canceled) are not server-side errors.
+		// Record the error for observability but don't set the span status to ERROR
+		// and don't count it as a request error in metrics.
+		if errors.Is(responseInfo.Err, context.Canceled) {
+			span.RecordError(responseInfo.Err)
+		} else {
+			errorSliceAttrs := *reqContext.telemetry.AcquireAttributes()
+			defer reqContext.telemetry.ReleaseAttributes(&errorSliceAttrs)
+			errorSliceAttrs = append(errorSliceAttrs, reqContext.telemetry.metricSliceAttrs...)
+
+			measureSliceAttrs, metricAddOpt = f.recordFetchError(ctx, span, responseInfo.Err, reqContext, metricAttrs, metricAddOpt, errorSliceAttrs)
+		}
+	}
+
+	f.metricStore.MeasureRequestCount(ctx, measureSliceAttrs, metricAddOpt)
+	f.metricStore.MeasureLatency(ctx, latency, measureSliceAttrs, metricAddOpt)
+
+	span.SetAttributes(traceAttrs...)
+}
+
+// recordFetchError sets the span status to ERROR, extracts downstream error codes,
+// records the request error metric, and returns the enriched slice attributes and
+// measurement option for the caller to use in MeasureRequestCount/MeasureLatency.
+func (f *engineLoaderHooks) recordFetchError(
+	ctx context.Context,
+	span trace.Span,
+	fetchErr error,
+	reqContext *requestContext,
+	metricAttrs []attribute.KeyValue,
+	metricAddOpt otelmetric.AddOption,
+	metricSliceAttrs []attribute.KeyValue,
+) ([]attribute.KeyValue, otelmetric.MeasurementOption) {
+	rtrace.SetSanitizedSpanStatus(span, codes.Error, fetchErr.Error())
+	span.SetAttributes(rotel.WgRequestError.Bool(true))
+	span.RecordError(fetchErr)
+
+	// Extract downstream error codes from subgraph errors
+	var errorCodesAttr []string
+
+	if unwrapped, ok := fetchErr.(multiError); ok {
+		for _, e := range unwrapped.Unwrap() {
+			var subgraphError *resolve.SubgraphError
+			if !errors.As(e, &subgraphError) {
+				continue
+			}
+
+			for i, downstreamError := range subgraphError.DownstreamErrors {
+				var errorCode string
+				if downstreamError.Extensions != nil {
+					if value := downstreamError.Extensions.Get("code"); value != nil {
+						errorCode = string(value.GetStringBytes())
+					}
+				}
+
+				if errorCode == "" {
+					continue
+				}
+
+				errorCodesAttr = append(errorCodesAttr, errorCode)
+				span.AddEvent(fmt.Sprintf("Downstream error %d", i+1),
+					trace.WithAttributes(
+						rotel.WgSubgraphErrorExtendedCode.String(errorCode),
+						rotel.WgSubgraphErrorMessage.String(downstreamError.Message),
+					),
+				)
+			}
+		}
+
+		errorCodesAttr = unique.SliceElements(errorCodesAttr)
+		slices.Sort(errorCodesAttr)
+	}
+
+	if v, ok := reqContext.telemetry.metricSetAttrs[ContextFieldGraphQLErrorCodes]; ok && len(errorCodesAttr) > 0 {
+		metricSliceAttrs = append(metricSliceAttrs, attribute.StringSlice(v, errorCodesAttr))
+	}
+
+	f.metricStore.MeasureRequestError(ctx, metricSliceAttrs, metricAddOpt)
+
+	metricAttrs = append(metricAttrs, rotel.WgRequestError.Bool(true))
+	attrOpt := otelmetric.WithAttributeSet(attribute.NewSet(metricAttrs...))
+
+	return metricSliceAttrs, attrOpt
+}

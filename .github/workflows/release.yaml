@@ -1,0 +1,103 @@
+name: Release
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  id-token: write
+
+concurrency:
+  group: Production
+  cancel-in-progress: false
+
+env:
+  CI: true
+  DO_NOT_TRACK: '1'
+
+jobs:
+  stable-version:
+    # https://docs.npmjs.com/generating-provenance-statements#publishing-packages-with-provenance-via-github-actions
+    permissions:
+      id-token: write
+    timeout-minutes: 30
+    runs-on: ubuntu-latest
+    steps:
+      - name: Authenticate
+        id: app-token
+        uses: actions/create-github-app-token@v3
+        with:
+          client-id: ${{ secrets.APP_CLIENT_ID }}
+          private-key: ${{ secrets.APP_PRIVATE_KEY }}
+          repositories: |
+            cosmo
+          permission-actions: write
+          permission-contents: write
+          permission-workflows: write
+
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          token: ${{ steps.app-token.outputs.token }}
+
+      - uses: pnpm/setup@84cb39b217b10273981911c288cd62326dc7c6d2 # v2
+        with:
+          cache: true
+          install: false
+
+      - name: Install
+        run: pnpm install --frozen-lockfile
+
+      - name: Generate code
+        run: pnpm buf generate --template buf.ts.gen.yaml
+
+      - name: Check if git is not dirty after generating files
+        run: git diff --no-ext-diff --exit-code
+
+        # This will generate the next release in dry run mode, which still reads
+        # commits and bumps CHANGELOG.md and package.json files, but does not
+        # publish anything.
+      - name: Generate next version (dry-run)
+        run: pnpm lerna version --ignore-scripts --dry-run --yes
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+        # Build with the versions from the dry-run
+      - name: Build
+        run: pnpm run --filter='!./studio' build
+
+        # Reset dry-run changes to let publish do the real thing for the release
+      - name: Revert changes
+        run: git reset --hard
+
+        # Split from publish so a failed publish can be re-run: the combined
+        # `lerna publish` finds its own tags on a second run and publishes nothing.
+      - name: Version, tag & create Github Releases
+        run: |
+          git config --global user.email "bot@wundergraph.com"
+          git config --global user.name "hardworker-bot"
+          pnpm release:version
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+
+      - name: Publish packages to npm
+        run: |
+          # Retried on intermittent sigstore 409s. `from-package` publishes only
+          # what the registry is missing, so repeating is safe. The reset drops
+          # the temporary gitHead lerna writes into the manifests before
+          # publishing and only cleans up on success; left behind, it fails the
+          # next attempt's working tree check instead.
+          for attempt in 1 2 3; do
+            if pnpm release:publish; then
+              exit 0
+            fi
+            git reset --hard
+            if [ "$attempt" -lt 3 ]; then
+              echo "::warning::npm publish attempt $attempt failed, retrying in 20s"
+              sleep 20
+            fi
+          done
+          echo "npm publish still failing after 3 attempts" >&2
+          exit 1
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}

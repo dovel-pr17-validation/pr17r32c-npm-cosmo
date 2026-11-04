@@ -1,0 +1,208 @@
+{
+  "version": 1,
+  "service": "CoursesService",
+  "operationMappings": [
+    {
+      "type": "OPERATION_TYPE_QUERY",
+      "original": "courses",
+      "mapped": "QueryCourses",
+      "request": "QueryCoursesRequest",
+      "response": "QueryCoursesResponse"
+    },
+    {
+      "type": "OPERATION_TYPE_QUERY",
+      "original": "course",
+      "mapped": "QueryCourse",
+      "request": "QueryCourseRequest",
+      "response": "QueryCourseResponse"
+    },
+    {
+      "type": "OPERATION_TYPE_QUERY",
+      "original": "lessons",
+      "mapped": "QueryLessons",
+      "request": "QueryLessonsRequest",
+      "response": "QueryLessonsResponse"
+    },
+    {
+      "type": "OPERATION_TYPE_QUERY",
+      "original": "killCoursesService",
+      "mapped": "QueryKillCoursesService",
+      "request": "QueryKillCoursesServiceRequest",
+      "response": "QueryKillCoursesServiceResponse"
+    },
+    {
+      "type": "OPERATION_TYPE_QUERY",
+      "original": "throwErrorCourses",
+      "mapped": "QueryThrowErrorCourses",
+      "request": "QueryThrowErrorCoursesRequest",
+      "response": "QueryThrowErrorCoursesResponse"
+    },
+    {
+      "type": "OPERATION_TYPE_MUTATION",
+      "original": "addCourse",
+      "mapped": "MutationAddCourse",
+      "request": "MutationAddCourseRequest",
+      "response": "MutationAddCourseResponse"
+    },
+    {
+      "type": "OPERATION_TYPE_MUTATION",
+      "original": "addLesson",
+      "mapped": "MutationAddLesson",
+      "request": "MutationAddLessonRequest",
+      "response": "MutationAddLessonResponse"
+    }
+  ],
+  "entityMappings": [
+    {
+      "typeName": "Employee",
+      "kind": "entity",
+      "key": "id",
+      "rpc": "LookupEmployeeById",
+      "request": "LookupEmployeeByIdRequest",
+      "response": "LookupEmployeeByIdResponse"
+    }
+  ],
+  "typeFieldMappings": [
+    {
+      "type": "Query",
+      "fieldMappings": [
+        {
+          "original": "courses",
+          "mapped": "courses"
+        },
+        {
+          "original": "course",
+          "mapped": "course",
+          "argumentMappings": [
+            {
+              "original": "id",
+              "mapped": "id"
+            }
+          ]
+        },
+        {
+          "original": "lessons",
+          "mapped": "lessons",
+          "argumentMappings": [
+            {
+              "original": "courseId",
+              "mapped": "course_id"
+            }
+          ]
+        },
+        {
+          "original": "killCoursesService",
+          "mapped": "kill_courses_service"
+        },
+        {
+          "original": "throwErrorCourses",
+          "mapped": "throw_error_courses"
+        }
+      ]
+    },
+    {
+      "type": "Mutation",
+      "fieldMappings": [
+        {
+          "original": "addCourse",
+          "mapped": "add_course",
+          "argumentMappings": [
+            {
+              "original": "title",
+              "mapped": "title"
+            },
+            {
+              "original": "instructorId",
+              "mapped": "instructor_id"
+            }
+          ]
+        },
+        {
+          "original": "addLesson",
+          "mapped": "add_lesson",
+          "argumentMappings": [
+            {
+              "original": "courseId",
+              "mapped": "course_id"
+            },
+            {
+              "original": "title",
+              "mapped": "title"
+            },
+            {
+              "original": "order",
+              "mapped": "order"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "type": "Course",
+      "fieldMappings": [
+        {
+          "original": "id",
+          "mapped": "id"
+        },
+        {
+          "original": "title",
+          "mapped": "title"
+        },
+        {
+          "original": "description",
+          "mapped": "description"
+        },
+        {
+          "original": "instructor",
+          "mapped": "instructor"
+        },
+        {
+          "original": "lessons",
+          "mapped": "lessons"
+        }
+      ]
+    },
+    {
+      "type": "Lesson",
+      "fieldMappings": [
+        {
+          "original": "id",
+          "mapped": "id"
+        },
+        {
+          "original": "courseId",
+          "mapped": "course_id"
+        },
+        {
+          "original": "title",
+          "mapped": "title"
+        },
+        {
+          "original": "description",
+          "mapped": "description"
+        },
+        {
+          "original": "order",
+          "mapped": "order"
+        },
+        {
+          "original": "course",
+          "mapped": "course"
+        }
+      ]
+    },
+    {
+      "type": "Employee",
+      "fieldMappings": [
+        {
+          "original": "id",
+          "mapped": "id"
+        },
+        {
+          "original": "taughtCourses",
+          "mapped": "taught_courses"
+        }
+      ]
+    }
+  ]
+}
